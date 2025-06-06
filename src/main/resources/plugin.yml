@@ -1,0 +1,13 @@
+name: UnityLauncher
+version: '${project.version}'
+main: com.frammy.unitylauncher.UnityLauncher
+api-version: 1.20
+authors: [ frammy, NimsTail ]
+description: Connects with our Unity launcher
+prefix: Unity Launcher
+website: farlands.me
+depend: [BlueMap]
+commands:
+  unityLauncher:
+    aliases: ul
+    description: Для связи с нашим лаунчером
