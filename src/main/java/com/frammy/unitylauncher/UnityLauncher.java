@@ -84,8 +84,10 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
    // private final Map<Location, SignState> signStates = new HashMap<>();
     public Map<Location, SignVariables> genericSignList = new HashMap<>();
     enum SignState {
-        MENU,         // скроллим список
-        ACTION_READY  // ждём клик для выполнения действия
+        ATM_MENU,         // скроллим список
+        ATM_ACTION_READY,
+        SHOP_UNDEFINED,
+        SHOP_DEFINED// ждём клик для выполнения действия
     }
     enum SignCategory {
         ATM,
@@ -197,6 +199,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         loadSignData();
         //loadShopData();
         loadZoneData();
+        zoneManager.loadZonesFromConfig();
 
         //Для help комманды
         commandCategories.add("Авторизация");
@@ -217,7 +220,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         helpManager.addCommand("/ul group LIST/SET/PREFIX", "Настраивает группы прав для государства", "Страна");
         helpManager.addCommand("/ul shop create НАЗВАНИЕ", "Создание торговой точки", "Финансы");
 
-        FileConfiguration config = YamlConfiguration.loadConfiguration(new File(getDataFolder(), "signs.yml"));
+        FileConfiguration config = YamlConfiguration.loadConfiguration(new File(getDataFolder(), "signData.yml"));
         restoreScrollingSignsFromFile(config);
         instance = this;
     }
@@ -228,6 +231,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     @Override
     public void onDisable() {
         saveSignData();
+        zoneManager.saveZonesToConfig();
         if (webSocketManager != null) {
             webSocketManager.disconnectAll();
         }
@@ -423,46 +427,76 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         Location loc = sign.getLocation();
 
         if (e.getAction() == Action.LEFT_CLICK_BLOCK && b.getState() instanceof Sign) {
-            if (genericSignList.get(sign.getLocation()) == null) return;
-            if (!genericSignList.get(sign.getLocation()).getConfigurtable()) return;
-            if (p.isSneaking()) {
-                if (!sign.getLine(2).isEmpty() && !sign.getLine(3).isEmpty()) {
-                    double amount, price;
-                    try {
-                       amount = Double.parseDouble(sign.getLine(3));
-                       price = Double.parseDouble(sign.getLine(2));
+            SignVariables signVariables = genericSignList.get(sign.getLocation());
 
+            if (signVariables == null) return;
+
+            //
+            //Some purchase action here
+            //
+
+            if (!genericSignList.get(loc).getOwnerName().equalsIgnoreCase(p.getName())) return;
+
+            if (signVariables.getSignState() == SignState.SHOP_UNDEFINED) {
+                if (p.isSneaking()) {
+                    if (!sign.getLine(2).isEmpty() && !sign.getLine(3).isEmpty()) {
+                        double price;
+                        int amount;
+                        try {
+                            amount = Integer.parseInt(ChatColor.stripColor(sign.getLine(2)));
+                            price = Double.parseDouble(ChatColor.stripColor(sign.getLine(3)));
+
+                        } catch (NumberFormatException exc) {
+                            p.sendMessage(ChatColor.RED + "3 и 4 строки должны быть числами.");
+                            sign.setLine(2, "<Количество>");
+                            sign.setLine(3, "<Цена>");
+                            sign.update();
+                            return;
+                        }
+                        List<String> signTexts = genericSignList.get(sign.getLocation()).getSignText();
+                        String line3 = "Цена: " + ChatColor.GREEN + String.valueOf(price);
+                        String line2 = "Кол-во: " + ChatColor.YELLOW + String.valueOf(amount);
+
+                        signVariables.setSignText(Arrays.asList(signTexts.get(0), signTexts.get(1), line2, line3));
+                        sign.setLine(2, line2);
+                        sign.setLine(3, line3);
+                        sign.update();
+                        signVariables.setSignState(SignState.SHOP_DEFINED);
+                        String markerID = "marker_" + UUID.randomUUID();
+                        signVariables.setMarkerID(markerID);
+                        addBlueMapMarker(markerID, sign.getLocation(), "shops", "Торговые точки", "point_shop", null, p);
+                        p.sendMessage(ChatColor.GREEN + "Табличка товара подтверждена.");
                     }
-                    catch (NumberFormatException exc) {
-                        p.sendMessage(ChatColor.RED + "3 и 4 строки должны быть десятичными числами.");
-                        sign.setLine(2, "");
-                        sign.setLine(3, "");
-                        return;
-                    }
-                    List<String> signTexts = genericSignList.get(sign.getLocation()).getSignText();
-                    genericSignList.get(sign.getLocation()).setSignText(Arrays.asList(signTexts.get(0), signTexts.get(1), String.valueOf(price), String.valueOf(amount)));
-                   // saveZoneAndShopData(p,null, genericSignList.get(sign.getLocation()).getSignText(), sign.getLocation());
-                    p.sendMessage(ChatColor.GREEN + "Табличка товара подтверждена и теперь функционирует.");
-
-
+                    return;
                 }
+                String secondLine = ChatColor.stripColor(sign.getLine(1)).toLowerCase();
 
-                return;
+                if (signVariables.getSignCategory() == SignCategory.SHOP_SOURCE) {
+                    if (!secondLine.isEmpty()) {
+                        signSelectionMap.put(p, b); // добавляем игрока в режим выбора
+                        p.sendMessage(ChatColor.YELLOW + "Теперь открой нужное хранилище, чтобы выбрать его.");
+                        e.setCancelled(true); // предотвращаем случайный удар по табличке
+                    }
+                }
             }
-            String secondLine = ChatColor.stripColor(sign.getLine(1)).toLowerCase();
+            if (signVariables.getSignState() == SignState.SHOP_DEFINED) {
+                if (p.isSneaking()) {
+                    List<String> text = signVariables.getSignText();
+                    String line2 = text.get(2).replace("Кол-во: ", "");
+                    String line3 = text.get(3).replace("Цена: ", "");
+                    signVariables.setSignText(Arrays.asList(text.get(0), text.get(1), line2, line3));
+                    sign.setLine(2, line2);
+                    sign.setLine(3, line3);
+                    sign.update();
 
-
-            if (genericSignList.get(sign.getLocation()).getSignCategory() == SignCategory.SHOP_SOURCE) {
-                if (!secondLine.isEmpty()) {
-                    signSelectionMap.put(p, b); // добавляем игрока в режим выбора
-                    p.sendMessage(ChatColor.YELLOW + "Теперь открой нужное хранилище, чтобы выбрать его.");
-                    e.setCancelled(true); // предотвращаем случайный удар по табличке
+                    p.sendMessage(ChatColor.GRAY + "Табличка переключена в режим редактирования.");
+                    genericSignList.get(loc).setSignState(SignState.SHOP_UNDEFINED);
                 }
             }
         }
 
         SignVariables vars = genericSignList.get(loc);
-        SignState state = (vars != null) ? vars.getSignState() : SignState.MENU;
+        SignState state = (vars != null) ? vars.getSignState() : SignState.ATM_MENU;
         // RIGHT_CLICK → Пауза прокрутки
         if (action == Action.RIGHT_CLICK_BLOCK) {
             pauseScrolling(loc);
@@ -476,14 +510,14 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             if (p.getItemInHand() == null || p.getItemInHand().getType() == Material.AIR) {
                 e.setCancelled(true);
                 setupSign(loc, sign, p);
-                genericSignList.get(loc).setSignState(SignState.MENU);
+                genericSignList.get(loc).setSignState(SignState.ATM_MENU);
                 scheduleSignReset(loc);
                 return;
             }
         }
 
         // ===== В режиме MENU (скроллим) =====
-        if (state == SignState.MENU) {
+        if (state == SignState.ATM_MENU) {
             List<String> items = signPages.get(loc);
             if (items == null || items.size() <= 3) return;
 
@@ -501,7 +535,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                 if (selectedIndex < items.size()) {
                     String key = items.get(selectedIndex);
                     SignVariables svars = genericSignList.get(loc);
-                    if (svars == null || svars.getSignState() != SignState.ACTION_READY) {
+                    if (svars == null || svars.getSignState() != SignState.ATM_ACTION_READY) {
                         if (actions.containsKey(key)) {
                             actions.get(key).run(); // <-- Заменит табличку и установит ACTION_READY
                             p.sendMessage(ChatColor.GRAY + "Вы выбрали: " + key);
@@ -514,18 +548,16 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         }
 
         // ===== В режиме ACTION_READY =====
-        if (state == SignState.ACTION_READY) {
+        if (state == SignState.ATM_ACTION_READY) {
             Runnable signAction = signClickActions.remove(loc);
             if (signAction != null) {
                 e.setCancelled(true);
                 signAction.run();
             }
             // Возврат к обычному режиму
-            genericSignList.get(loc).setSignState(SignState.MENU);
+            genericSignList.get(loc).setSignState(SignState.ATM_MENU);
             scheduleSignReset(loc);
         }
-
-
     }
     @EventHandler
     public void onScroll(PlayerItemHeldEvent e) {
@@ -590,7 +622,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             sign.setLine(2, "<Источник>");
             sign.setLine(3, "<Сумма>");
             sign.update();
-            genericSignList.get(loc).setSignState(SignState.ACTION_READY);
+            genericSignList.get(loc).setSignState(SignState.ATM_ACTION_READY);
             signClickActions.put(sign.getLocation(), () -> {
                 Sign updatedSign = (Sign) sign.getBlock().getState();
                 double amount;
@@ -636,7 +668,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             sign.setLine(2, "<Получатель>");
             sign.setLine(3, "<Сумма>");
             sign.update();
-            genericSignList.get(loc).setSignState(SignState.ACTION_READY);
+            genericSignList.get(loc).setSignState(SignState.ATM_ACTION_READY);
             signClickActions.put(sign.getLocation(), () -> {
                 Sign updatedSign = (Sign) sign.getBlock().getState();
                 double amount;
@@ -762,23 +794,30 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
    }
     public void restoreScrollingSignsFromFile(FileConfiguration config) {
-        ConfigurationSection section = config.getConfigurationSection("");
-        if (section == null) return;
+        ConfigurationSection signsSection = config.getConfigurationSection("signs");
+        if (signsSection == null) return;
 
-        for (String key : section.getKeys(false)) {
-            ConfigurationSection signSection = section.getConfigurationSection(key);
+        for (String key : signsSection.getKeys(false)) {
+            ConfigurationSection signSection = signsSection.getConfigurationSection(key);
             if (signSection == null) continue;
 
-            Location loc = signSection.getLocation("location");
-            if (loc == null) continue;
+            // Получаем координаты
+            String worldName = signSection.getString("location.world");
+            int x = signSection.getInt("location.x");
+            int y = signSection.getInt("location.y");
+            int z = signSection.getInt("location.z");
 
+            World world = Bukkit.getWorld(worldName);
+            if (world == null) continue;
+
+            Location loc = new Location(world, x, y, z);
             Block block = loc.getBlock();
             if (!(block.getState() instanceof Sign)) continue;
 
             Sign sign = (Sign) block.getState();
 
-            // Укажи здесь нужные строки для скроллинга, например: 0 строка
-            int[] scrollLines = new int[] {0}; // или можешь извлекать это из YAML если хочешь
+            // Получаем индексы строк, которые нужно скроллить
+            List<Integer> scrollLines = signSection.getIntegerList("scrollLines");
             Map<Integer, String> originalLines = new HashMap<>();
 
             for (int lineIndex : scrollLines) {
@@ -862,53 +901,58 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         String[] oldLines = sign.getLines();
         String[] newLines = e.getLines();
 
-        if (!e.getBlock().getType().toString().contains("HANGING")) {
-            if (!genericSignList.containsKey(sign.getLocation())) return;
+        if (genericSignList.containsKey(sign.getLocation())) {
+            if (genericSignList.get(sign.getLocation()).getSignState() == SignState.SHOP_DEFINED) {
+                p.sendMessage(ChatColor.RED + "Для редактирования таблички присядь и нажми ЛКМ.");
+                e.setCancelled(true);
+                return;
+            }
+        }
 
+        if (!e.getBlock().getType().toString().contains("HANGING")) {
             if (genericSignList.get(sign.getLocation()) != null) {
                 resumeScrolling(sign.getLocation());
             }
+            if (genericSignList.containsKey(sign.getLocation())) {
+                if (genericSignList.get(sign.getLocation()).getOwnerName().equals(p.getName())) {
+                    if (!oldLines[0].equals(newLines[0])) {
+                        p.sendMessage(ChatColor.RED + "Изменение первой строки невозможно. "  + ChatColor.GRAY + "\nДля изменения цели таблички сломайте её и установите с новыми параметрами.");
+                        e.setCancelled(true);
+                        return;
+                    }
+                } else {
+                    p.sendMessage(ChatColor.RED + "Ты не являешься владельцем этого магазина!");
+                    return;
+                }
+            }
 
-          //  if (e.getLine(0).equalsIgnoreCase(":wd") || e.getLine(0).equalsIgnoreCase(":withdraw") || e.getLine(0).equalsIgnoreCase(":снятие")) {
-         //       p.sendMessage(ChatColor.GRAY + "Банкомат переключён на снятие наличных.");
-         //   }
             if (e.getLine(0).equalsIgnoreCase("shop") || e.getLine(0).equalsIgnoreCase("магазин")) {
-                String label = isSignWithinMarker(sign.getLocation());
+                ExtrudeMarker marker = isSignWithinMarker(sign.getLocation());
+                String label = marker.getLabel();
                 if (label.isEmpty()) {
                     e.setCancelled(true);
                     p.sendMessage(ChatColor.RED + "Табличку о продаже можно ставить только в пределах магазина!");
                 } else {
-                    File shopFile = new File(getDataFolder().getParentFile(), "UnityLauncher/signData.yml");
-                    this.shopConfig = YamlConfiguration.loadConfiguration(shopFile);
-                    ConfigurationSection shopSection = shopConfig.getConfigurationSection("shops." + label);
-                    if (!shopSection.getString("owner").equalsIgnoreCase(p.getName())) {
-                        e.setCancelled(true);
-                        p.sendMessage(ChatColor.RED + "Ты не являешься владельцем этого магазина!");
-                    }
-
+                  //  if (zoneManager.getZoneOwner("shop", marker.get)) {}
                     String line0 = "Торговая точка [ " + label + " ]";
-
                     e.setLine(0, line0);
                     Map<Integer, String> linesToScroll = new HashMap<>();
                     linesToScroll.put(0, line0);
 
-
                     switch (e.getLine(1)) {
                         case "source":
                         case "источник":
-                           // configuringSigns.put(sign.getLocation(), "source");
-                            Block nearestStorage = findNearestContainer(sign.getLocation(), 5);
+                            Block nearestStorage = findNearestContainer(sign.getLocation(), 5, p);
+                            makeSignScrollingLines(e.getBlock().getLocation(), linesToScroll, 6, 13);
                             if (nearestStorage != null) {
                                 Location loc = nearestStorage.getLocation();
                                 String line1 = loc.getBlockX() + " " + loc.getBlockY() + " " + loc.getBlockZ();
                                 e.setLine(1, line1);
-                             //   linesToScroll.put(1, line1);
-                                makeSignScrollingLines(e.getBlock().getLocation(), linesToScroll, 6, 13);
                                 e.setLine(2, "<Количество>");
                                 e.setLine(3, "<Цена>");
                                 p.sendMessage(ChatColor.GRAY + "Координаты источника установлены.\n" +
                                         "Чтобы выбрать другое хранилище — кликните ЛКМ по табличке, затем откройте нужное хранилище.");//
-                                genericSignList.put(sign.getLocation(), new SignVariables(p.getName(), Arrays.asList(line0, line1, "<Количество>", "<Цена>"), List.of(0), true, false, SignCategory.SHOP_SOURCE, null, null));
+                                genericSignList.put(sign.getLocation(), new SignVariables(p.getName(), Arrays.asList(line0, line1, "<Количество>", "<Цена>"), List.of(0), true, false, SignCategory.SHOP_SOURCE, SignState.SHOP_UNDEFINED, null));
                             } else {
                                 e.setCancelled(true);
                                 p.sendMessage(ChatColor.RED + "Поблизости не найдено ни одного хранилища!");
@@ -940,56 +984,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
                 }
             }
-
-            if (genericSignList.containsKey(sign.getLocation())) {
-
-                if (!oldLines[0].equals(newLines[0])) {
-                    e.setCancelled(true);
-                    p.sendMessage(ChatColor.RED + "Изменение первой строки невозможно. "  + ChatColor.GRAY + "\nДля изменения цели таблички сломайте её и установите с новыми параметрами.");
-                }
-                if (!genericSignList.get(sign.getLocation()).getOwnerName().equals(p.getName())) {
-                    // Если никнейм игрока не совпадает с тем, кто установил табличку
-                    if (!oldLines[0].equals(newLines[0]) || !oldLines[1].equals(newLines[1])) {
-                        e.setCancelled(true);
-                        p.sendMessage(ChatColor.RED + "Вы не можете изменять эту табличку, так как её установил другой игрок.");
-                        return;
-                    }
-                }
-
-                // Проверка изменения второй строки таблички "ATM"
-               /* if (oldLines[0].equalsIgnoreCase("ATM") && !oldLines[1].equals(newLines[1])) {
-                    // Если строка изменилась, проверяем права игрока
-                    if (!hasPermissionContaining(p, "0")) {
-                        // Если у игрока нет права на изменение второй строки, отменяем событие
-                        e.setCancelled(true);
-                        p.sendMessage(ChatColor.RED + "У вас нет прав на изменение второй строки ATM.");
-                        return;
-                    }
-                }
-
-                // Выполняем логику изменения, если ID таблички найден и права совпадают
-                if (!e.getLine(0).equalsIgnoreCase("ATM")) {
-
-                    if (hasPermissionContaining(p, "0")) {
-                        // Удаляем табличку из atmSignData, если она больше не является "ATM"
-                        atmSignData.remove(existingID);
-                        saveSignData();
-                        // Удаляем маркер с карты BlueMap
-                        removeBlueMapMarker(existingID);
-                        scrollingTasks.remove(e.getBlock().getLocation());
-                        p.sendMessage("АТМ убран.");
-                    } else {
-                        // Табличка обновлена и остается "ATM", можно обновить данные
-                        e.setLine(0, "ATM");
-                        p.sendMessage("АТМ обновлен.");
-
-                        // Обновляем данные о группе (если необходимо)
-                        String group = p.getName(); // permission.getPrimaryGroup(p);
-                        atmSignData.put(existingID, new ATMData(sign.getLocation(), group, e.getLines()));
-                        saveSignData();
-                    }
-                }*/
-            } else if (e.getLine(0).equalsIgnoreCase("ATM")) {
+            if (e.getLine(0).equalsIgnoreCase("ATM")) {
                 if (hasPermissionContaining(p, "0")) {
                     String line0 = "ATM [" + UnityCommands.getInstance().getPlayerInfo(p).countryName + "]";
 
@@ -1009,7 +1004,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                     genericSignList.put(sign.getLocation(), new SignVariables(p.getName(), Arrays.asList(line0, "Коснитесь,", "чтобы начать", ""), List.of(0), false, false, SignCategory.ATM, null, markerID));
                    // saveSignData();
                     // Добавляем маркер на карту BlueMap
-                    addBlueMapMarker(markerID, sign.getLocation(), "services", "Сервисы", "point", null, p);
+                    addBlueMapMarker(markerID, sign.getLocation(), "services", "Сервисы", "point_atm", null, p);
                 }
             }
         } else {
@@ -1034,7 +1029,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
         return false;
     }
-    private Block findNearestContainer(Location origin, int radius) {
+    private Block findNearestContainer(Location origin, int radius, Player p) {
         World world = origin.getWorld();
         Block nearest = null;
         double minDistanceSquared = Double.MAX_VALUE;
@@ -1046,8 +1041,13 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                     if (block.getState() instanceof Container) {
                         double distanceSquared = origin.distanceSquared(block.getLocation());
                         if (distanceSquared < minDistanceSquared) {
-                            minDistanceSquared = distanceSquared;
-                            nearest = block;
+                            if (isSignWithinMarker(origin) != null) {
+                                minDistanceSquared = distanceSquared;
+                                nearest = block;
+                            } else {
+                                p.sendMessage(ChatColor.RED + "Хранилище должно находится внутри зоны торговой точки.");
+                            }
+
                         }
                     }
                 }
@@ -1056,22 +1056,22 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
         return nearest;
     }
-    private String isSignWithinMarker(Location signLocation) {
-        System.out.println("[DEBUG] Проверка таблички на маркеры: " + signLocation);
+    public ExtrudeMarker isSignWithinMarker(Location signLocation) {
+       // System.out.println("[DEBUG] Проверка таблички на маркеры: " + signLocation);
 
         Optional<BlueMapAPI> apiOptional = BlueMapAPI.getInstance();
         if (apiOptional.isPresent()) {
             BlueMapAPI api = apiOptional.get();
-            System.out.println("[DEBUG] BlueMapAPI получен");
+          //  System.out.println("[DEBUG] BlueMapAPI получен");
 
             Optional<BlueMapMap> mapOptional = api.getMap(signLocation.getWorld().getName());
             if (mapOptional.isPresent()) {
                 BlueMapMap map = mapOptional.get();
-                System.out.println("[DEBUG] Карта найдена: " + signLocation.getWorld().getName());
+               // System.out.println("[DEBUG] Карта найдена: " + signLocation.getWorld().getName());
 
                 MarkerSet markerSet = map.getMarkerSets().get("zones_shop");
                 if (markerSet != null) {
-                    System.out.println("[DEBUG] Найден MarkerSet с ID 'zones_shops'. Кол-во маркеров: " + markerSet.getMarkers().size());
+                   // System.out.println("[DEBUG] Найден MarkerSet с ID 'zones_shops'. Кол-во маркеров: " + markerSet.getMarkers().size());
 
                     for (Marker marker : markerSet.getMarkers().values()) {
                         if (marker instanceof ExtrudeMarker) {
@@ -1081,9 +1081,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                             double maxHeight = extrudeMarker.getShapeMaxY();
                             String label = extrudeMarker.getLabel();
 
-                            System.out.println("[DEBUG] Проверка ExtrudeMarker '" + label + "'");
-                            System.out.println(" - Высота: " + minHeight + " до " + maxHeight);
-                            System.out.println(" - Форма: " + baseShape.getPoints().length + " точек");
+                           // System.out.println("[DEBUG] Проверка ExtrudeMarker '" + label + "'");
+                           // System.out.println(" - Высота: " + minHeight + " до " + maxHeight);
+                           // System.out.println(" - Форма: " + baseShape.getPoints().length + " точек");
 
                             Vector2d signPos2D = new Vector2d(signLocation.getX(), signLocation.getZ());
                             double y = signLocation.getY();
@@ -1091,13 +1091,13 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                             boolean insidePolygon = isPointInsidePolygon(signPos2D, Arrays.asList(baseShape.getPoints()));
                             boolean insideHeight = y >= minHeight && y <= maxHeight;
 
-                            System.out.println(" - Позиция таблички 2D: " + signPos2D + " (Y: " + y + ")");
-                            System.out.println(" - Внутри полигона? " + insidePolygon);
-                            System.out.println(" - В пределах высоты? " + insideHeight);
+                            //System.out.println(" - Позиция таблички 2D: " + signPos2D + " (Y: " + y + ")");
+                           // System.out.println(" - Внутри полигона? " + insidePolygon);
+                            //System.out.println(" - В пределах высоты? " + insideHeight);
 
                             if (insidePolygon && insideHeight) {
                                 System.out.println("[DEBUG] Табличка попала внутрь маркера: " + label);
-                                return label;
+                                return extrudeMarker;
                             }
                         }
                     }
@@ -1113,9 +1113,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             System.out.println("[DEBUG] BlueMapAPI не инициализирован!");
         }
 
-        return "";
+        return null;
     }
-    private boolean isPointInsidePolygon(Vector2d point, List<Vector2d> polygon) {
+    public boolean isPointInsidePolygon(Vector2d point, List<Vector2d> polygon) {
         boolean result = false;
         int j = polygon.size() - 1;
         for (int i = 0; i < polygon.size(); i++) {
@@ -1165,19 +1165,13 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         if (brokenBlock.getType().toString().contains("SIGN")) {
             if (brokenBlock.getState() instanceof Sign) {
                 Sign sign = (Sign) brokenBlock.getState();
-                if (sign.getLine(0).equalsIgnoreCase("ATM")) {
-                    for (Map.Entry<Location, SignVariables> entry : genericSignList.entrySet()) {
-                        if (entry.getKey().equals(sign.getLocation())) {
-                            // Проверяем, совпадает ли ник игрока с ником, который установил табличку
-                            if (!entry.getValue().getOwnerName().equals(player.getName())) {
-                                player.sendMessage(ChatColor.RED + "Вы не можете сломать эту табличку, так как её установил другой игрок.");
-                                event.setCancelled(true);
-                                return;
-                            }
-                            removeBlueMapMarker(Integer.parseInt(genericSignList.get(sign.getLocation()).markerID));
-                            genericSignList.remove(sign.getLocation());
-                            break;
-                        }
+                if (genericSignList.containsKey(sign.getLocation())) {
+                    if (!genericSignList.get(sign.getLocation()).getOwnerName().equals(player.getName())) {
+                        player.sendMessage(ChatColor.RED + "Вы не можете сломать эту табличку, так как её установил другой игрок.");
+                        event.setCancelled(true);
+                    } else {
+                        removeBlueMapMarker(genericSignList.get(sign.getLocation()).markerID);
+                        genericSignList.remove(sign.getLocation());
                     }
                 }
             }
@@ -1196,7 +1190,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                         return;
                     }
                     //atmSignData.remove(idToRemove);
-                    removeBlueMapMarker(Integer.parseInt(genericSignList.get(signLocation).markerID));
+                    removeBlueMapMarker(genericSignList.get(signLocation).markerID);
                     genericSignList.remove(signLocation);
                    // saveSignData();
                     break;
@@ -1245,11 +1239,19 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                                     markerSet.getMarkers().put(id, extrudeMarker);
                                     break;
 
-                                case "point":
+                                case "point_atm":
                                     // Создаём POI-маркер
                                     Vector3d position = new Vector3d(location.getX() + 0.5, location.getY(), location.getZ() + 0.5);
                                     POIMarker marker = new POIMarker("atm_" + id, position);
                                     marker.setLabel("ATM");
+                                    marker.setIcon("assets/atm.png", 8, 8);
+                                    markerSet.getMarkers().put(String.valueOf(id), marker);
+                                    break;
+                                case "point_shop":
+                                    // Создаём POI-маркер
+                                    position = new Vector3d(location.getX() + 0.5, location.getY(), location.getZ() + 0.5);
+                                    marker = new POIMarker("shop_" + id, position);
+                                    marker.setLabel("ShopSign");
                                     marker.setIcon("assets/atm.png", 8, 8);
                                     markerSet.getMarkers().put(String.valueOf(id), marker);
                                     break;
@@ -1299,14 +1301,14 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         return coordinates.toArray(new Coordinate[0]);
     }
 
-    private void removeBlueMapMarker(int id) {
+    private void removeBlueMapMarker(String id) {
         if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
             BlueMapAPI.getInstance().ifPresent(blueMapAPI -> {
                 blueMapAPI.getMap("world").ifPresent(map -> {
                     MarkerSet markerSet = map.getMarkerSets().get("services");
                     if (markerSet != null) {
                         markerSet.getMarkers()
-                                .remove("atm_" + id);
+                                .remove(id);
                     }
                 });
             });
