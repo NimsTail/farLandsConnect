@@ -1,15 +1,15 @@
 package com.frammy.unitylauncher;
 
 import com.flowpowered.math.vector.Vector3d;
+import com.frammy.unitylauncher.bluemap.BlueMapIntegration;
+import com.frammy.unitylauncher.signs.SignManager;
 import com.mysql.cj.util.StringUtils;
-import de.bluecolored.bluemap.api.BlueMapAPI;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
-import net.md_5.bungee.api.chat.TextComponent;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
-import org.bukkit.Color;
 import org.bukkit.Location;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -17,17 +17,13 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.NotNull;
-import net.kyori.adventure.text.Component;
-import net.kyori.adventure.text.event.ClickEvent;
-import net.kyori.adventure.text.event.HoverEvent;
-import net.kyori.adventure.text.format.NamedTextColor;
 
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
 
-import static com.frammy.unitylauncher.UnityLauncher.calculateSurfaceArea;
+import static com.frammy.unitylauncher.UnityCommands.calculateSurfaceArea;
 
 public class Unity implements CommandExecutor {
     //UnityLauncher unityLauncher = UnityLauncher.getInstance();
@@ -40,6 +36,8 @@ public class Unity implements CommandExecutor {
     }
 
     private final HelpCommandManager helpManager;
+    private BlueMapIntegration blueMapIntegration;
+    private SignManager signManager;
     private final WebSocketManager webSocketManager;
     // Конструктор принимает HelpCommandManager
     public Unity(HelpCommandManager helpManager, WebSocketManager webSocketManager) {
@@ -141,28 +139,32 @@ public class Unity implements CommandExecutor {
                             case "addcorner":
                                 Player player = (Player) sender;
                                 if (unityLauncher.awaitingCorrectCommand.contains(player)) {
-                                    if (!unityLauncher.markerPoints.containsKey(player)) {
-                                        unityLauncher.markerPoints.put(player, new ArrayList<>());
+                                    if (!blueMapIntegration.markerPoints.containsKey(player)) {
+                                        blueMapIntegration.markerPoints.put(player, new ArrayList<>());
                                     }
-                                    unityLauncher.markerPoints.get(player).add(player.getLocation());
-                                    if (calculateSurfaceArea(unityLauncher.markerPoints.get(player)) > 500) {
-                                        unityLauncher.markerPoints.get(player).remove(player.getLocation());
+                                    blueMapIntegration.markerPoints.get(player).add(player.getLocation());
+                                    if (calculateSurfaceArea(blueMapIntegration.markerPoints.get(player)) > 500) {
+                                        blueMapIntegration.markerPoints.get(player).remove(player.getLocation());
                                         player.sendMessage(ChatColor.RED + "Слишком дохуя площади. Удали часть точек.");
                                     } else {
-                                        sender.sendMessage(ChatColor.GRAY + "Текущая площадь магазина: " + calculateSurfaceArea(unityLauncher.markerPoints.get(player)) + " блоков.");
-                                        //unityLauncher.sendDelayedMessage(player, "Текущая площадь маркера:" + calculateSurfaceArea(unityLauncher.markerPoints.get(player), player) + " блоков.", 1);
+                                        sender.sendMessage(ChatColor.GRAY + "Текущая площадь магазина: " + calculateSurfaceArea(blueMapIntegration.markerPoints.get(player)) + " блоков.");
                                     }
                                 } else {
                                     sender.sendMessage(ChatColor.RED + "Тебе сперва необходимо создать магазин!");
                                 }
                                 break;
                             case "removecorner":
-                                if (unityLauncher.markerPoints.get((Player) sender) == null) {
+                                if (blueMapIntegration.markerPoints.get((Player) sender) == null) {
                                     sender.sendMessage(ChatColor.RED + "Создание магазина либо уже было завершено, либо не было ещё начато!");
                                 } else {
-                                    if (unityLauncher.markerPoints.get((Player) sender).size() != 0) {
-                                        sender.sendMessage(ChatColor.GRAY + "Последняя точка (" + unityLauncher.markerPoints.get((Player) sender).getLast().toString() +") удалена.");
-                                        unityLauncher.markerPoints.get((Player) sender).removeLast();
+                                    if (blueMapIntegration.markerPoints.get((Player) sender).size() != 0) {
+                                        sender.sendMessage(ChatColor.GRAY + "Последняя точка (" +
+                                                blueMapIntegration.markerPoints.get((Player) sender).get(
+                                                        blueMapIntegration.markerPoints.get((Player) sender).size() - 1
+                                                ).toString() + ") удалена.");
+
+                                        List<Location> list = blueMapIntegration.markerPoints.get((Player) sender);
+                                        list.remove(list.size() - 1);
                                     } else {
                                         sender.sendMessage(ChatColor.RED + "Все точки уже удалены!");
                                     }
@@ -172,10 +174,10 @@ public class Unity implements CommandExecutor {
 
                                     break;
                             case "build":
-                                if (unityLauncher.markerPoints.get((Player) sender) != null) {
-                                    if (unityLauncher.markerPoints.get((Player) sender).size() >= 3) {
+                                if (blueMapIntegration.markerPoints.get((Player) sender) != null) {
+                                    if (blueMapIntegration.markerPoints.get((Player) sender).size() >= 3) {
                                         UnityCommands.getInstance().setShops(sender,UnityCommands.getInstance().getShops(sender) - 1);
-                                        unityLauncher.addBlueMapMarker(shopID, ((Player) sender).getLocation(), "shops", "Магазины", "extrude", convertLocationListToVector3dList(unityLauncher.markerPoints.get((Player) sender)), (Player)sender);
+                                        blueMapIntegration.addBlueMapMarker(shopID, ((Player) sender).getLocation(), "shops", "Магазины", "extrude", convertLocationListToVector3dList(blueMapIntegration.markerPoints.get((Player) sender)), (Player)sender);
                                     } else {
                                         sender.sendMessage(ChatColor.RED + "Необходимы минимум 3 точки для маркера магазина!");
                                     }
@@ -245,7 +247,7 @@ public class Unity implements CommandExecutor {
                         sender.sendMessage(ChatColor.RED + "Необходимо указать название магазина!");
                     } else {
                         if (UnityCommands.getInstance().getShops(sender) != 0) {
-                            if (!unityLauncher.hasPlayerShopBrand(args[2], sender.getName())) {
+                            if (!signManager.hasPlayerShopBrand(args[2], sender.getName())) {
                                 shopID = args[2];
                                 Component message = Component.text("Укажите границы магазина ", NamedTextColor.GRAY)
                                         .append(Component.text(shopID, NamedTextColor.YELLOW))

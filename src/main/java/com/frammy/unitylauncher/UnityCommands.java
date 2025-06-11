@@ -3,22 +3,20 @@ package com.frammy.unitylauncher;
 import com.google.gson.Gson;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
+import org.bukkit.Location;
 import org.bukkit.command.CommandSender;
-import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
-import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.permissions.PermissionAttachmentInfo;
 import org.jetbrains.annotations.NotNull;
-
-import java.io.File;
-import java.io.IOException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.util.List;
 import java.util.Objects;
 
-import static com.frammy.unitylauncher.UnityLauncher.DBConnect;
 import static com.frammy.unitylauncher.UnityLauncher.onError;
+import static com.frammy.unitylauncher.database.DatabaseManager.DBConnect;
 
 public class UnityCommands {
     private static UnityCommands instance;
@@ -614,7 +612,7 @@ public class UnityCommands {
                 if (rs.next()) {
                     users = rs.getString("Users");
                     if (rs.getString("Users").isEmpty()) {
-                     //   sender.sendMessage(ChatColor.RED + "Ты не состоишь ни в одной стране! Будь осторожнее!");
+                        //   sender.sendMessage(ChatColor.RED + "Ты не состоишь ни в одной стране! Будь осторожнее!");
                         return;
                     }
                 }
@@ -626,5 +624,34 @@ public class UnityCommands {
                 onError("setGroup", e, (Player) sender);
             }
         }
+    }
+
+    public static double calculateSurfaceArea(List<Location> points) {
+        if (points.size() < 3) {
+            // Если точек меньше трех, многоугольник не существует
+            return 0;
+        }
+
+        double area = 0;
+        int n = points.size();
+
+        // Применяем формулу площади многоугольника (формула "Шу")
+        for (int i = 0; i < n; i++) {
+            Location current = points.get(i);
+            Location next = points.get((i + 1) % n); // Следующая точка, для замыкания контура
+
+            area += current.getX() * next.getZ() - current.getZ() * next.getX();
+        }
+
+        return Math.round(Math.abs(area / 2.0) * 100.0) / 100.0; // Площадь должна быть положительной
+    }
+
+    public boolean hasPermissionContaining(Player player, String permission) {
+        for (PermissionAttachmentInfo permInfo : player.getEffectivePermissions()) {
+            if (permInfo.getPermission().contains(permission)) {
+                return true; // Игрок имеет право, содержащее "head"
+            }
+        }
+        return false; // Игрок не имеет права, содержащего "head"
     }
 }

@@ -1,4 +1,6 @@
 package com.frammy.unitylauncher;
+import com.frammy.unitylauncher.bluemap.BlueMapIntegration;
+import com.frammy.unitylauncher.signs.SignManager;
 import com.google.protobuf.Enum;
 import de.bluecolored.bluemap.api.gson.MarkerGson;
 import de.bluecolored.bluemap.api.math.Shape;
@@ -8,6 +10,7 @@ import net.md_5.bungee.api.chat.TextComponent;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
+import org.bukkit.World;
 import org.bukkit.block.data.type.Sign;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -25,10 +28,12 @@ import de.bluecolored.bluemap.api.markers.*;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 
-import static com.frammy.unitylauncher.UnityLauncher.calculateSurfaceArea;
+import static com.frammy.unitylauncher.UnityCommands.calculateSurfaceArea;
 
 public class ZoneManager {
     private final UnityLauncher unityLauncher;
+    private SignManager signManager;
+    private BlueMapIntegration blueMapIntegration;
     private final File zonesFile;
     private YamlConfiguration zonesConfig;
     private final Map<UUID, List<Location>> zonePoints = new HashMap<>();
@@ -390,17 +395,17 @@ public class ZoneManager {
                 updateBlueMapMarker(zoneInfo.zoneType, zoneInfo.markerID, zoneInfo.zoneCorners, newValue, player);
                 player.sendMessage(ChatColor.GREEN + "Название зоны обновлено!");
                 zoneInfo.zoneName = newValue;
-                for (Location loc : unityLauncher.genericSignList.keySet()) {
+                for (Location loc : signManager.genericSignList.keySet()) {
                     Vector2d signPos = new Vector2d(loc.getX(), loc.getZ());
                     List<Vector2d> corners = zoneInfo.zoneCorners.stream()
                             .map(cornerLoc -> new Vector2d(cornerLoc.getX(), cornerLoc.getZ()))
                             .collect(Collectors.toList());
-                    if (unityLauncher.isPointInsidePolygon(signPos, corners)) {
+                    if (isPointInsidePolygon(signPos, corners)) {
                         String newLine0 = "Торговая точка [ " + newValue + " ]";
-                        List<String> initial = unityLauncher.genericSignList.get(loc).getSignText();
-                        unityLauncher.genericSignList.get(loc).setSignText(Arrays.asList(newLine0, initial.get(1), initial.get(2), initial.get(3)));
+                        List<String> initial = signManager.genericSignList.get(loc).getSignText();
+                        signManager.genericSignList.get(loc).setSignText(Arrays.asList(newLine0, initial.get(1), initial.get(2), initial.get(3)));
                         Sign sign = (Sign) loc.getBlock().getState();
-                        sign.update();
+                        //sign.update();
                     }
                 }
 
@@ -574,11 +579,11 @@ public class ZoneManager {
                         .shape(new Shape(basePoints), 42, 255) // Контур зоны
                         .detail("<b>" + zoneLimits.get(zoneType).displayName + " \"" + zoneName + "\"</b><br><br><i> Владелец:</i> " + zoneList.get(markerID).getOwner() + "<br><i>Площадь:</i> " + calculateSurfaceArea(locations)); // 📌 Добавляем описание
                 markerSet.getMarkers().put(markerID, markerBuilder.build());
-                unityLauncher.saveBlueMapMarkers(markerSetID);
+                blueMapIntegration.saveBlueMapMarkers(markerSetID);
             });
         });
     }
-    private void removeBlueMapMarker(ZoneInfo zoneInfo) {
+    public void removeBlueMapMarker(ZoneInfo zoneInfo) {
         if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
             BlueMapAPI.getInstance().ifPresent(blueMapAPI -> {
                 blueMapAPI.getMap(zoneInfo.zoneCorners.get(0).getWorld().getName()).ifPresent(map -> {
@@ -610,7 +615,7 @@ public class ZoneManager {
                     marker.setShape(new Shape(basePoints), 42, 255);
                     marker.setLabel(zoneName);
                     marker.setDetail("<b>" + zoneLimits.get(zoneType).displayName + " \"" + zoneName + "\"</b><br><br><i> Владелец:</i> " + zoneList.get(markerID).getOwner() + "<br><i>Площадь:</i> " + calculateSurfaceArea(locations)); // 📌 Добавляем описание
-                    unityLauncher.saveBlueMapMarkers(markerSetID);
+                    blueMapIntegration.saveBlueMapMarkers(markerSetID);
                 }
             });
         });
@@ -731,6 +736,75 @@ public class ZoneManager {
         }
 
         saveZonesConfig(); // сохраняем в файл
+    }
+
+    public void loadZoneData() {
+        File zoneFile = new File(unityLauncher.getDataFolder(), "zones.yml");
+        if (zoneFile.exists()) {
+            YamlConfiguration zoneConfig = YamlConfiguration.loadConfiguration(zoneFile);
+
+            for (String typeKey : zoneConfig.getKeys(false)) { // "hospital", "shop" и т.д.
+                ConfigurationSection typeSection = zoneConfig.getConfigurationSection(typeKey);
+                if (typeSection == null) continue;
+
+                for (String playerName : typeSection.getKeys(false)) {
+                    ConfigurationSection playerSection = typeSection.getConfigurationSection(playerName);
+                    if (playerSection == null) continue;
+
+                    for (String zoneID : playerSection.getKeys(false)) {
+                        ConfigurationSection zoneSection = playerSection.getConfigurationSection(zoneID);
+                        if (zoneSection == null) continue;
+
+                        String zoneName = zoneSection.getString("name");
+                        String markerID = zoneSection.getString("marker_ID");
+
+                        List<Location> corners = new ArrayList<>();
+                        List<Map<?, ?>> rawCorners = zoneSection.getMapList("corners");
+                        for (Map<?, ?> cornerMap : rawCorners) {
+                            try {
+                                String worldName = (String) cornerMap.get("world");
+                                double x = (double) cornerMap.get("x");
+                                double y = (double) cornerMap.get("y");
+                                double z = (double) cornerMap.get("z");
+
+                                World world = Bukkit.getWorld(worldName);
+                                if (world == null) continue;
+
+                                Location cornerLoc = new Location(world, x, y, z);
+                                corners.add(cornerLoc);
+                            } catch (Exception e) {
+                                Bukkit.getLogger().warning("Ошибка при загрузке угла зоны: " + e.getMessage());
+                            }
+                        }
+                        List<Vector2d> corners2D = corners.stream()
+                                .map(cornerLoc -> new Vector2d(cornerLoc.getX(), cornerLoc.getZ()))
+                                .collect(Collectors.toList());
+                        for (Location loc : signManager.genericSignList.keySet()) {
+                            Vector2d point = new Vector2d(loc.getX(), loc.getZ());
+                            if (isPointInsidePolygon(point, corners2D)) {
+                                signManager.genericSignList.get(loc).setOwnerName(playerName);
+                            }
+                        }
+
+                        // Пример: логгирование загрузки
+                        Bukkit.getLogger().info("Загружена зона: " + typeKey + " / " + playerName + " → " + zoneID + " (" + zoneName + ")");
+                    }
+                }
+            }
+        }
+    }
+
+    public boolean isPointInsidePolygon(Vector2d point, List<Vector2d> polygon) {
+        boolean result = false;
+        int j = polygon.size() - 1;
+        for (int i = 0; i < polygon.size(); i++) {
+            if ((polygon.get(i).getY() > point.getY()) != (polygon.get(j).getY() > point.getY()) &&
+                    (point.getX() < (polygon.get(j).getX() - polygon.get(i).getX()) * (point.getY() - polygon.get(i).getY()) / (polygon.get(j).getY() - polygon.get(i).getY()) + polygon.get(i).getX())) {
+                result = !result;
+            }
+            j = i;
+        }
+        return result;
     }
 }
 
