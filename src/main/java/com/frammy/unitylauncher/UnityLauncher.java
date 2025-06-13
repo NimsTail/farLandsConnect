@@ -1,5 +1,6 @@
 package com.frammy.unitylauncher;
 import com.frammy.unitylauncher.signs.SignManager;
+import com.frammy.unitylauncher.zones.ZoneManager;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import net.md_5.bungee.api.chat.ClickEvent;
 import net.md_5.bungee.api.chat.HoverEvent;
@@ -30,7 +31,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     HashMap<String, Date> sessions = new HashMap<>();
     HashMap<String, Long> playTime = new HashMap<>();
     private static UnityLauncher instance;
-    public final Set<Player> awaitingCorrectCommand = new HashSet<>();
+    private final Set<Player> awaitingCorrectCommand = new HashSet<>();
     private FileConfiguration shopConfig;
     public ArrayList<String> commandCategories= new ArrayList<String>();
     public MoneyManager moneyManager;
@@ -38,6 +39,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     private SignManager signManager;
     private WebSocketManager webSocketManager;
     private BlueMapIntegration blueMapIntegration;
+    public Set<Player> getAwaitingCorrectCommand() {return awaitingCorrectCommand;}
 
     @Override
     public void onEnable() {

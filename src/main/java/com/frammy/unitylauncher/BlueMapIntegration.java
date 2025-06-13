@@ -2,10 +2,7 @@ package com.frammy.unitylauncher;
 
 import com.flowpowered.math.vector.Vector2d;
 import com.flowpowered.math.vector.Vector3d;
-import com.frammy.unitylauncher.UnityLauncher;
-import com.frammy.unitylauncher.ZoneManager;
 import de.bluecolored.bluemap.api.BlueMapAPI;
-import de.bluecolored.bluemap.api.BlueMapMap;
 import de.bluecolored.bluemap.api.gson.MarkerGson;
 import de.bluecolored.bluemap.api.markers.ExtrudeMarker;
 import de.bluecolored.bluemap.api.markers.Marker;
@@ -24,18 +21,19 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
-import java.util.*;
-import java.util.stream.Collectors;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
 
 public class BlueMapIntegration {
     private final UnityLauncher plugin;
     private final Logger logger;
     private final File dataFolder;
-    private UnityLauncher unityLauncher;
-    private ZoneManager zoneManager;
     public Map<Player, List<Location>> markerPoints = new HashMap<>();
-    private int currentID = 0;
+    private final int currentID = 0;
 
     public File getDataFolder() {
         return dataFolder;
@@ -58,7 +56,7 @@ public class BlueMapIntegration {
                     Map<String, MarkerSet> markerSets = map.getMarkerSets();
                     if (markerSets != null) {
                         MarkerSet markerSet = markerSets.computeIfAbsent(setID, k -> new MarkerSet(setLabel));
-                        if (markerSet != null && markerSet.getMarkers() != null) {
+                        if (markerSet.getMarkers() != null) {
                             switch (markerType) {
                                 case "extrude":
                                     // Преобразуем extrudePoints в Vector2d для новой фигуры
@@ -79,7 +77,7 @@ public class BlueMapIntegration {
                                                 //saveShopData(p, id);
                                                 p.sendMessage(ChatColor.GREEN + "Торговая точка успешно создана!");
                                                 markerPoints.clear();
-                                                unityLauncher.awaitingCorrectCommand.remove(p);
+                                                plugin.getAwaitingCorrectCommand().remove(p);
                                             }
                                         }
                                     }
@@ -199,65 +197,6 @@ public class BlueMapIntegration {
             });
         });
     }
-
-    public ExtrudeMarker isSignWithinMarker(Location signLocation) {
-        // System.out.println("[DEBUG] Проверка таблички на маркеры: " + signLocation);
-
-        Optional<BlueMapAPI> apiOptional = BlueMapAPI.getInstance();
-        if (apiOptional.isPresent()) {
-            BlueMapAPI api = apiOptional.get();
-            //  System.out.println("[DEBUG] BlueMapAPI получен");
-
-            Optional<BlueMapMap> mapOptional = api.getMap(signLocation.getWorld().getName());
-            if (mapOptional.isPresent()) {
-                BlueMapMap map = mapOptional.get();
-                // System.out.println("[DEBUG] Карта найдена: " + signLocation.getWorld().getName());
-
-                MarkerSet markerSet = map.getMarkerSets().get("zones_shop");
-                if (markerSet != null) {
-                    // System.out.println("[DEBUG] Найден MarkerSet с ID 'zones_shops'. Кол-во маркеров: " + markerSet.getMarkers().size());
-
-                    for (Marker marker : markerSet.getMarkers().values()) {
-                        if (marker instanceof ExtrudeMarker) {
-                            ExtrudeMarker extrudeMarker = (ExtrudeMarker) marker;
-                            Shape baseShape = extrudeMarker.getShape();
-                            double minHeight = extrudeMarker.getShapeMinY();
-                            double maxHeight = extrudeMarker.getShapeMaxY();
-                            String label = extrudeMarker.getLabel();
-
-                            // System.out.println("[DEBUG] Проверка ExtrudeMarker '" + label + "'");
-                            // System.out.println(" - Высота: " + minHeight + " до " + maxHeight);
-                            // System.out.println(" - Форма: " + baseShape.getPoints().length + " точек");
-
-                            Vector2d signPos2D = new Vector2d(signLocation.getX(), signLocation.getZ());
-                            double y = signLocation.getY();
-
-                            boolean insidePolygon = zoneManager.isPointInsidePolygon(signPos2D, Arrays.asList(baseShape.getPoints()));
-                            boolean insideHeight = y >= minHeight && y <= maxHeight;
-
-                            //System.out.println(" - Позиция таблички 2D: " + signPos2D + " (Y: " + y + ")");
-                            // System.out.println(" - Внутри полигона? " + insidePolygon);
-                            //System.out.println(" - В пределах высоты? " + insideHeight);
-
-                            if (insidePolygon && insideHeight) {
-                                System.out.println("[DEBUG] Табличка попала внутрь маркера: " + label);
-                                return extrudeMarker;
-                            }
-                        }
-                    }
-
-                    System.out.println("[DEBUG] Табличка не попала ни в один маркер в MarkerSet 'shops'");
-                } else {
-                    System.out.println("[DEBUG] MarkerSet с ID 'shops' не найден.");
-                }
-            } else {
-                System.out.println("[DEBUG] Карта не найдена для мира: " + signLocation.getWorld().getName());
-            }
-        } else {
-            System.out.println("[DEBUG] BlueMapAPI не инициализирован!");
-        }
-        return null;
-    }
     private boolean shapesIntersect(Shape shape1, Shape shape2) {
         GeometryFactory geometryFactory = new GeometryFactory();
 
@@ -285,7 +224,6 @@ public class BlueMapIntegration {
         if (!coordinates.get(0).equals(coordinates.get(coordinates.size() - 1))) {
             coordinates.add(new Coordinate(coordinates.get(0)));
         }
-
         return coordinates.toArray(new Coordinate[0]);
     }
 }

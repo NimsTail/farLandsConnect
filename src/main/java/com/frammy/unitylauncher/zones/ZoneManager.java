@@ -1,4 +1,5 @@
-package com.frammy.unitylauncher;
+package com.frammy.unitylauncher.zones;
+import com.frammy.unitylauncher.UnityLauncher;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.BlueMapIntegration;
 import de.bluecolored.bluemap.api.math.Shape;
@@ -45,47 +46,6 @@ public class ZoneManager {
         this.zonesConfig = YamlConfiguration.loadConfiguration(zonesFile); // загружаем конфиг
     }
 
-
-
-    private static class ZoneTypeData {
-        private final String displayName;
-        private final double areaLimit;
-        private final int index;
-        private final double minSize;
-        private final boolean allowOverlap;
-
-
-        public ZoneTypeData(String displayName, double areaLimit, int index, double minSize, boolean allowOverlap) {
-            this.displayName = displayName;
-            this.areaLimit = areaLimit;
-            this.minSize = minSize;
-            this.allowOverlap = allowOverlap;
-            this.index = index;
-        }
-
-        public String getDisplayName() {
-            return displayName;
-        }
-
-        public double getAreaLimit() {
-            return areaLimit;
-        }
-
-        public int getIndex() {
-            return index;
-        }
-    }
-    enum ZoneType
-    {
-        SHOP,
-        BANK,
-        HOSPITAL,
-        INDUSTRIAL,
-        REGION,
-        COUNTRY,
-
-    }
-
     private final Map<ZoneType, ZoneTypeData> zoneLimits = new HashMap<>() {{
         put(ZoneType.SHOP, new ZoneTypeData("Торговая точка", 500.0, 2, 3.0, false));
         put(ZoneType.BANK, new ZoneTypeData("Банк", 300.0,2, 20.0, false));
@@ -97,63 +57,6 @@ public class ZoneManager {
 
     // Карта для хранения последней посещённой зоны игрока
     private final Map<UUID, ZoneInfo> playerLastZone = new HashMap<>();
-
-    // Вспомогательный класс для хранения информации о зоне
-    private static class ZoneInfo {
-        ZoneType zoneType;
-        String zoneID;
-        String zoneName;
-        String zoneOwner;
-        String markerID;
-        List<Location> zoneCorners;
-
-        public ZoneInfo(ZoneType zoneType, String zoneID, String zoneName, String markerID, List<Location> zoneCorners, String zoneOwner) {
-            this.zoneType = zoneType;
-            this.zoneID = zoneID;
-            this.zoneName = zoneName;
-            this.markerID = markerID;
-            this.zoneCorners = zoneCorners;
-            this.zoneOwner = zoneOwner;
-        }
-        public ZoneType getType() {
-            return zoneType;
-        }
-        public String getID() {
-            return zoneID;
-        }
-        public String getName() {
-            return zoneName;
-        }
-        public String getMarkerID() {
-            return markerID;
-        }
-        public List<Location> getCorners() {
-            return zoneCorners;
-        }
-        public String getOwner() {
-            return zoneOwner;
-        }
-
-        public void setType(ZoneType type) {
-            this.zoneType = type;
-        }
-        public void setID(String id) {
-            this.zoneID = id;
-        }
-        public void setName(String name) {
-            this.zoneName = name;
-        }
-        public void setMarkerID(String markerID) {
-            this.markerID = markerID;
-        }
-        public void setCorners(List<Location> corners) {
-            this.zoneCorners = corners;
-        }
-        public void setOwner(String owner) {
-            this.zoneOwner = owner;
-        }
-
-    }
 
     public ZoneManager(UnityLauncher launcher, File dataFolder) {
         this.unityLauncher = launcher;
@@ -225,7 +128,7 @@ public class ZoneManager {
 
         // Проверка на пересечение точки с существующим и зонами
         if (isPointInOtherZone(player.getLocation(), player.getName(), zoneType, null)) {
-            if (!zoneData.allowOverlap) {
+            if (!zoneData.getAllowOverlap()) {
                 player.sendMessage(ChatColor.RED + "Нельзя добавить точку, она пересекается с уже существующей зоной!");
                 return;
             }
@@ -235,7 +138,7 @@ public class ZoneManager {
         tempPoints.add(player.getLocation().clone());
         double newArea = calculateSurfaceArea(tempPoints);
 
-        if (newArea < zoneData.minSize && tempPoints.size() >= 3) {
+        if (newArea < zoneData.getMinSize() && tempPoints.size() >= 3) {
             player.sendMessage(ChatColor.GRAY + "Зона слишком маленькая: " + ChatColor.RED + newArea + ChatColor.GRAY + " < " + ChatColor.YELLOW + "1");
             return;
         }
@@ -250,7 +153,7 @@ public class ZoneManager {
             player.sendMessage(ChatColor.RED + "Точки пересекаются - фигура имеет неверную форму.");
             return;
         }
-// Если проверка пройдена — добавляем точку в основной список
+        // Если проверка пройдена — добавляем точку в основной список
         points.add(player.getLocation().clone());
         player.sendMessage(ChatColor.GOLD + "[" + points.size() + "]" + ChatColor.YELLOW + " Добавлена точка! Текущая площадь: " + ChatColor.GOLD + newArea);
     }
@@ -588,7 +491,7 @@ public class ZoneManager {
                 ExtrudeMarker.Builder markerBuilder = ExtrudeMarker.builder()
                         .label(zoneName) // Заголовок маркера
                         .shape(new Shape(basePoints), 42, 255) // Контур зоны
-                        .detail("<b>" + zoneLimits.get(zoneType).displayName + " \"" + zoneName + "\"</b><br><br><i> Владелец:</i> " + zoneList.get(markerID).getOwner() + "<br><i>Площадь:</i> " + calculateSurfaceArea(locations)); // 📌 Добавляем описание
+                        .detail("<b>" + zoneLimits.get(zoneType).getDisplayName() + " \"" + zoneName + "\"</b><br><br><i> Владелец:</i> " + zoneList.get(markerID).getOwner() + "<br><i>Площадь:</i> " + calculateSurfaceArea(locations)); // 📌 Добавляем описание
                 markerSet.getMarkers().put(markerID, markerBuilder.build());
                 blueMapIntegration.saveBlueMapMarkers(markerSetID);
             });
@@ -612,7 +515,7 @@ public class ZoneManager {
 
                     marker.setShape(new Shape(basePoints), 42, 255);
                     marker.setLabel(zoneName);
-                    marker.setDetail("<b>" + zoneLimits.get(zoneType).displayName + " \"" + zoneName + "\"</b><br><br><i> Владелец:</i> " + zoneList.get(markerID).getOwner() + "<br><i>Площадь:</i> " + calculateSurfaceArea(locations)); // 📌 Добавляем описание
+                    marker.setDetail("<b>" + zoneLimits.get(zoneType).getDisplayName() + " \"" + zoneName + "\"</b><br><br><i> Владелец:</i> " + zoneList.get(markerID).getOwner() + "<br><i>Площадь:</i> " + calculateSurfaceArea(locations)); // 📌 Добавляем описание
                     blueMapIntegration.saveBlueMapMarkers(markerSetID);
                 }
             });

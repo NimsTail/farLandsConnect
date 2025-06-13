@@ -1,7 +1,5 @@
 package com.frammy.unitylauncher.signs;
 
-import com.frammy.unitylauncher.ZoneManager;
-
 import java.util.List;
 
 public class SignVariables {
@@ -31,11 +29,9 @@ public class SignVariables {
     public boolean getPaused() {
         return isPaused;
     }
-
     public List<String> getSignText() {
         return signText;
     }
-
     public List<Integer> getScrollLines() {
         return scrollLines;
     }
@@ -48,9 +44,7 @@ public class SignVariables {
     public String getOwnerName() {
         return ownerName;
     }
-    public String getMarkerID() {
-        return markerID;
-    }
+    public String getMarkerID() {return markerID;}
 
 
     public void setConfigurtable(boolean isConfigurable) {
@@ -59,11 +53,9 @@ public class SignVariables {
     public void setPaused(boolean isPaused) {
         this.isPaused = isPaused;
     }
-
     public void setSignText(List<String> signText) {
         this.signText = signText;
     }
-
     public void setScrollLines(List<Integer> scrollLines) {
         this.scrollLines = scrollLines;
     }
@@ -79,5 +71,4 @@ public class SignVariables {
     public void setMarkerID(String markerID) {
         this.markerID = markerID;
     }
-
 }

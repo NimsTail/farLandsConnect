@@ -227,12 +227,10 @@ public class TableGenerator {
     }
 
     public enum Receiver {
-
         CONSOLE, CLIENT
     }
 
     public enum Alignment {
-
         CENTER, LEFT, RIGHT
     }
 }

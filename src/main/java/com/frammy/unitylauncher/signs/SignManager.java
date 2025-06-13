@@ -3,7 +3,7 @@ package com.frammy.unitylauncher.signs;
 import com.flowpowered.math.vector.Vector2d;
 import com.frammy.unitylauncher.UnityCommands;
 import com.frammy.unitylauncher.UnityLauncher;
-import com.frammy.unitylauncher.ZoneManager;
+import com.frammy.unitylauncher.zones.ZoneManager;
 import com.frammy.unitylauncher.BlueMapIntegration;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import de.bluecolored.bluemap.api.BlueMapMap;
@@ -434,9 +434,9 @@ public class SignManager implements Listener {
     @EventHandler
     public  void onPlayerLeave(PlayerQuitEvent e) {
         Player p = e.getPlayer();
-        if(unityLauncher.awaitingCorrectCommand.contains(p.getName())) {
+        if(unityLauncher.getAwaitingCorrectCommand().contains(p.getName())) {
             UnityCommands.getInstance().setShops(p,UnityCommands.getInstance().getShops(p) + 1);
-            unityLauncher.awaitingCorrectCommand.remove(p);
+            unityLauncher.getAwaitingCorrectCommand().remove(p);
         }
     }
 
