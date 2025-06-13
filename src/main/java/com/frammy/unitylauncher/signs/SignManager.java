@@ -402,7 +402,7 @@ public class SignManager implements Listener {
                         player.sendMessage(ChatColor.RED + "Вы не можете сломать эту табличку, так как её установил другой игрок.");
                         event.setCancelled(true);
                     } else {
-                        blueMapIntegration.removeBlueMapMarker(genericSignList.get(sign.getLocation()).getMarkerID());
+                        blueMapIntegration.removeBlueMapMarker(genericSignList.get(sign.getLocation()).getMarkerID(), "world", "services");
                         genericSignList.remove(sign.getLocation());
                     }
                 }
@@ -422,7 +422,7 @@ public class SignManager implements Listener {
                         return;
                     }
                     //atmSignData.remove(idToRemove);
-                    blueMapIntegration.removeBlueMapMarker(genericSignList.get(signLocation).getMarkerID());
+                    blueMapIntegration.removeBlueMapMarker(genericSignList.get(signLocation).getMarkerID(), "world", "services");
                     genericSignList.remove(signLocation);
                     // saveSignData();
                     break;

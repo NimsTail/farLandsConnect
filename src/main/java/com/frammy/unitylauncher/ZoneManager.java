@@ -467,7 +467,11 @@ public class ZoneManager {
         //zonesConfig.set(path, null);
        // saveZonesConfig();
         zoneList.remove(zoneInfo.markerID);
-        removeBlueMapMarker(zoneInfo);
+        blueMapIntegration.removeBlueMapMarker(
+                zoneInfo.markerID,
+                zoneInfo.zoneCorners.get(0).getWorld().getName(),
+                "zones_" + zoneInfo.zoneType
+        );
 
         player.sendMessage(ChatColor.GREEN + "Зона " + zoneInfo.zoneName + " удалена!");
         playerLastZone.remove(playerId);
@@ -590,19 +594,6 @@ public class ZoneManager {
             });
         });
     }
-    public void removeBlueMapMarker(ZoneInfo zoneInfo) {
-        if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
-            BlueMapAPI.getInstance().ifPresent(blueMapAPI -> {
-                blueMapAPI.getMap(zoneInfo.zoneCorners.get(0).getWorld().getName()).ifPresent(map -> {
-                    MarkerSet markerSet = map.getMarkerSets().get("zones_" + zoneInfo.zoneType);
-                    if (markerSet != null) {
-                        markerSet.getMarkers()
-                                .remove(zoneInfo.markerID);
-                    }
-                });
-            });
-        }
-    }
 
     private void updateBlueMapMarker(ZoneType zoneType, String markerID, List<Location> locations, String zoneName, Player p) {
         if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
@@ -714,8 +705,8 @@ public class ZoneManager {
             }
         }
         System.out.println(zoneList.size() + " зон загнружено!!");
-
     }
+
     public void saveZonesToConfig() {
         zonesConfig = new YamlConfiguration(); // Очистить перед сохранением
 
@@ -738,10 +729,8 @@ public class ZoneManager {
                 map.put("yaw", loc.getYaw());
                 serializedCorners.add(map);
             }
-
             zonesConfig.set(path + ".corners", serializedCorners);
         }
-
         saveZonesConfig(); // сохраняем в файл
     }
 
@@ -814,4 +803,3 @@ public class ZoneManager {
         return result;
     }
 }
-

@@ -122,14 +122,13 @@ public class BlueMapIntegration {
         }
     }
 
-    public void removeBlueMapMarker(String id) {
+    public void removeBlueMapMarker(String id, String worldName, String markerSetKey) {
         if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
             BlueMapAPI.getInstance().ifPresent(blueMapAPI -> {
-                blueMapAPI.getMap("world").ifPresent(map -> {
-                    MarkerSet markerSet = map.getMarkerSets().get("services");
+                blueMapAPI.getMap(worldName).ifPresent(map -> {
+                    MarkerSet markerSet = map.getMarkerSets().get(markerSetKey);
                     if (markerSet != null) {
-                        markerSet.getMarkers()
-                                .remove(id);
+                        markerSet.getMarkers().remove(id);
                     }
                 });
             });
@@ -257,7 +256,6 @@ public class BlueMapIntegration {
         } else {
             System.out.println("[DEBUG] BlueMapAPI не инициализирован!");
         }
-
         return null;
     }
     private boolean shapesIntersect(Shape shape1, Shape shape2) {
