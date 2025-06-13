@@ -4,7 +4,7 @@ import com.flowpowered.math.vector.Vector2d;
 import com.frammy.unitylauncher.UnityCommands;
 import com.frammy.unitylauncher.UnityLauncher;
 import com.frammy.unitylauncher.ZoneManager;
-import com.frammy.unitylauncher.bluemap.BlueMapIntegration;
+import com.frammy.unitylauncher.BlueMapIntegration;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import de.bluecolored.bluemap.api.BlueMapMap;
 import de.bluecolored.bluemap.api.markers.ExtrudeMarker;
@@ -402,7 +402,7 @@ public class SignManager implements Listener {
                         player.sendMessage(ChatColor.RED + "Вы не можете сломать эту табличку, так как её установил другой игрок.");
                         event.setCancelled(true);
                     } else {
-                        zoneManager.removeBlueMapMarker(genericSignList.get(sign.getLocation()).getMarkerID());
+                        blueMapIntegration.removeBlueMapMarker(genericSignList.get(sign.getLocation()).getMarkerID());
                         genericSignList.remove(sign.getLocation());
                     }
                 }
@@ -422,7 +422,7 @@ public class SignManager implements Listener {
                         return;
                     }
                     //atmSignData.remove(idToRemove);
-                    zoneManager.removeBlueMapMarker(genericSignList.get(signLocation).getMarkerID());
+                    blueMapIntegration.removeBlueMapMarker(genericSignList.get(signLocation).getMarkerID());
                     genericSignList.remove(signLocation);
                     // saveSignData();
                     break;
@@ -921,8 +921,6 @@ public class SignManager implements Listener {
         } else {
             System.out.println("[DEBUG] BlueMapAPI не инициализирован!");
         }
-
         return null;
     }
-
 }

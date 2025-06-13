@@ -1,8 +1,6 @@
 package com.frammy.unitylauncher;
-import com.frammy.unitylauncher.bluemap.BlueMapIntegration;
 import com.frammy.unitylauncher.signs.SignManager;
-import com.google.protobuf.Enum;
-import de.bluecolored.bluemap.api.gson.MarkerGson;
+import com.frammy.unitylauncher.BlueMapIntegration;
 import de.bluecolored.bluemap.api.math.Shape;
 import net.md_5.bungee.api.ChatMessageType;
 import net.md_5.bungee.api.chat.ClickEvent;
@@ -17,12 +15,10 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 
 import java.io.File;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.util.*;
 import java.util.stream.Collectors;
 import com.flowpowered.math.vector.Vector2d;
-import com.flowpowered.math.vector.Vector3d;
 import de.bluecolored.bluemap.api.*;
 import de.bluecolored.bluemap.api.markers.*;
 import org.bukkit.potion.PotionEffect;
@@ -39,6 +35,17 @@ public class ZoneManager {
     private final Map<UUID, List<Location>> zonePoints = new HashMap<>();
 
     public HashMap<String, ZoneInfo> zoneList = new HashMap<>();
+
+    public ZoneManager(UnityLauncher plugin, SignManager signManager, BlueMapIntegration blueMapIntegration) {
+        this.unityLauncher = plugin;
+        this.signManager = signManager;
+        this.blueMapIntegration = blueMapIntegration;
+
+        this.zonesFile = new File(plugin.getDataFolder(), "zones.yml"); // <-- создаём файл в папке плагина
+        this.zonesConfig = YamlConfiguration.loadConfiguration(zonesFile); // загружаем конфиг
+    }
+
+
 
     private static class ZoneTypeData {
         private final String displayName;

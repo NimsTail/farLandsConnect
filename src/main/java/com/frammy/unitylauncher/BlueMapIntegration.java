@@ -1,4 +1,4 @@
-package com.frammy.unitylauncher.bluemap;
+package com.frammy.unitylauncher;
 
 import com.flowpowered.math.vector.Vector2d;
 import com.flowpowered.math.vector.Vector3d;
@@ -29,6 +29,7 @@ import java.util.stream.Collectors;
 import java.util.logging.Logger;
 
 public class BlueMapIntegration {
+    private final UnityLauncher plugin;
     private final Logger logger;
     private final File dataFolder;
     private UnityLauncher unityLauncher;
@@ -39,17 +40,11 @@ public class BlueMapIntegration {
     public File getDataFolder() {
         return dataFolder;
     }
-
-    public BlueMapIntegration(Logger logger, File dataFolder) {
+    public BlueMapIntegration(UnityLauncher plugin, Logger logger, File dataFolder) {
+        this.plugin = plugin;
         this.logger = logger;
         this.dataFolder = dataFolder;
 
-        if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
-            BlueMapAPI.onEnable(api -> {
-                System.out.println("Загружаем маркеры для BlueMap.");
-                loadBlueMapMarkers(); // вызов своего метода
-            });
-        }
     }
 
     public Logger getLogger() {
@@ -127,7 +122,7 @@ public class BlueMapIntegration {
         }
     }
 
-    private void removeBlueMapMarker(String id) {
+    public void removeBlueMapMarker(String id) {
         if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
             BlueMapAPI.getInstance().ifPresent(blueMapAPI -> {
                 blueMapAPI.getMap("world").ifPresent(map -> {
@@ -176,7 +171,7 @@ public class BlueMapIntegration {
             });
         }
     }
-    private void loadBlueMapMarkers() {
+    public void loadBlueMapMarkers() {
         BlueMapAPI.getInstance().ifPresent(blueMapAPI -> {
             // Перебираем все доступные карты (мира)
             blueMapAPI.getMaps().forEach(map -> {
@@ -204,7 +199,6 @@ public class BlueMapIntegration {
                 }
             });
         });
-
     }
 
     public ExtrudeMarker isSignWithinMarker(Location signLocation) {
@@ -296,5 +290,4 @@ public class BlueMapIntegration {
 
         return coordinates.toArray(new Coordinate[0]);
     }
-
 }

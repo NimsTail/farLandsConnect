@@ -48,7 +48,7 @@ public class SignVariables {
     public String getOwnerName() {
         return ownerName;
     }
-    public ZoneManager.ZoneInfo getMarkerID() {
+    public String getMarkerID() {
         return markerID;
     }
 

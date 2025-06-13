@@ -1,7 +1,6 @@
 package com.frammy.unitylauncher;
 
 import com.flowpowered.math.vector.Vector3d;
-import com.frammy.unitylauncher.bluemap.BlueMapIntegration;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.mysql.cj.util.StringUtils;
 import net.kyori.adventure.text.Component;
