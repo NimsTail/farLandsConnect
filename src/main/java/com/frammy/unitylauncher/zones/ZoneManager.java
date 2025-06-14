@@ -6,10 +6,9 @@ import de.bluecolored.bluemap.api.math.Shape;
 import net.md_5.bungee.api.ChatMessageType;
 import net.md_5.bungee.api.chat.ClickEvent;
 import net.md_5.bungee.api.chat.TextComponent;
-import org.bukkit.Bukkit;
-import org.bukkit.ChatColor;
-import org.bukkit.Location;
-import org.bukkit.World;
+import org.bukkit.*;
+import org.bukkit.block.Block;
+import org.bukkit.block.Container;
 import org.bukkit.block.data.type.Sign;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -22,6 +21,7 @@ import java.util.stream.Collectors;
 import com.flowpowered.math.vector.Vector2d;
 import de.bluecolored.bluemap.api.*;
 import de.bluecolored.bluemap.api.markers.*;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 
@@ -702,4 +702,35 @@ public class ZoneManager {
         }
         return result;
     }
+    public List<Block> getAllContainersInZone(ExtrudeMarker marker, World world) {
+        List<Block> containers = new ArrayList<>();
+        Vector2d[] shape = marker.getShape().getPoints();
+
+        for (int y = 42; y <= 255; y++) {
+            for (Vector2d point : shape) {
+                int x = (int) point.getX();
+                int z = (int) point.getY();
+                Location loc = new Location(world, x, y, z);
+                Block b = loc.getBlock();
+                if (b.getState() instanceof Container) {
+                    containers.add(b);
+                }
+            }
+        }
+        return containers;
+    }
+
+    public Map<String, Integer> getItemSummaryFromContainers(List<Block> containers) {
+        Map<String, Integer> itemCount = new HashMap<>();
+        for (Block block : containers) {
+            Container container = (Container) block.getState();
+            for (ItemStack item : container.getInventory().getContents()) {
+                if (item == null || item.getType() == Material.AIR) continue;
+                String name = item.getType().toString();
+                itemCount.put(name, itemCount.getOrDefault(name, 0) + item.getAmount());
+            }
+        }
+        return itemCount;
+    }
+
 }

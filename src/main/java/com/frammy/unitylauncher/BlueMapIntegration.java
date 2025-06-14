@@ -3,6 +3,7 @@ package com.frammy.unitylauncher;
 import com.flowpowered.math.vector.Vector2d;
 import com.flowpowered.math.vector.Vector3d;
 import de.bluecolored.bluemap.api.BlueMapAPI;
+import de.bluecolored.bluemap.api.BlueMapMap;
 import de.bluecolored.bluemap.api.gson.MarkerGson;
 import de.bluecolored.bluemap.api.markers.ExtrudeMarker;
 import de.bluecolored.bluemap.api.markers.Marker;
@@ -168,6 +169,33 @@ public class BlueMapIntegration {
             });
         }
     }
+    public void initializeBlueMapMarkerStorage(String setID) {
+        if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
+            BlueMapAPI.onEnable(blueMapAPI -> {
+                for (BlueMapMap map : blueMapAPI.getMaps()) {
+                    File markerFile = new File(getDataFolder().getParentFile(), "BMMarker/customData/" + map.getId() + "/" + setID + ".json");
+
+                    try {
+                        File parent = markerFile.getParentFile();
+                        if (!parent.exists() && parent.mkdirs()) {
+                            getLogger().info("[BlueMap] Создана директория: " + parent.getAbsolutePath());
+                        }
+
+                        if (!markerFile.exists() && markerFile.createNewFile()) {
+                            getLogger().info("[BlueMap] Создан пустой файл маркеров: " + markerFile.getAbsolutePath());
+                            // Записываем пустой MarkerSet
+                            try (FileWriter writer = new FileWriter(markerFile)) {
+                                MarkerGson.INSTANCE.toJson(new MarkerSet(setID), writer);
+                            }
+                        }
+                    } catch (IOException e) {
+                        getLogger().severe("Не удалось создать директорию или файл для маркеров: " + markerFile.getAbsolutePath());
+                        e.printStackTrace();
+                    }
+                }
+            });
+        }
+    }
     public void loadBlueMapMarkers() {
         BlueMapAPI.getInstance().ifPresent(blueMapAPI -> {
             // Перебираем все доступные карты (мира)
@@ -193,6 +221,7 @@ public class BlueMapIntegration {
                     }
                 } else {
                     getLogger().warning("Папка с маркерами не найдена или не является директорией: " + markerDirectory.getAbsolutePath());
+
                 }
             });
         });

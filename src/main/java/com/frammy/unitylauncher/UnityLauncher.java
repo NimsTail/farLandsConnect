@@ -61,6 +61,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
             BlueMapAPI.onEnable(api -> {
                 System.out.println("Загружаем маркеры для BlueMap.");
+                blueMapIntegration.initializeBlueMapMarkerStorage("shops");
                 blueMapIntegration.loadBlueMapMarkers();
             });
         }

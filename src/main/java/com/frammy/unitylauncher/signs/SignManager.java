@@ -35,6 +35,8 @@ import java.io.File;
 import java.io.IOException;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 public class SignManager implements Listener {
     private final UnityLauncher unityLauncher;
@@ -156,8 +158,6 @@ public class SignManager implements Listener {
                             break;
 
                     }
-
-
                 }
             }
             if (e.getLine(0).equalsIgnoreCase("ATM")) {
@@ -239,7 +239,7 @@ public class SignManager implements Listener {
                         signVariables.setSignState(SignState.SHOP_DEFINED);
                         String markerID = "marker_" + UUID.randomUUID();
                         signVariables.setMarkerID(markerID);
-                        blueMapIntegration.addBlueMapMarker(markerID, sign.getLocation(), "shops", "Торговые точки", "point_shop", null, p);
+                        blueMapIntegration.addBlueMapMarker(markerID, sign.getLocation(), "shops", "Торговые точки", "extrude", null, p);
                         p.sendMessage(ChatColor.GREEN + "Табличка товара подтверждена.");
                     }
                     return;
@@ -734,7 +734,6 @@ public class SignManager implements Listener {
                 }
                 currentSign.setLine(lineIndex, displayBuilder.toString());
             }
-
             currentSign.update();
         }, 0L, intervalTicks);
 
@@ -774,7 +773,6 @@ public class SignManager implements Listener {
                     originalLines.put(lineIndex, rawLine);
                 }
             }
-
             // Запускаем скроллинг
             makeSignScrollingLines(loc, originalLines, 8, 13); // интервал и длина строки
         }
@@ -835,7 +833,6 @@ public class SignManager implements Listener {
                 }
             }
         }
-
         return nearest;
     }
 
@@ -883,7 +880,7 @@ public class SignManager implements Listener {
                 BlueMapMap map = mapOptional.get();
                 // System.out.println("[DEBUG] Карта найдена: " + signLocation.getWorld().getName());
 
-                MarkerSet markerSet = map.getMarkerSets().get("zones_shop");
+                MarkerSet markerSet = map.getMarkerSets().get("shops");
                 if (markerSet != null) {
                     // System.out.println("[DEBUG] Найден MarkerSet с ID 'zones_shops'. Кол-во маркеров: " + markerSet.getMarkers().size());
 
