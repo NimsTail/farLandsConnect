@@ -49,13 +49,13 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         getServer().getPluginManager().registerEvents(moneyManager, this);
         webSocketManager = new WebSocketManager(getLogger());
 
-        this.signManager = new SignManager(this, getDataFolder());
         this.blueMapIntegration = new BlueMapIntegration(this, getLogger(), getDataFolder());
-        this.zoneManager = new ZoneManager(this, signManager,blueMapIntegration);
-
+        this.zoneManager = new ZoneManager(this, null, blueMapIntegration); // пока передаём null, позже установим SignManager
+        this.signManager = new SignManager(this, getDataFolder(), zoneManager, blueMapIntegration, UnityCommands.getInstance());
+        this.zoneManager.setSignManager(signManager);
+        getServer().getPluginManager().registerEvents(signManager, this);
         // webSocketManager.connect();
         HelpCommandManager helpManager = new HelpCommandManager();
-        zoneManager = new ZoneManager(this, getDataFolder());
         Objects.requireNonNull(getCommand("unityLauncher")).setExecutor(new Unity(helpManager, webSocketManager));
         this.getCommand("unityLauncher").setTabCompleter(new CommandCompleter());
         if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {

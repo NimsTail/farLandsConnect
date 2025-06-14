@@ -45,6 +45,9 @@ public class ZoneManager {
         this.zonesFile = new File(plugin.getDataFolder(), "zones.yml"); // <-- создаём файл в папке плагина
         this.zonesConfig = YamlConfiguration.loadConfiguration(zonesFile); // загружаем конфиг
     }
+    public void setSignManager(SignManager signManager) {
+        this.signManager = signManager;
+    }
 
     private final Map<ZoneType, ZoneTypeData> zoneLimits = new HashMap<>() {{
         put(ZoneType.SHOP, new ZoneTypeData("Торговая точка", 500.0, 2, 3.0, false));
@@ -57,12 +60,6 @@ public class ZoneManager {
 
     // Карта для хранения последней посещённой зоны игрока
     private final Map<UUID, ZoneInfo> playerLastZone = new HashMap<>();
-
-    public ZoneManager(UnityLauncher launcher, File dataFolder) {
-        this.unityLauncher = launcher;
-        zonesFile = new File(dataFolder, "zones.yml");
-        zonesConfig = YamlConfiguration.loadConfiguration(zonesFile);
-    }
 
     public void handleCommand(Player player, String[] args) {
         if (args.length < 1) {
