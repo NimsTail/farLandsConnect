@@ -1,7 +1,6 @@
 package com.frammy.unitylauncher;
 
 import com.flowpowered.math.vector.Vector3d;
-import com.frammy.unitylauncher.bluemap.BlueMapIntegration;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.mysql.cj.util.StringUtils;
 import net.kyori.adventure.text.Component;
@@ -138,7 +137,7 @@ public class Unity implements CommandExecutor {
                         switch (args[1]) {
                             case "addcorner":
                                 Player player = (Player) sender;
-                                if (unityLauncher.awaitingCorrectCommand.contains(player)) {
+                                if (unityLauncher.getAwaitingCorrectCommand().contains(player)) {
                                     if (!blueMapIntegration.markerPoints.containsKey(player)) {
                                         blueMapIntegration.markerPoints.put(player, new ArrayList<>());
                                     }
@@ -168,10 +167,7 @@ public class Unity implements CommandExecutor {
                                     } else {
                                         sender.sendMessage(ChatColor.RED + "Все точки уже удалены!");
                                     }
-
-
                                 }
-
                                     break;
                             case "build":
                                 if (blueMapIntegration.markerPoints.get((Player) sender) != null) {
@@ -184,10 +180,7 @@ public class Unity implements CommandExecutor {
                                 } else {
                                     sender.sendMessage(ChatColor.RED + "Создание магазина либо уже было завершено, либо не было ещё начато!");
                                 }
-
-
                                 break;
-
                         }
                         return false;
                     case "change":
@@ -266,9 +259,6 @@ public class Unity implements CommandExecutor {
                             return true;
                         }
                     }
-
-
-
                 }
                 if (args[0].equals("shop") && args[1].equals("destroy")) {
 
@@ -320,7 +310,6 @@ public class Unity implements CommandExecutor {
                 }
                 return false;
             }
-
 
             if (args.length == 4 && args[0].equals("group")) {
                 switch (args[1]) {

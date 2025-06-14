@@ -16,7 +16,7 @@ import java.util.List;
 import java.util.Objects;
 
 import static com.frammy.unitylauncher.UnityLauncher.onError;
-import static com.frammy.unitylauncher.database.DatabaseManager.DBConnect;
+import static com.frammy.unitylauncher.UnityLauncher.DBConnect;
 
 public class UnityCommands {
     private static UnityCommands instance;

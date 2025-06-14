@@ -1,6 +1,7 @@
 package com.frammy.unitylauncher;
 import com.frammy.unitylauncher.signs.SignManager;
-import com.frammy.unitylauncher.bluemap.BlueMapIntegration;
+import com.frammy.unitylauncher.zones.ZoneManager;
+import de.bluecolored.bluemap.api.BlueMapAPI;
 import net.md_5.bungee.api.chat.ClickEvent;
 import net.md_5.bungee.api.chat.HoverEvent;
 import net.md_5.bungee.api.chat.TextComponent;
@@ -17,14 +18,20 @@ import org.bukkit.event.player.AsyncPlayerChatEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.jetbrains.annotations.Nullable;
+
 import java.io.File;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.Statement;
 import java.util.*;
 
 public final class UnityLauncher extends JavaPlugin implements Listener {
     HashMap<String, Date> sessions = new HashMap<>();
     HashMap<String, Long> playTime = new HashMap<>();
     private static UnityLauncher instance;
-    public final Set<Player> awaitingCorrectCommand = new HashSet<>();
+    private final Set<Player> awaitingCorrectCommand = new HashSet<>();
     private FileConfiguration shopConfig;
     public ArrayList<String> commandCategories= new ArrayList<String>();
     public MoneyManager moneyManager;
@@ -32,6 +39,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     private SignManager signManager;
     private WebSocketManager webSocketManager;
     private BlueMapIntegration blueMapIntegration;
+    public Set<Player> getAwaitingCorrectCommand() {return awaitingCorrectCommand;}
 
     @Override
     public void onEnable() {
@@ -40,13 +48,22 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         moneyManager = new MoneyManager(getDataFolder(), "unity_launcher");
         getServer().getPluginManager().registerEvents(moneyManager, this);
         webSocketManager = new WebSocketManager(getLogger());
-        blueMapIntegration = new BlueMapIntegration(getLogger(), getDataFolder());
-        signManager = new SignManager(JavaPlugin.getPlugin(UnityLauncher.class), getDataFolder());
+
+        this.blueMapIntegration = new BlueMapIntegration(this, getLogger(), getDataFolder());
+        this.zoneManager = new ZoneManager(this, null, blueMapIntegration); // пока передаём null, позже установим SignManager
+        this.signManager = new SignManager(this, getDataFolder(), zoneManager, blueMapIntegration, UnityCommands.getInstance());
+        this.zoneManager.setSignManager(signManager);
+        getServer().getPluginManager().registerEvents(signManager, this);
         // webSocketManager.connect();
         HelpCommandManager helpManager = new HelpCommandManager();
-        zoneManager = new ZoneManager(this, getDataFolder());
         Objects.requireNonNull(getCommand("unityLauncher")).setExecutor(new Unity(helpManager, webSocketManager));
         this.getCommand("unityLauncher").setTabCompleter(new CommandCompleter());
+        if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
+            BlueMapAPI.onEnable(api -> {
+                System.out.println("Загружаем маркеры для BlueMap.");
+                blueMapIntegration.loadBlueMapMarkers();
+            });
+        }
 
         //Загружаем данные yml
         signManager.loadSignData();
@@ -77,7 +94,6 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         FileConfiguration config = YamlConfiguration.loadConfiguration(new File(getDataFolder(), "signData.yml"));
         signManager.restoreScrollingSignsFromFile(config);
         instance = this;
-        blueMapIntegration = new BlueMapIntegration(getLogger(), getDataFolder());
     }
     public ZoneManager getZoneManager() {
         return zoneManager;
@@ -89,6 +105,36 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         zoneManager.saveZonesToConfig();
         if (webSocketManager != null) {
             webSocketManager.disconnectAll();
+        }
+
+        Connection con = DBConnect();
+        if (con != null) {
+            try {
+                String query = "UPDATE Users SET DayDealCode=0 WHERE 1;";
+                Statement st = con.createStatement();
+                st.executeUpdate(query);
+
+                playTime.forEach((key, value) -> {
+                    try {
+                        String query2 = "SELECT Playtime FROM Users WHERE Name='" + key + "';";
+                        Statement st2 = con.createStatement();
+                        ResultSet rs2 = st2.executeQuery(query2);
+                        long sqlTime = 0;
+                        if (rs2.next())
+                            sqlTime = rs2.getInt("Playtime");
+                        else
+                            Bukkit.getConsoleSender().sendMessage("No player " + key + " in database");
+                        sqlTime += value;
+                        String query3 = "UPDATE Users SET Playtime=" + sqlTime + " WHERE Name='" + key + "';";
+                        Statement st3 = con.createStatement();
+                        st3.executeUpdate(query3);
+                    } catch (Exception e) {
+                        onError("", e, null);
+                    }
+                });
+            } catch (Exception ex) {
+                onError("NotInBase", ex, null);
+            }
         }
 
         blueMapIntegration.saveBlueMapMarkers("services");
@@ -143,6 +189,58 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     @EventHandler
     public void onJoin(PlayerJoinEvent e){
         webSocketManager.connectPlayer(e.getPlayer().getName());
+    }
+
+    @Nullable
+    public static Connection DBConnect() {
+        try {
+            Class.forName("com.mysql.jdbc.Driver");
+            String url = "jdbc:mysql://mysql.apexhosting.gdn:3306/apexMC1473088";
+            String username = "apexMC1473088";
+            String password = "H#pXkkgG8SbaexeB6azGXMlm";
+            return DriverManager.getConnection(url, username, password);
+        } catch (Exception e) {
+            onError("DBError", e, null);
+            return null;
+        }
+    }
+
+    public static void resetDayDealCode() {
+        Connection con = DBConnect();
+        if (con != null) {
+            try {
+                String query = "UPDATE Users SET DayDealCode=0 WHERE 1;";
+                Statement st = con.createStatement();
+                st.executeUpdate(query);
+            } catch (Exception ex) {
+                onError("NotInBase", ex, null);
+            }
+        }
+    }
+
+    public static void updatePlaytime(Map<String, Long> playTime) {
+        Connection con = DBConnect();
+        if (con != null) {
+            playTime.forEach((key, value) -> {
+                try {
+                    String query2 = "SELECT Playtime FROM Users WHERE Name='" + key + "';";
+                    Statement st2 = con.createStatement();
+                    ResultSet rs2 = st2.executeQuery(query2);
+                    long sqlTime = 0;
+                    if (rs2.next()) {
+                        sqlTime = rs2.getInt("Playtime");
+                    } else {
+                        Bukkit.getConsoleSender().sendMessage("No player " + key + " in database");
+                    }
+                    sqlTime += value;
+                    String query3 = "UPDATE Users SET Playtime=" + sqlTime + " WHERE Name='" + key + "';";
+                    Statement st3 = con.createStatement();
+                    st3.executeUpdate(query3);
+                } catch (Exception e) {
+                    onError("", e, null);
+                }
+            });
+        }
     }
 
     public static void onError(String reason, Exception e, Player p) {

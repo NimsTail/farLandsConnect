@@ -3,8 +3,8 @@ package com.frammy.unitylauncher.signs;
 import com.flowpowered.math.vector.Vector2d;
 import com.frammy.unitylauncher.UnityCommands;
 import com.frammy.unitylauncher.UnityLauncher;
-import com.frammy.unitylauncher.ZoneManager;
-import com.frammy.unitylauncher.bluemap.BlueMapIntegration;
+import com.frammy.unitylauncher.zones.ZoneManager;
+import com.frammy.unitylauncher.BlueMapIntegration;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import de.bluecolored.bluemap.api.BlueMapMap;
 import de.bluecolored.bluemap.api.markers.ExtrudeMarker;
@@ -37,7 +37,7 @@ import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class SignManager implements Listener {
-    private final UnityLauncher plugin;
+    private final UnityLauncher unityLauncher;
     private final Map<Location, String[]> originalSignTexts = new HashMap<>();
     public Map<Location, SignVariables> genericSignList = new HashMap<>();
     private final Map<Location, BukkitTask> scrollingTasks = new HashMap<>();
@@ -49,20 +49,24 @@ public class SignManager implements Listener {
     private final Map<Player, Block> signSelectionMap = new HashMap<>();
     private final Map<Location, BukkitTask> resetTasks = new HashMap<>();
     private ZoneManager zoneManager;
+
     private UnityCommands unityCommands;
     private BlueMapIntegration blueMapIntegration;
-    private UnityLauncher unityLauncher;
 
-    public SignManager(UnityLauncher plugin, File dataFolder) {
-        this.plugin = plugin;
+    public SignManager(UnityLauncher unityLauncher, File dataFolder, ZoneManager zoneManager, BlueMapIntegration blueMapIntegration, UnityCommands unityCommands) {
+        this.unityLauncher = unityLauncher;
         this.dataFolder = dataFolder;
+        this.zoneManager = zoneManager;
+        this.blueMapIntegration = blueMapIntegration;
+        this.unityCommands = unityCommands;
     }
+
     private final File dataFolder;
     public File getDataFolder() {
         return dataFolder;
     }
     public UnityLauncher getPlugin() {
-        return plugin;
+        return unityLauncher;
     }
 
     @EventHandler
@@ -76,6 +80,7 @@ public class SignManager implements Listener {
             if (genericSignList.get(sign.getLocation()).getSignState() == SignState.SHOP_DEFINED) {
                 p.sendMessage(ChatColor.RED + "Для редактирования таблички присядь и нажми ЛКМ.");
                 e.setCancelled(true);
+                resumeScrolling(sign.getLocation());
                 return;
             }
         }
@@ -402,7 +407,7 @@ public class SignManager implements Listener {
                         player.sendMessage(ChatColor.RED + "Вы не можете сломать эту табличку, так как её установил другой игрок.");
                         event.setCancelled(true);
                     } else {
-                        zoneManager.removeBlueMapMarker(genericSignList.get(sign.getLocation()).getMarkerID());
+                        blueMapIntegration.removeBlueMapMarker(genericSignList.get(sign.getLocation()).getMarkerID(), "world", "services");
                         genericSignList.remove(sign.getLocation());
                     }
                 }
@@ -422,7 +427,7 @@ public class SignManager implements Listener {
                         return;
                     }
                     //atmSignData.remove(idToRemove);
-                    zoneManager.removeBlueMapMarker(genericSignList.get(signLocation).getMarkerID());
+                    blueMapIntegration.removeBlueMapMarker(genericSignList.get(signLocation).getMarkerID(), "world", "services");
                     genericSignList.remove(signLocation);
                     // saveSignData();
                     break;
@@ -434,9 +439,9 @@ public class SignManager implements Listener {
     @EventHandler
     public  void onPlayerLeave(PlayerQuitEvent e) {
         Player p = e.getPlayer();
-        if(unityLauncher.awaitingCorrectCommand.contains(p.getName())) {
+        if(unityLauncher.getAwaitingCorrectCommand().contains(p.getName())) {
             UnityCommands.getInstance().setShops(p,UnityCommands.getInstance().getShops(p) + 1);
-            unityLauncher.awaitingCorrectCommand.remove(p);
+            unityLauncher.getAwaitingCorrectCommand().remove(p);
         }
     }
 
@@ -699,7 +704,7 @@ public class SignManager implements Listener {
             scrollingTasks.get(signLocation).cancel();
         }
 
-        BukkitTask task = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
+        BukkitTask task = Bukkit.getScheduler().runTaskTimer(unityLauncher, () -> {
             if (!(signLocation.getBlock().getState() instanceof Sign)) {
                 scrollingTasks.remove(signLocation);
                 genericSignList.get(signLocation).setPaused(false);
@@ -781,7 +786,7 @@ public class SignManager implements Listener {
             resetTasks.get(loc).cancel();
         }
 
-        BukkitTask task = Bukkit.getScheduler().runTaskLater(plugin, () -> {
+        BukkitTask task = Bukkit.getScheduler().runTaskLater(unityLauncher, () -> {
             // Если сброс сейчас в паузе — повторно планируем задачу
             if (genericSignList.get(loc).getPaused()) {
                 scheduleSignReset(loc); // запускаем таймер заново
@@ -921,8 +926,6 @@ public class SignManager implements Listener {
         } else {
             System.out.println("[DEBUG] BlueMapAPI не инициализирован!");
         }
-
         return null;
     }
-
 }
