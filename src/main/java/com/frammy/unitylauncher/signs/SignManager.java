@@ -42,7 +42,7 @@ public class SignManager implements Listener {
     private final UnityLauncher unityLauncher;
     private final Map<Location, String[]> originalSignTexts = new HashMap<>();
     public Map<Location, SignVariables> genericSignList = new HashMap<>();
-    private final Map<Location, BukkitTask> scrollingTasks = new HashMap<>();
+    public final Map<Location, BukkitTask> scrollingTasks = new HashMap<>();
     private final Map<UUID, Integer> playerScrollIndex = new HashMap<>();
     private final Map<Location, List<String>> signPages = new HashMap<>();
     private final Map<String, Runnable> actions = new HashMap<>();
@@ -105,7 +105,7 @@ public class SignManager implements Listener {
             }
 
             if (e.getLine(0).equalsIgnoreCase("shop") || e.getLine(0).equalsIgnoreCase("магазин")) {
-                ExtrudeMarker marker = isSignWithinMarker(sign.getLocation());
+                ExtrudeMarker marker = isSignWithinMarker(sign.getLocation(), "zones_shop");
                 String label = marker.getLabel();
                 if (label.isEmpty()) {
                     e.setCancelled(true);
@@ -821,7 +821,7 @@ public class SignManager implements Listener {
                     if (block.getState() instanceof Container) {
                         double distanceSquared = origin.distanceSquared(block.getLocation());
                         if (distanceSquared < minDistanceSquared) {
-                            if (isSignWithinMarker(origin) != null) {
+                            if (isSignWithinMarker(origin, "zones_shop") != null) {
                                 minDistanceSquared = distanceSquared;
                                 nearest = block;
                             } else {
@@ -867,7 +867,7 @@ public class SignManager implements Listener {
         }
     }
 
-    public ExtrudeMarker isSignWithinMarker(Location signLocation) {
+    public ExtrudeMarker isSignWithinMarker(Location signLocation, String setName) {
         // System.out.println("[DEBUG] Проверка таблички на маркеры: " + signLocation);
 
         Optional<BlueMapAPI> apiOptional = BlueMapAPI.getInstance();
@@ -880,9 +880,9 @@ public class SignManager implements Listener {
                 BlueMapMap map = mapOptional.get();
                 // System.out.println("[DEBUG] Карта найдена: " + signLocation.getWorld().getName());
 
-                MarkerSet markerSet = map.getMarkerSets().get("shops");
+                MarkerSet markerSet = map.getMarkerSets().get(setName);
                 if (markerSet != null) {
-                    // System.out.println("[DEBUG] Найден MarkerSet с ID 'zones_shops'. Кол-во маркеров: " + markerSet.getMarkers().size());
+                     System.out.println("[DEBUG] Найден MarkerSet с ID" + setName + ". Кол-во маркеров: " + markerSet.getMarkers().size());
 
                     for (Marker marker : markerSet.getMarkers().values()) {
                         if (marker instanceof ExtrudeMarker) {
@@ -913,9 +913,9 @@ public class SignManager implements Listener {
                         }
                     }
 
-                    System.out.println("[DEBUG] Табличка не попала ни в один маркер в MarkerSet 'shops'");
+                    System.out.println("[DEBUG] Табличка не попала ни в один маркер в MarkerSet" + setName);
                 } else {
-                    System.out.println("[DEBUG] MarkerSet с ID 'shops' не найден.");
+                    System.out.println("[DEBUG] MarkerSet с ID" + setName + "не найден.");
                 }
             } else {
                 System.out.println("[DEBUG] Карта не найдена для мира: " + signLocation.getWorld().getName());

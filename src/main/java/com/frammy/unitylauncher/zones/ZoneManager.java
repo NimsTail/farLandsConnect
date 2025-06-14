@@ -9,10 +9,11 @@ import net.md_5.bungee.api.chat.TextComponent;
 import org.bukkit.*;
 import org.bukkit.block.Block;
 import org.bukkit.block.Container;
-import org.bukkit.block.data.type.Sign;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
+import org.bukkit.block.Sign;
+import org.bukkit.block.Block;
 
 import java.io.File;
 import java.io.IOException;
@@ -312,7 +313,9 @@ public class ZoneManager {
                         List<String> initial = signManager.genericSignList.get(loc).getSignText();
                         signManager.genericSignList.get(loc).setSignText(Arrays.asList(newLine0, initial.get(1), initial.get(2), initial.get(3)));
                         Sign sign = (Sign) loc.getBlock().getState();
-                        //sign.update();
+                        sign.setLine(0 , newLine0);
+                        sign.update();
+                       // signManager.resumeScrolling();
                     }
                 }
 
@@ -479,7 +482,7 @@ public class ZoneManager {
         BlueMapAPI.getInstance().ifPresent(blueMapAPI -> {
             Location location = locations.get(0);
             blueMapAPI.getMap(location.getWorld().getName()).ifPresent(map -> {
-                String markerSetID = "zones_" + zoneType;
+                String markerSetID = "zones_" + zoneType.name().toLowerCase();
                 MarkerSet markerSet = map.getMarkerSets().computeIfAbsent(markerSetID, k -> new MarkerSet(markerSetID));
                 List<Vector2d> basePoints = locations.stream()
                         .map(loc -> new Vector2d(loc.getX(), loc.getZ()))

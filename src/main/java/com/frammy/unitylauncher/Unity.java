@@ -133,7 +133,7 @@ public class Unity implements CommandExecutor {
                             sender.sendMessage(ChatColor.RED + "Необходимо указать название категории.");
                         }
                         break;
-                    case "shop":
+                   /* case "shop":
                         switch (args[1]) {
                             case "addcorner":
                                 Player player = (Player) sender;
@@ -173,7 +173,7 @@ public class Unity implements CommandExecutor {
                                 if (blueMapIntegration.markerPoints.get((Player) sender) != null) {
                                     if (blueMapIntegration.markerPoints.get((Player) sender).size() >= 3) {
                                         UnityCommands.getInstance().setShops(sender,UnityCommands.getInstance().getShops(sender) - 1);
-                                        blueMapIntegration.addBlueMapMarker(shopID, ((Player) sender).getLocation(), "shops", "Магазины", "extrude", convertLocationListToVector3dList(blueMapIntegration.markerPoints.get((Player) sender)), (Player)sender);
+                                        blueMapIntegration.addBlueMapMarker(shopID, ((Player) sender).getLocation(), "zones_shop", "Магазины", "extrude", convertLocationListToVector3dList(blueMapIntegration.markerPoints.get((Player) sender)), (Player)sender);
                                     } else {
                                         sender.sendMessage(ChatColor.RED + "Необходимы минимум 3 точки для маркера магазина!");
                                     }
@@ -182,7 +182,7 @@ public class Unity implements CommandExecutor {
                                 }
                                 break;
                         }
-                        return false;
+                        return false;*/
                     case "change":
                         sender.sendMessage("Введи старый, а затем желаемый пароль!");
                         return false;
