@@ -101,7 +101,8 @@ public class BlueMapIntegration {
                                     // Создаём POI-маркер
                                     position = new Vector3d(location.getX() + 0.5, location.getY(), location.getZ() + 0.5);
                                     marker = new POIMarker("shop_" + id, position);
-                                    marker.setLabel("ShopSign");
+                                    marker.setLabel("Табличка о продаже");
+                                    marker.setDetail("ID - '" + id + "'");
                                     marker.setIcon("assets/atm.png", 8, 8);
                                     markerSet.getMarkers().put(String.valueOf(id), marker);
                                     break;
