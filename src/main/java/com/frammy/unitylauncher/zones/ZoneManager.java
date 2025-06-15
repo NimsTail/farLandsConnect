@@ -313,6 +313,12 @@ public class ZoneManager {
                         List<String> initial = signManager.genericSignList.get(loc).getSignText();
                         signManager.genericSignList.get(loc).setSignText(Arrays.asList(newLine0, initial.get(1), initial.get(2), initial.get(3)));
                         Sign sign = (Sign) loc.getBlock().getState();
+
+                        signManager.stopScrollingTask(loc);
+                        HashMap<Integer, String> scrollLines = new HashMap<>();
+                        scrollLines.put(0, newLine0);
+                        signManager.makeSignScrollingLines(loc, scrollLines, 6, 13);
+
                         sign.setLine(0 , newLine0);
                         sign.update();
                        // signManager.resumeScrolling();
@@ -504,8 +510,11 @@ public class ZoneManager {
         BlueMapAPI.getInstance().ifPresent(blueMapAPI -> {
             Location location = locations.get(0);
             blueMapAPI.getMap(location.getWorld().getName()).ifPresent(map -> {
-                String markerSetID = "zones_" + zoneType;
+                String markerSetID = "zones_" + zoneType.name().toLowerCase();
+                System.out.println(map.getMarkerSets().get(markerSetID).getMarkers().size());
+                System.out.println(map.getMarkerSets().get(markerSetID));
                 MarkerSet markerSet = map.getMarkerSets().get(markerSetID);
+
 
                 if (markerSet != null && markerSet.getMarkers().containsKey(markerID)) {
                     ExtrudeMarker marker = (ExtrudeMarker) markerSet.getMarkers().get(markerID);

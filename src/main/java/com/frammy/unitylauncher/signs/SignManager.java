@@ -18,7 +18,6 @@ import org.bukkit.block.Sign;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
-import org.bukkit.entity.HumanEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -377,9 +376,11 @@ public class SignManager implements Listener {
                         sign.setLine(3, line3);
                         sign.update();
                         signVariables.setSignState(SignState.SHOP_DEFINED);
-                        String markerID = "marker_" + UUID.randomUUID();
-                        signVariables.setMarkerID(markerID);
-                        blueMapIntegration.addBlueMapMarker(markerID, sign.getLocation(), "shops", "Торговые точки", "extrude", null, p);
+                        if (genericSignList.get(sign.getLocation()).getMarkerID() == null) {
+                            String markerID = "marker_" + UUID.randomUUID();
+                            signVariables.setMarkerID(markerID);
+                            blueMapIntegration.addBlueMapMarker(markerID, sign.getLocation(), "services", "Сервисы", "point_shop", null, p);
+                        }
                         p.sendMessage(ChatColor.GREEN + "Табличка товара подтверждена.");
                     }
                     return;
@@ -397,8 +398,8 @@ public class SignManager implements Listener {
             if (signVariables.getSignState() == SignState.SHOP_DEFINED) {
                 if (p.isSneaking()) {
                     List<String> text = signVariables.getSignText();
-                    String line2 = text.get(2).replace("Кол-во: ", "");
-                    String line3 = text.get(3).replace("Цена: ", "");
+                    String line2 = text.get(2).replace("Кол-во: " + ChatColor.YELLOW , ChatColor.RESET + "");
+                    String line3 = text.get(3).replace( "Цена: " + ChatColor.GREEN, ChatColor.RESET + "");
                     signVariables.setSignText(Arrays.asList(text.get(0), text.get(1), line2, line3));
                     sign.setLine(2, line2);
                     sign.setLine(3, line3);
@@ -542,16 +543,15 @@ public class SignManager implements Listener {
         if (brokenBlock.getType().toString().contains("SIGN")) {
             if (brokenBlock.getState() instanceof Sign) {
                 Sign sign = (Sign) brokenBlock.getState();
-                if (genericSignList.containsKey(sign.getLocation())) {
-                    if (!genericSignList.get(sign.getLocation()).getOwnerName().equals(player.getName())) {
+                Location loc = sign.getLocation();
+                if (genericSignList.containsKey(loc)) {
+                    if (!genericSignList.get(loc).getOwnerName().equals(player.getName())) {
                         player.sendMessage(ChatColor.RED + "Вы не можете сломать эту табличку, так как её установил другой игрок.");
                         event.setCancelled(true);
                     } else {
-                        String markerID = genericSignList.get(sign.getLocation()).getMarkerID();
-                        if (markerID != null) {
-                            blueMapIntegration.removeBlueMapMarker(markerID, "world", "services");
-                        }
-                        genericSignList.remove(sign.getLocation());
+                        blueMapIntegration.removeBlueMapMarker(genericSignList.get(loc).getMarkerID(), loc.getWorld().getName(), "services");
+                        genericSignList.remove(loc);
+                        stopScrollingTask(loc);
                     }
                 }
             }
@@ -570,11 +570,9 @@ public class SignManager implements Listener {
                         return;
                     }
                     //atmSignData.remove(idToRemove);
-                    String markerID = entry.getValue().getMarkerID();
-                    if (markerID != null) {
-                        blueMapIntegration.removeBlueMapMarker(markerID, signLocation.getWorld().getName(), "services");
-                    }
+                    blueMapIntegration.removeBlueMapMarker(genericSignList.get(signLocation).getMarkerID(), signLocation.getWorld().getName(), "services");
                     genericSignList.remove(signLocation);
+                    stopScrollingTask(signLocation);
                     // saveSignData();
                     break;
                 }
@@ -827,7 +825,7 @@ public class SignManager implements Listener {
 
         // Остановим предыдущую анимацию для этой таблички
         if (scrollingTasks.containsKey(signLocation)) {
-            scrollingTasks.get(signLocation).cancel();
+            stopScrollingTask(signLocation);
         }
 
         BukkitTask task = Bukkit.getScheduler().runTaskTimer(unityLauncher, () -> {
@@ -899,6 +897,12 @@ public class SignManager implements Listener {
             }
             // Запускаем скроллинг
             makeSignScrollingLines(loc, originalLines, 8, 13); // интервал и длина строки
+        }
+    }
+    public void stopScrollingTask(Location loc) {
+        BukkitTask task = scrollingTasks.remove(loc);
+        if (task != null) {
+            task.cancel();
         }
     }
 
