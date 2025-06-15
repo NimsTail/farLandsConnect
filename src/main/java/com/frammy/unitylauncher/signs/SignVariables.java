@@ -32,12 +32,8 @@ public class SignVariables {
     public List<String> getSignText() {
         return signText;
     }
-    public List<Integer> getScrollLines() {
-        return scrollLines;
-    }
-    public SignCategory getSignCategory() {
-        return category;
-    }
+    public List<Integer> getScrollLines() {return scrollLines;}
+    public SignCategory getSignCategory() {return category;}
     public SignState getSignState() {
         return state;
     }
