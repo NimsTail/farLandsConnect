@@ -79,7 +79,7 @@ public class SignManager implements Listener {
         String[] newLines = e.getLines();
 
         if (genericSignList.containsKey(sign.getLocation())) {
-            if (genericSignList.get(sign.getLocation()).getSignState() == SignState.SHOP_DEFINED) {
+            if (genericSignList.get(sign.getLocation()).getSignState() == SignState.SHOP_DEFINED && genericSignList.get(sign.getLocation()).getSignCategory().equals(SignCategory.SHOP_SOURCE)) {
                 p.sendMessage(ChatColor.RED + "Для редактирования таблички присядь и нажми ЛКМ.");
                 e.setCancelled(true);
                 resumeScrolling(sign.getLocation());
@@ -198,7 +198,7 @@ public class SignManager implements Listener {
                                         null
                                 ));
 
-                                p.sendMessage(ChatColor.GREEN + "Список товаров обновлён. Используйте ЛКМ/ПКМ для прокрутки.");
+                                p.sendMessage(ChatColor.GREEN + "Список товаров обновлён. Используйте колёсико мыши для прокрутки.");
                             } else {
                                 p.sendMessage(ChatColor.RED + "Вы должны находиться в зоне магазина.");
                             }
@@ -395,7 +395,7 @@ public class SignManager implements Listener {
                     }
                 }
             }
-            if (signVariables.getSignState() == SignState.SHOP_DEFINED) {
+            if (signVariables.getSignState() == SignState.SHOP_DEFINED && signVariables.getSignCategory().equals(SignCategory.SHOP_SOURCE)) {
                 if (p.isSneaking()) {
                     List<String> text = signVariables.getSignText();
                     String line2 = text.get(2).replace("Кол-во: " + ChatColor.YELLOW , ChatColor.RESET + "");
