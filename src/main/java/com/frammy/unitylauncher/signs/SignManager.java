@@ -177,14 +177,15 @@ public class SignManager implements Listener {
                                     } catch (NumberFormatException ignored) {}
                                 }
 
-                                Map<String, Integer> summary = zoneManager.getItemSummaryFromContainers(containers);
+                             /*   Map<String, Integer> summary = zoneManager.getItemSummaryFromContainers(containers);
                                 List<String> itemLines = summary.entrySet().stream()
                                         .map(ent -> Arrays.stream(ent.getKey().split("_"))
                                                 .map(word -> word.substring(0, 1).toUpperCase() + word.substring(1).toLowerCase())
                                                 .collect(Collectors.joining(" ")) + ": " + ent.getValue())
                                         .toList();
 
-                                signPages.put(sign.getLocation(), itemLines);
+                                signPages.put(sign.getLocation(), itemLines);*/
+                                //updateAllRelatedShopListSigns(containers.get(0).getLocation());
                                 playerScrollIndex.put(p.getUniqueId(), 0);
 
                                 genericSignList.put(sign.getLocation(), new SignVariables(
@@ -235,6 +236,8 @@ public class SignManager implements Listener {
                     // saveSignData();
                     // Добавляем маркер на карту BlueMap
                     blueMapIntegration.addBlueMapMarker(markerID, sign.getLocation(), "services", "Сервисы", "point_atm", null, p);
+                } else {
+                    p.sendMessage(ChatColor.RED  +"Недостаточно прав.");
                 }
             }
         } else {
@@ -320,8 +323,10 @@ public class SignManager implements Listener {
                             .collect(Collectors.joining(" ")) + ": " + e.getValue())
                     .collect(Collectors.toList());
 
+
             signPages.put(signLoc, itemLines);
             playerScrollIndex.put(Bukkit.getOfflinePlayer(vars.getOwnerName()).getUniqueId(), 0);
+
 
             Block block = signLoc.getBlock();
             if (block.getState() instanceof Sign sign) {
@@ -488,7 +493,21 @@ public class SignManager implements Listener {
         Sign sign = (Sign) target.getState();
 
         List<String> items = signPages.get(loc);
-        if (items == null || items.size() <= 3) return;
+        if (items == null || items.size() == 3) return;
+
+        List<String> allStrings = new ArrayList<>();
+        for (List<String> list : signPages.values()) {
+            allStrings.addAll(list);
+        }
+
+        if (allStrings.size() < 3) {
+            System.out.println("Точно меньше или равно 3");
+            int toAdd = 3 - allStrings.size();
+            for (int i = 0; i < toAdd; i++) {
+                System.out.println("Отображаем пустую строку " + i);
+                signPages.get(loc).add(" "); // добавляем пустые строки
+            }
+        }
 
         int current = playerScrollIndex.getOrDefault(player.getUniqueId(), 0);
 
