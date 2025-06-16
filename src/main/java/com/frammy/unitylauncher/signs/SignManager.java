@@ -152,52 +152,24 @@ public class SignManager implements Listener {
                                 linesToScroll1.put(0, line0);
                                 makeSignScrollingLines(e.getBlock().getLocation(), linesToScroll1, 6, 13);
 
-                                List<Location> sourceSignLocations = genericSignList.entrySet().stream()
-                                        .filter(en -> en.getValue().getSignCategory() == SignCategory.SHOP_SOURCE)
-                                        .filter(en -> isSignWithinMarker(en.getKey(), "zones_shop").equals(marker))
-                                        .map(Map.Entry::getKey)
-                                        .toList();
-
-                                List<Block> containers = new ArrayList<>();
-                                for (Location loc : sourceSignLocations) {
-                                    SignVariables sourceVars = genericSignList.get(loc);
-                                    if (sourceVars == null || sourceVars.getSignText().size() < 2) continue;
-
-                                    String[] coords = sourceVars.getSignText().get(1).split(" ");
-                                    if (coords.length != 3) continue;
-
-                                    try {
-                                        int x = Integer.parseInt(coords[0]);
-                                        int y = Integer.parseInt(coords[1]);
-                                        int z = Integer.parseInt(coords[2]);
-                                        Block containerBlock = loc.getWorld().getBlockAt(x, y, z);
-                                        if (containerBlock.getState() instanceof Container) {
-                                            containers.add(containerBlock);
-                                        }
-                                    } catch (NumberFormatException ignored) {}
-                                }
-
-                             /*   Map<String, Integer> summary = zoneManager.getItemSummaryFromContainers(containers);
-                                List<String> itemLines = summary.entrySet().stream()
-                                        .map(ent -> Arrays.stream(ent.getKey().split("_"))
-                                                .map(word -> word.substring(0, 1).toUpperCase() + word.substring(1).toLowerCase())
-                                                .collect(Collectors.joining(" ")) + ": " + ent.getValue())
-                                        .toList();
-
-                                signPages.put(sign.getLocation(), itemLines);*/
-                                //updateAllRelatedShopListSigns(containers.get(0).getLocation());
                                 playerScrollIndex.put(p.getUniqueId(), 0);
 
-                                genericSignList.put(sign.getLocation(), new SignVariables(
+                                SignVariables listVars = new SignVariables(
                                         p.getName(),
-                                        Arrays.asList(line0, "<Загрузка>", "<...", "...>"),
+                                        Arrays.asList(line0, "...", "Загрузка", "..."),
                                         List.of(0),
                                         false,
                                         false,
                                         SignCategory.SHOP_LIST,
                                         SignState.SHOP_DEFINED,
                                         null
-                                ));
+                                );
+                                genericSignList.put(sign.getLocation(), listVars);
+
+                                // ⏳ ОТЛОЖЕННО обновляем список товаров, чтобы успела сохраниться табличка
+                                Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
+                                    updateAllRelatedShopListSigns(sign.getLocation());
+                                });
 
                                 p.sendMessage(ChatColor.GREEN + "Список товаров обновлён. Используйте колёсико мыши для прокрутки.");
                             } else {
@@ -251,32 +223,19 @@ public class SignManager implements Listener {
     public void onInventoryClose(InventoryCloseEvent event) {
         Inventory inventory = event.getInventory();
 
-        // Проверяем, что закрыт именно контейнер
         if (!(inventory.getHolder() instanceof Container container)) return;
 
-        Block block = ((Container) inventory.getHolder()).getBlock();
+        Block block = container.getBlock();
         Location containerLocation = block.getLocation();
 
-        // Находим все таблички, привязанные к этому контейнеру
         for (Map.Entry<Location, SignVariables> entry : genericSignList.entrySet()) {
             SignVariables vars = entry.getValue();
-
             if (vars.getSignCategory() != SignCategory.SHOP_SOURCE) continue;
-            if (vars.getSignText().size() < 2) continue;
 
-            String[] coords = vars.getSignText().get(1).split(" ");
-            if (coords.length != 3) continue;
-
-            try {
-                int x = Integer.parseInt(coords[0]);
-                int y = Integer.parseInt(coords[1]);
-                int z = Integer.parseInt(coords[2]);
-                Location storedLoc = new Location(block.getWorld(), x, y, z);
-
-                if (storedLoc.equals(containerLocation)) {
-                    updateAllRelatedShopListSigns(storedLoc);
-                }
-            } catch (NumberFormatException ignored) {}
+            Location storedLoc = parseContainerLocation(vars, block.getWorld());
+            if (storedLoc != null && storedLoc.equals(containerLocation)) {
+                updateAllRelatedShopListSigns(storedLoc);
+            }
         }
     }
     private void updateAllRelatedShopListSigns(Location containerLocation) {
@@ -333,6 +292,31 @@ public class SignManager implements Listener {
                 updateSignView(sign, itemLines, 0);
             }
         }
+    }
+    private Location parseContainerLocation(SignVariables vars, World world) {
+        if (vars.getSignText().size() < 2) return null;
+        String[] coords = vars.getSignText().get(1).split(" ");
+        if (coords.length != 3) return null;
+
+        try {
+            int x = Integer.parseInt(coords[0]);
+            int y = Integer.parseInt(coords[1]);
+            int z = Integer.parseInt(coords[2]);
+            return new Location(world, x, y, z);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private List<Block> getZoneContainers(ExtrudeMarker marker) {
+        return genericSignList.entrySet().stream()
+                .filter(e -> e.getValue().getSignCategory() == SignCategory.SHOP_SOURCE)
+                .filter(e -> isSignWithinMarker(e.getKey(), "zones_shop").equals(marker))
+                .map(e -> parseContainerLocation(e.getValue(), e.getKey().getWorld()))
+                .filter(Objects::nonNull)
+                .map(Location::getBlock)
+                .filter(b -> b.getState() instanceof Container)
+                .toList();
     }
     @EventHandler
     public void onPlayerInteract(PlayerInteractEvent e) {
@@ -568,9 +552,16 @@ public class SignManager implements Listener {
                         player.sendMessage(ChatColor.RED + "Вы не можете сломать эту табличку, так как её установил другой игрок.");
                         event.setCancelled(true);
                     } else {
-                        blueMapIntegration.removeBlueMapMarker(genericSignList.get(loc).getMarkerID(), loc.getWorld().getName(), "services");
+                        String markerId = genericSignList.get(loc).getMarkerID();
+                        if (markerId != null) {
+                            blueMapIntegration.removeBlueMapMarker(markerId, loc.getWorld().getName(), "services");
+                        }
+
                         genericSignList.remove(loc);
                         stopScrollingTask(loc);
+
+                        signPages.remove(loc);
+                        playerScrollIndex.remove(Bukkit.getOfflinePlayer(genericSignList.get(loc).getOwnerName()).getUniqueId());
                     }
                 }
             }
@@ -589,10 +580,15 @@ public class SignManager implements Listener {
                         return;
                     }
                     //atmSignData.remove(idToRemove);
-                    blueMapIntegration.removeBlueMapMarker(genericSignList.get(signLocation).getMarkerID(), signLocation.getWorld().getName(), "services");
+                    String markerId = genericSignList.get(signLocation).getMarkerID();
+                    if (markerId != null) {
+                        blueMapIntegration.removeBlueMapMarker(markerId, signLocation.getWorld().getName(), "services");
+                    }
                     genericSignList.remove(signLocation);
                     stopScrollingTask(signLocation);
-                    // saveSignData();
+
+                    signPages.remove(signLocation);
+                    playerScrollIndex.remove(Bukkit.getOfflinePlayer(genericSignList.get(signLocation).getOwnerName()).getUniqueId());
                     break;
                 }
             }
@@ -831,8 +827,8 @@ public class SignManager implements Listener {
             if (text.length() <= maxLength) {
                 sign.setLine(lineIndex, text);
             } else {
-                String base = text + "   ";
-                scrollBuffers.put(lineIndex, base + base);
+                String scrollingBuffer = (text + "   ").repeat(2);
+                scrollBuffers.put(lineIndex, scrollingBuffer);
             }
         }
         sign.update();
@@ -853,9 +849,11 @@ public class SignManager implements Listener {
                 genericSignList.get(signLocation).setPaused(false);
                 return;
             }
-
+            if (genericSignList.get(signLocation) == null) {
+                return;
+            }
             if (genericSignList.get(signLocation).getPaused()) {
-                return; // ⏸ Табличка в паузе
+                return;
             }
 
             boolean anyNearby = Bukkit.getOnlinePlayers().stream()
@@ -864,7 +862,8 @@ public class SignManager implements Listener {
             if (!anyNearby) return;
 
             Sign currentSign = (Sign) signLocation.getBlock().getState();
-            int pos = offset.getAndUpdate(i -> (i + 1) % unityLauncher.getMaxBaseLength(originalLines.values()));
+            int baseLength = Math.max(1, unityLauncher.getMaxBaseLength(originalLines.values()));
+            int pos = offset.getAndUpdate(i -> (i + 1) % baseLength);
 
             for (Map.Entry<Integer, String> entry : scrollBuffers.entrySet()) {
                 int lineIndex = entry.getKey();
