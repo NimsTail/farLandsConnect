@@ -31,6 +31,7 @@ import org.bukkit.event.player.PlayerItemHeldEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
+import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
@@ -510,6 +511,13 @@ public class SignManager implements Listener {
 
         // Показываем срез из 3 элементов, начиная с newIndex
         updateSignView(sign, items, newIndex);
+        String selectedText = updateSignView(sign, items, newIndex);
+
+// Если выбранный текст длиннее 15, запускаем прокрутку
+        if (selectedText != null && ChatColor.stripColor(selectedText).length() > 15) {
+            pauseScrolling(loc);
+            startSignTextScroll(sign, 2, selectedText, ChatColor.GREEN, 15, 216, 6, () -> { resumeScrolling(loc);}); // строка 2 — третья строка
+        }
         scheduleSignReset(sign.getLocation());
         e.setCancelled(true);
     }
@@ -702,16 +710,74 @@ public class SignManager implements Listener {
     }
 
     // Обновление таблички
-    private void updateSignView(Sign sign, List<String> items, int offset) {
-        if (items == null || items.isEmpty()) return;
+    private String updateSignView(Sign sign, List<String> items, int offset) {
+        if (items == null || items.isEmpty()) return null;
+
+        String highlighted = null;
+
         for (int i = 0; i < 3; i++) {
             int itemIndex = (offset + i) % items.size(); // зацикливание
             String text = items.get(itemIndex);
-            if (text.length() > 15) text = text.substring(0, 15);
-            sign.setLine(i + 1, text);
+
+            if (i == 1) {
+                highlighted = text; // сохраним выделенный текст
+                sign.setLine(i + 1, ChatColor.GREEN + truncateToVisible(text, 15)); // Предварительно обрежем
+            } else {
+                sign.setLine(i + 1, truncateToVisible(text, 15));
+            }
         }
+
         sign.update();
+        return highlighted;
     }
+
+    private String truncateToVisible(String text, int maxLen) {
+        return (text.length() > maxLen) ? text.substring(0, maxLen) : text;
+    }
+
+    public void startSignTextScroll(Sign sign, int lineIndex, String fullText, ChatColor color, int visibleWidth, int durationTicks, int intervalTicks, Runnable onComplete) {
+        String stripped = ChatColor.stripColor(fullText);
+        if (stripped.length() <= visibleWidth) {
+            sign.setLine(lineIndex, color + stripped);
+            sign.update();
+            if (onComplete != null) {
+                onComplete.run();
+            }
+            return;
+        }
+
+        new BukkitRunnable() {
+            int tick = 0;
+            boolean forward = true;
+
+            @Override
+            public void run() {
+                if (tick >= durationTicks || !sign.getLocation().getBlock().getState().equals(sign)) {
+                    cancel();
+                    if (onComplete != null) {
+                        onComplete.run();
+                    }
+                    return;
+                }
+
+                int maxOffset = stripped.length() - visibleWidth;
+                int offset = (tick / intervalTicks) % (maxOffset + 1);
+                if (!forward) offset = maxOffset - offset;
+
+                String view = stripped.substring(offset, offset + visibleWidth);
+                sign.setLine(lineIndex, color + view);
+                sign.update();
+
+                if ((tick / intervalTicks) % (maxOffset + 1) == 0) {
+                    forward = !forward;
+                }
+
+                tick += intervalTicks;
+            }
+        }.runTaskTimer(unityLauncher, 0L, intervalTicks);
+    }
+
+
 
     public void saveSignData() {
         File shopFile = new File(getDataFolder(), "signData.yml");
