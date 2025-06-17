@@ -51,8 +51,8 @@ public class SignManager implements Listener {
     private final Map<Location, Runnable> signClickActions = new HashMap<>();
     private final Map<Player, Block> signSelectionMap = new HashMap<>();
     private final Map<Location, BukkitTask> resetTasks = new HashMap<>();
+    private final Map<Location, Map<Integer, BukkitTask>> activeScrolls = new HashMap<>();
     private final ZoneManager zoneManager;
-
     private final UnityCommands unityCommands;
     private final BlueMapIntegration blueMapIntegration;
 
@@ -510,11 +510,11 @@ public class SignManager implements Listener {
         playerScrollIndex.put(player.getUniqueId(), newIndex);
 
         // Показываем срез из 3 элементов, начиная с newIndex
-        updateSignView(sign, items, newIndex);
         String selectedText = updateSignView(sign, items, newIndex);
 
-// Если выбранный текст длиннее 15, запускаем прокрутку
+        // Если выбранный текст длиннее 15, запускаем прокрутку
         if (selectedText != null && ChatColor.stripColor(selectedText).length() > 15) {
+            stopHorizontalScroll(loc, 2);
             pauseScrolling(loc);
             startSignTextScroll(sign, 2, selectedText, ChatColor.GREEN, 15, 216, 6, () -> { resumeScrolling(loc);}); // строка 2 — третья строка
         }
@@ -737,16 +737,22 @@ public class SignManager implements Listener {
 
     public void startSignTextScroll(Sign sign, int lineIndex, String fullText, ChatColor color, int visibleWidth, int durationTicks, int intervalTicks, Runnable onComplete) {
         String stripped = ChatColor.stripColor(fullText);
+        Location loc = sign.getLocation();
+
+        // Остановка предыдущей задачи (если была)
+        activeScrolls.computeIfAbsent(loc, l -> new HashMap<>());
+        BukkitTask oldTask = activeScrolls.get(loc).get(lineIndex);
+        if (oldTask != null) oldTask.cancel();
+
+        // Если прокручивать нечего — просто отобразить
         if (stripped.length() <= visibleWidth) {
             sign.setLine(lineIndex, color + stripped);
             sign.update();
-            if (onComplete != null) {
-                onComplete.run();
-            }
+            if (onComplete != null) onComplete.run();
             return;
         }
 
-        new BukkitRunnable() {
+        BukkitTask newTask = new BukkitRunnable() {
             int tick = 0;
             boolean forward = true;
 
@@ -754,9 +760,8 @@ public class SignManager implements Listener {
             public void run() {
                 if (tick >= durationTicks || !sign.getLocation().getBlock().getState().equals(sign)) {
                     cancel();
-                    if (onComplete != null) {
-                        onComplete.run();
-                    }
+                    activeScrolls.get(loc).remove(lineIndex);
+                    if (onComplete != null) onComplete.run();
                     return;
                 }
 
@@ -775,6 +780,20 @@ public class SignManager implements Listener {
                 tick += intervalTicks;
             }
         }.runTaskTimer(unityLauncher, 0L, intervalTicks);
+        activeScrolls.get(loc).put(lineIndex, newTask);
+    }
+
+    public void stopHorizontalScroll(Location signLocation, int lineIndex) {
+        Map<Integer, BukkitTask> tasksForSign = activeScrolls.get(signLocation);
+        if (tasksForSign != null) {
+            BukkitTask task = tasksForSign.remove(lineIndex);
+            if (task != null) {
+                task.cancel();
+            }
+            if (tasksForSign.isEmpty()) {
+                activeScrolls.remove(signLocation);
+            }
+        }
     }
 
 
