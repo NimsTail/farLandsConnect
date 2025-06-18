@@ -776,7 +776,6 @@ public class SignManager implements Listener {
                 if ((tick / intervalTicks) % (maxOffset + 1) == 0) {
                     forward = !forward;
                 }
-
                 tick += intervalTicks;
             }
         }.runTaskTimer(unityLauncher, 0L, intervalTicks);
@@ -798,8 +797,6 @@ public class SignManager implements Listener {
             }
         }
     }
-
-
 
     public void saveSignData() {
         File shopFile = new File(getDataFolder(), "signData.yml");
@@ -891,7 +888,6 @@ public class SignManager implements Listener {
             SignVariables vars = new SignVariables(owner, text, scrollLines, isConfigurable, isPaused, category, state, markerID);
             genericSignList.put(loc, vars);
 
-            // Если табличка имеет прокручиваемые строки — включаем скролл
             if (scrollLines != null && !scrollLines.isEmpty()) {
                 Map<Integer, String> scrollMap = new HashMap<>();
                 for (int index : scrollLines) {
@@ -904,17 +900,12 @@ public class SignManager implements Listener {
                 }
             }
 
-            // Если это табличка со списком товаров — обновим её
             if (category == SignCategory.SHOP_LIST) {
                 Bukkit.getScheduler().runTaskLater(unityLauncher, () -> {
                     updateAllRelatedShopListSigns(loc);
-                }, 20L * 5); // 5 секунд, чтобы прогрузились чанки и контейнеры
-                Bukkit.getLogger().info("[DEBUG] SHOP_LIST табличка готова: " + loc);
+                }, 20L * 5);
             }
-
         }
-
-        Bukkit.getLogger().info("Таблички успешно загружены из signData.yml");
     }
 
     public void pauseScrolling(Location location) {
@@ -1175,7 +1166,7 @@ public class SignManager implements Listener {
 
                 MarkerSet markerSet = map.getMarkerSets().get(setName);
                 if (markerSet != null) {
-                     System.out.println("[DEBUG] Найден MarkerSet с ID" + setName + ". Кол-во маркеров: " + markerSet.getMarkers().size());
+                    System.out.println("[DEBUG] Найден MarkerSet с ID" + setName + ". Кол-во маркеров: " + markerSet.getMarkers().size());
 
                     for (Marker marker : markerSet.getMarkers().values()) {
                         if (marker instanceof ExtrudeMarker) {

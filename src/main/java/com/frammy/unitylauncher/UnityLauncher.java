@@ -12,7 +12,6 @@ import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
 import org.bukkit.configuration.file.FileConfiguration;
-import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -22,7 +21,6 @@ import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.Nullable;
 
-import java.io.File;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -45,7 +43,6 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
     @Override
     public void onEnable() {
-        //Инициализируем всякую туфту
         Bukkit.getPluginManager().registerEvents(this, this);
         moneyManager = new MoneyManager(getDataFolder(), "unity_launcher");
         getServer().getPluginManager().registerEvents(moneyManager, this);
@@ -56,26 +53,10 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         this.signManager = new SignManager(this, getDataFolder(), zoneManager, blueMapIntegration, UnityCommands.getInstance());
         this.zoneManager.setSignManager(signManager);
         getServer().getPluginManager().registerEvents(signManager, this);
-        // webSocketManager.connect();
         HelpCommandManager helpManager = new HelpCommandManager();
         Objects.requireNonNull(getCommand("unityLauncher")).setExecutor(new Unity(helpManager, webSocketManager));
         this.getCommand("unityLauncher").setTabCompleter(new CommandCompleter());
-        if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
-            BlueMapAPI.onEnable(api -> {
-                System.out.println("Загружаем маркеры для BlueMap.");
-                blueMapIntegration.initializeBlueMapMarkerStorage("zones_shop");
-                blueMapIntegration.loadBlueMapMarkers();
-            });
-        }
 
-        //Загружаем данные yml
-        signManager.loadSignData();
-
-        //loadShopData();
-        zoneManager.loadZoneData();
-        zoneManager.loadZonesFromConfig();
-
-        //Для help комманды
         commandCategories.add("Авторизация");
         commandCategories.add("Финансы");
         commandCategories.add("Уведомления");
@@ -94,18 +75,31 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         helpManager.addCommand("/ul group LIST/SET/PREFIX", "Настраивает группы прав для государства", "Страна");
         helpManager.addCommand("/ul shop create НАЗВАНИЕ", "Создание торговой точки", "Финансы");
 
-        FileConfiguration config = YamlConfiguration.loadConfiguration(new File(getDataFolder(), "signData.yml"));
-        signManager.restoreScrollingSignsFromFile(config);
+        // Загрузка табличек и зон ТОЛЬКО после инициализации BlueMap
+        if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
+            BlueMapAPI.onEnable(api -> {
+                getLogger().info("Загружаем маркеры для BlueMap.");
+                blueMapIntegration.initializeBlueMapMarkerStorage("zones_shop");
+                blueMapIntegration.loadBlueMapMarkers();
 
-        // ⏳ Однократное обновление всех SHOP_LIST табличек через 5 секунд после старта
-        Bukkit.getScheduler().runTaskLater(this, () -> {
-            for (Map.Entry<Location, SignVariables> entry : signManager.genericSignList.entrySet()) {
-                if (entry.getValue().getSignCategory() == SignCategory.SHOP_LIST) {
-                    signManager.updateAllRelatedShopListSigns(entry.getKey());
-                }
-            }
-        }, 20L * 5); // 5 секунд задержка, чтобы все чанки успели прогрузиться
+                Bukkit.getScheduler().runTask(this, () -> {
+                    signManager.loadSignData();
+                    zoneManager.loadZoneData();
+                    zoneManager.loadZonesFromConfig();
 
+                    // Обновляем все SHOP_LIST таблички через 5 секунд
+                    Bukkit.getScheduler().runTaskLater(this, () -> {
+                        for (Map.Entry<Location, SignVariables> entry : signManager.genericSignList.entrySet()) {
+                            if (entry.getValue().getSignCategory() == SignCategory.SHOP_LIST) {
+                                signManager.updateAllRelatedShopListSigns(entry.getKey());
+                            }
+                        }
+                    }, 20L * 5);
+                });
+            });
+        } else {
+            getLogger().warning("BlueMap не включён. Таблички и зоны не будут инициализированы!");
+        }
         instance = this;
     }
     public ZoneManager getZoneManager() {
