@@ -467,62 +467,6 @@ public class SignManager implements Listener {
     }
 
     @EventHandler
-    public void onScroll(PlayerItemHeldEvent e) {
-        Player player = e.getPlayer();
-
-        // Проверим, смотрит ли игрок на табличку
-        Block target = player.getTargetBlockExact(4); // до 6 блоков — можно увеличить
-        if (target == null || !(target.getState() instanceof Sign)) return;
-
-        Location loc = target.getLocation();
-        Sign sign = (Sign) target.getState();
-
-        List<String> items = signPages.get(loc);
-        if (items == null || items.size() == 3) return;
-
-        List<String> allStrings = new ArrayList<>();
-        for (List<String> list : signPages.values()) {
-            allStrings.addAll(list);
-        }
-
-        if (allStrings.size() < 3) {
-            System.out.println("Точно меньше или равно 3");
-            int toAdd = 3 - allStrings.size();
-            for (int i = 0; i < toAdd; i++) {
-                System.out.println("Отображаем пустую строку " + i);
-                signPages.get(loc).add(" "); // добавляем пустые строки
-            }
-        }
-
-        int current = playerScrollIndex.getOrDefault(player.getUniqueId(), 0);
-
-        // Определим направление прокрутки
-        int fromSlot = e.getPreviousSlot();
-        int toSlot = e.getNewSlot();
-        boolean scrollDown = (toSlot - fromSlot + 9) % 9 <= 4; // учитываем wraparound hotbar (0 → 8 и наоборот)
-
-        int newIndex = scrollDown ? current + 1 : current - 1;
-
-        // Зацикливание
-        if (newIndex < 0) newIndex = items.size() - 1;
-        if (newIndex >= items.size()) newIndex = 0;
-
-        playerScrollIndex.put(player.getUniqueId(), newIndex);
-
-        // Показываем срез из 3 элементов, начиная с newIndex
-        String selectedText = updateSignView(sign, items, newIndex);
-
-        // Если выбранный текст длиннее 15, запускаем прокрутку
-        if (selectedText != null && ChatColor.stripColor(selectedText).length() > 15) {
-            stopHorizontalScroll(loc, 2);
-            pauseScrolling(loc);
-            startSignTextScroll(sign, 2, selectedText, ChatColor.GREEN, 15, 216, 6, () -> { resumeScrolling(loc);}); // строка 2 — третья строка
-        }
-        scheduleSignReset(sign.getLocation());
-        e.setCancelled(true);
-    }
-
-    @EventHandler
     public void onInventoryOpen(InventoryOpenEvent e) {
         Player p = (Player) e.getPlayer();
 
@@ -601,6 +545,62 @@ public class SignManager implements Listener {
                 }
             }
         }
+    }
+
+    @EventHandler
+    public void onScroll(PlayerItemHeldEvent e) {
+        Player player = e.getPlayer();
+
+        // Проверим, смотрит ли игрок на табличку
+        Block target = player.getTargetBlockExact(4); // до 6 блоков — можно увеличить
+        if (target == null || !(target.getState() instanceof Sign)) return;
+
+        Location loc = target.getLocation();
+        Sign sign = (Sign) target.getState();
+
+        List<String> items = signPages.get(loc);
+        if (items == null) return;
+
+        List<String> allStrings = new ArrayList<>();
+        for (List<String> list : signPages.values()) {
+            allStrings.addAll(list);
+        }
+
+        if (allStrings.size() < 3) {
+            System.out.println("Точно меньше или равно 3");
+            int toAdd = 3 - allStrings.size();
+            for (int i = 0; i < toAdd; i++) {
+                System.out.println("Отображаем пустую строку " + i);
+                signPages.get(loc).add("  "); // добавляем пустые строки
+            }
+        }
+
+        int current = playerScrollIndex.getOrDefault(player.getUniqueId(), 0);
+
+        // Определим направление прокрутки
+        int fromSlot = e.getPreviousSlot();
+        int toSlot = e.getNewSlot();
+        boolean scrollDown = (toSlot - fromSlot + 9) % 9 <= 4; // учитываем wraparound hotbar (0 → 8 и наоборот)
+
+        int newIndex = scrollDown ? current + 1 : current - 1;
+
+        // Зацикливание
+        if (newIndex < 0) newIndex = items.size() - 1;
+        if (newIndex >= items.size()) newIndex = 0;
+
+        playerScrollIndex.put(player.getUniqueId(), newIndex);
+
+        // Показываем срез из 3 элементов, начиная с newIndex
+        stopHorizontalScroll(loc, 2);
+        String selectedText = updateSignView(sign, items, newIndex);
+
+        // Если выбранный текст длиннее 15, запускаем прокрутку
+        if (selectedText != null && ChatColor.stripColor(selectedText).length() > 15) {
+            pauseScrolling(loc);
+            startSignTextScroll(sign, 2, selectedText, ChatColor.GREEN, 15, 216, 6, () -> { resumeScrolling(loc);}); // строка 2 — третья строка
+        }
+        scheduleSignReset(sign.getLocation());
+        e.setCancelled(true);
     }
 
     @EventHandler
@@ -786,11 +786,14 @@ public class SignManager implements Listener {
     public void stopHorizontalScroll(Location signLocation, int lineIndex) {
         Map<Integer, BukkitTask> tasksForSign = activeScrolls.get(signLocation);
         if (tasksForSign != null) {
-            BukkitTask task = tasksForSign.remove(lineIndex);
+            BukkitTask task = tasksForSign.get(lineIndex);
             if (task != null) {
+                resumeScrolling(signLocation);
                 task.cancel();
+                activeScrolls.remove(signLocation);
             }
             if (tasksForSign.isEmpty()) {
+                resumeScrolling(signLocation);
                 activeScrolls.remove(signLocation);
             }
         }
