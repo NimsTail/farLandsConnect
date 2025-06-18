@@ -239,17 +239,17 @@ public class SignManager implements Listener {
             }
         }
     }
-    private void updateAllRelatedShopListSigns(Location containerLocation) {
+    public void updateAllRelatedShopListSigns(Location containerLocation) {
         ExtrudeMarker marker = isSignWithinMarker(containerLocation, "zones_shop");
         if (marker == null) return;
 
         // Найти все таблички типа SHOP_LIST в этой зоне
         for (Map.Entry<Location, SignVariables> entry : genericSignList.entrySet()) {
             Location signLoc = entry.getKey();
-            SignVariables vars = entry.getValue();
 
-            if (vars.getSignCategory() != SignCategory.SHOP_LIST) continue;
-            if (!isSignWithinMarker(signLoc, "zones_shop").equals(marker)) continue;
+            if (entry.getValue().getSignCategory() != SignCategory.SHOP_LIST) continue;
+            ExtrudeMarker marker2 = isSignWithinMarker(signLoc, "zones_shop");
+            if (marker2 == null || !marker2.getLabel().equals(marker.getLabel())) continue;
 
             // Найти все source таблички этой зоны
             List<Location> sourceSignLocations = genericSignList.entrySet().stream()
@@ -285,7 +285,7 @@ public class SignManager implements Listener {
 
 
             signPages.put(signLoc, itemLines);
-            playerScrollIndex.put(Bukkit.getOfflinePlayer(vars.getOwnerName()).getUniqueId(), 0);
+            playerScrollIndex.put(Bukkit.getOfflinePlayer(entry.getValue().getOwnerName()).getUniqueId(), 0);
 
 
             Block block = signLoc.getBlock();
@@ -888,7 +888,30 @@ public class SignManager implements Listener {
             }
 
             // Добавляем в мапу
-            genericSignList.put(loc, new SignVariables(owner, text, scrollLines, isConfigurable, isPaused, category, state, markerID));
+            SignVariables vars = new SignVariables(owner, text, scrollLines, isConfigurable, isPaused, category, state, markerID);
+            genericSignList.put(loc, vars);
+
+            // Если табличка имеет прокручиваемые строки — включаем скролл
+            if (scrollLines != null && !scrollLines.isEmpty()) {
+                Map<Integer, String> scrollMap = new HashMap<>();
+                for (int index : scrollLines) {
+                    if (index >= 0 && index < text.size()) {
+                        scrollMap.put(index, text.get(index));
+                    }
+                }
+                if (!scrollMap.isEmpty()) {
+                    makeSignScrollingLines(loc, scrollMap, 8, 13);
+                }
+            }
+
+            // Если это табличка со списком товаров — обновим её
+            if (category == SignCategory.SHOP_LIST) {
+                Bukkit.getScheduler().runTaskLater(unityLauncher, () -> {
+                    updateAllRelatedShopListSigns(loc);
+                }, 20L * 5); // 5 секунд, чтобы прогрузились чанки и контейнеры
+                Bukkit.getLogger().info("[DEBUG] SHOP_LIST табличка готова: " + loc);
+            }
+
         }
 
         Bukkit.getLogger().info("Таблички успешно загружены из signData.yml");
@@ -989,20 +1012,45 @@ public class SignManager implements Listener {
             Block block = loc.getBlock();
             if (!(block.getState() instanceof Sign)) continue;
 
-            Sign sign = (Sign) block.getState();
-
-            // Получаем индексы строк, которые нужно скроллить
+            // Чтение сохранённых данных
+            List<String> signText = signSection.getStringList("text");
             List<Integer> scrollLines = signSection.getIntegerList("scrollLines");
-            Map<Integer, String> originalLines = new HashMap<>();
+            String owner = signSection.getString("owner", "unknown");
+            boolean isConfigurable = signSection.getBoolean("configurable", false);
+            boolean isPaused = signSection.getBoolean("paused", false);
+            String markerId = signSection.getString("markerId");
+            String categoryRaw = signSection.getString("category", "SHOP_SOURCE");
+            String stateRaw = signSection.getString("state", "SHOP_DEFINED");
 
+            // Преобразуем строковые значения в enum'ы
+            SignCategory category = SignCategory.valueOf(categoryRaw);
+            SignState state = SignState.valueOf(stateRaw);
+
+            // Восстанавливаем объект SignVariables
+            SignVariables vars = new SignVariables(
+                    owner,
+                    signText,
+                    scrollLines,
+                    isConfigurable,
+                    isPaused,
+                    category,
+                    state,
+                    markerId
+            );
+
+            genericSignList.put(loc, vars);
+
+            // Запускаем скролл, если есть
+            Map<Integer, String> scrollMap = new HashMap<>();
             for (int lineIndex : scrollLines) {
-                if (lineIndex >= 0 && lineIndex <= 3) {
-                    String rawLine = ChatColor.stripColor(sign.getLine(lineIndex));
-                    originalLines.put(lineIndex, rawLine);
+                if (lineIndex >= 0 && lineIndex <= 3 && lineIndex < signText.size()) {
+                    scrollMap.put(lineIndex, signText.get(lineIndex));
                 }
             }
-            // Запускаем скроллинг
-            makeSignScrollingLines(loc, originalLines, 8, 13); // интервал и длина строки
+
+            if (!scrollMap.isEmpty()) {
+                makeSignScrollingLines(loc, scrollMap, 8, 13);
+            }
         }
     }
     public void stopScrollingTask(Location loc) {
@@ -1019,6 +1067,11 @@ public class SignManager implements Listener {
         }
 
         BukkitTask task = Bukkit.getScheduler().runTaskLater(unityLauncher, () -> {
+            if (genericSignList.get(loc) == null) {
+                resetTasks.remove(loc);
+                return; // табличка больше не отслеживается
+            }
+
             // Если сброс сейчас в паузе — повторно планируем задачу
             if (genericSignList.get(loc).getPaused()) {
                 scheduleSignReset(loc); // запускаем таймер заново
@@ -1026,11 +1079,17 @@ public class SignManager implements Listener {
             }
 
             Block block = loc.getBlock();
-            if (!(block.getState() instanceof Sign)) return;
+            if (!(block.getState() instanceof Sign)) {
+                resetTasks.remove(loc);
+                return;
+            }
 
             Sign sign = (Sign) block.getState();
             String[] lines = originalSignTexts.get(loc);
-            if (lines == null) return;
+            if (lines == null) {
+                resetTasks.remove(loc);
+                return;
+            }
 
             for (int i = 0; i < Math.min(4, lines.length); i++) {
                 sign.setLine(i, lines[i]);

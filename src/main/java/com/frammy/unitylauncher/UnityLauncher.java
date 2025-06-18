@@ -1,5 +1,7 @@
 package com.frammy.unitylauncher;
+import com.frammy.unitylauncher.signs.SignCategory;
 import com.frammy.unitylauncher.signs.SignManager;
+import com.frammy.unitylauncher.signs.SignVariables;
 import com.frammy.unitylauncher.zones.ZoneManager;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import net.md_5.bungee.api.chat.ClickEvent;
@@ -94,6 +96,16 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
         FileConfiguration config = YamlConfiguration.loadConfiguration(new File(getDataFolder(), "signData.yml"));
         signManager.restoreScrollingSignsFromFile(config);
+
+        // ⏳ Однократное обновление всех SHOP_LIST табличек через 5 секунд после старта
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            for (Map.Entry<Location, SignVariables> entry : signManager.genericSignList.entrySet()) {
+                if (entry.getValue().getSignCategory() == SignCategory.SHOP_LIST) {
+                    signManager.updateAllRelatedShopListSigns(entry.getKey());
+                }
+            }
+        }, 20L * 5); // 5 секунд задержка, чтобы все чанки успели прогрузиться
+
         instance = this;
     }
     public ZoneManager getZoneManager() {
