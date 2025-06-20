@@ -2,6 +2,7 @@ package com.frammy.unitylauncher;
 
 import com.flowpowered.math.vector.Vector2d;
 import com.flowpowered.math.vector.Vector3d;
+import com.frammy.unitylauncher.signs.SignVariables;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import de.bluecolored.bluemap.api.BlueMapMap;
 import de.bluecolored.bluemap.api.gson.MarkerGson;
@@ -13,6 +14,7 @@ import de.bluecolored.bluemap.api.math.Shape;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
+import org.bukkit.block.data.type.Sign;
 import org.bukkit.entity.Player;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.GeometryFactory;
@@ -256,4 +258,5 @@ public class BlueMapIntegration {
         }
         return coordinates.toArray(new Coordinate[0]);
     }
+
 }

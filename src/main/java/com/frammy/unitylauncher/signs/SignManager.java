@@ -36,6 +36,7 @@ import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.Array;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
@@ -344,6 +345,10 @@ public class SignManager implements Listener {
             if (signVariables.getSignState() == SignState.SHOP_UNDEFINED) {
                 if (p.isSneaking()) {
                     if (!sign.getLine(2).isEmpty() && !sign.getLine(3).isEmpty()) {
+                        if (getContainerLocation(sign) == null) {
+                            p.sendMessage(ChatColor.RED + "Вторая строка не содержит координаты хранилища!");
+                            return;
+                        }
                         double price;
                         int amount;
                         try {
@@ -357,6 +362,7 @@ public class SignManager implements Listener {
                             sign.update();
                             return;
                         }
+
                         List<String> signTexts = genericSignList.get(sign.getLocation()).getSignText();
                         String line3 = "Цена: " + ChatColor.GREEN + String.valueOf(price);
                         String line2 = "Кол-во: " + ChatColor.YELLOW + String.valueOf(amount);
@@ -473,19 +479,28 @@ public class SignManager implements Listener {
         if (signSelectionMap.containsKey(p)) {
             Block signBlock = signSelectionMap.get(p);
             Location containerLoc = ((InventoryHolder) e.getInventory().getHolder()).getInventory().getLocation();
+            Sign sign = (Sign) signBlock.getState();
 
             if (containerLoc == null) {
                 p.sendMessage(ChatColor.RED + "Ошибка: не удалось получить координаты хранилища.");
                 return;
             }
+            if (isSignWithinMarker(containerLoc, "zones_shop") == null) {
+                p.sendMessage(ChatColor.RED + "Хранилище находится вне зоны.");
+                return;}
 
-            Sign sign = (Sign) signBlock.getState();
-            sign.setLine(1, containerLoc.getBlockX() + " " + containerLoc.getBlockY() + " " + containerLoc.getBlockZ());
-            sign.update();
+            if (isSignWithinMarker(containerLoc, "zones_shop").equals(isSignWithinMarker(sign.getLocation(), "zones_shop"))) {
+                List<String> text = genericSignList.get(sign.getLocation()).getSignText();
+                genericSignList.get(sign.getLocation()).setSignText(Arrays.asList(text.get(0), containerLoc.getBlockX() + " " + containerLoc.getBlockY() + " " + containerLoc.getBlockZ(), text.get(2), text.get(3)));
+                sign.setLine(1, containerLoc.getBlockX() + " " + containerLoc.getBlockY() + " " + containerLoc.getBlockZ());
+                sign.update();
 
-            p.sendMessage(ChatColor.GREEN + "Новое хранилище выбрано: " +
-                    containerLoc.getBlockX() + " " + containerLoc.getBlockY() + " " + containerLoc.getBlockZ());
-            signSelectionMap.remove(p);
+                p.sendMessage(ChatColor.GREEN + "Новое хранилище выбрано: " +
+                        containerLoc.getBlockX() + " " + containerLoc.getBlockY() + " " + containerLoc.getBlockZ());
+                signSelectionMap.remove(p);
+            } else {
+                p.sendMessage(ChatColor.RED + "Хранилище находится в другой зоне.");
+            }
         }
     }
 
@@ -544,7 +559,44 @@ public class SignManager implements Listener {
                     break;
                 }
             }
+            if (brokenBlock.getState() instanceof Container) {
+                for (Location loc : genericSignList.keySet()) {
+                    Block block = loc.getBlock();
+                    Sign sign = (Sign) block.getState();
+                    if (genericSignList.get(loc).getSignCategory().equals(SignCategory.SHOP_SOURCE)) {
+                        if (brokenBlock.getLocation().equals(getContainerLocation(sign))) {
+                            SignVariables sv = genericSignList.get(loc);
+                            sv.setSignState(SignState.SHOP_UNDEFINED);
+                            List<String> text = sv.getSignText();
+                            String line2 = text.get(2).replace("Кол-во: " + ChatColor.YELLOW , ChatColor.RESET + "");
+                            String line3 = text.get(3).replace( "Цена: " + ChatColor.GREEN, ChatColor.RESET + "");
+                            sv.setSignText(Arrays.asList(text.get(0), ChatColor.RED + "Разрушено", line2, line3));
+                            sign.setLine(1, ChatColor.RED + "Разрушено");
+                            sign.setLine(2, line2);
+                            sign.setLine(3, line3);
+                            sign.update();
+                        }
+
+
+                    }
+                }
+            }
         }
+    }
+    public Location getContainerLocation(Sign sign) {
+
+        String[] coords = sign.getLine(1).split(" ");
+
+        if (coords.length != 3) return null;
+
+        try {
+            int x = Integer.parseInt(coords[0]);
+            int y = Integer.parseInt(coords[1]);
+            int z = Integer.parseInt(coords[2]);
+            Block containerBlock = sign.getLocation().getWorld().getBlockAt(x, y, z);
+            return containerBlock.getLocation();
+        } catch (NumberFormatException ignored) {}
+        return null;
     }
 
     @EventHandler
@@ -1105,11 +1157,11 @@ public class SignManager implements Listener {
                     if (block.getState() instanceof Container) {
                         double distanceSquared = origin.distanceSquared(block.getLocation());
                         if (distanceSquared < minDistanceSquared) {
-                            if (isSignWithinMarker(origin, "zones_shop") != null) {
+                            if (isSignWithinMarker(origin, "zones_shop").equals(isSignWithinMarker(block.getLocation(), "zones_shop"))) {
                                 minDistanceSquared = distanceSquared;
                                 nearest = block;
                             } else {
-                                p.sendMessage(ChatColor.RED + "Хранилище должно находится внутри зоны торговой точки.");
+                                p.sendMessage(ChatColor.RED + "Хранилище должно находится внутри той же зоны торговой точки.");
                             }
 
                         }
