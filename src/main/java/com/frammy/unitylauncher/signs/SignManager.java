@@ -36,7 +36,6 @@ import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
 import java.io.IOException;
-import java.lang.reflect.Array;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
@@ -258,7 +257,7 @@ public class SignManager implements Listener {
                     .filter(e -> isSignWithinMarker(e.getKey(), "zones_shop").equals(marker))
                     .map(Map.Entry::getKey).toList();
 
-            List<Block> containers = new ArrayList<>();
+            Set<Block> containers = new HashSet<>();
             for (Location loc : sourceSignLocations) {
                 SignVariables sourceVars = genericSignList.get(loc);
                 if (sourceVars == null || sourceVars.getSignText().size() < 2) continue;
@@ -277,7 +276,7 @@ public class SignManager implements Listener {
                 } catch (NumberFormatException ignored) {}
             }
 
-            Map<String, Integer> summary = zoneManager.getItemSummaryFromContainers(containers);
+            Map<String, Integer> summary = zoneManager.getItemSummaryFromContainers(new ArrayList<>(containers));
             List<String> itemLines = summary.entrySet().stream()
                     .map(e -> Arrays.stream(e.getKey().split("_"))
                             .map(w -> w.charAt(0) + w.substring(1).toLowerCase())
@@ -308,17 +307,6 @@ public class SignManager implements Listener {
         } catch (NumberFormatException e) {
             return null;
         }
-    }
-
-    private List<Block> getZoneContainers(ExtrudeMarker marker) {
-        return genericSignList.entrySet().stream()
-                .filter(e -> e.getValue().getSignCategory() == SignCategory.SHOP_SOURCE)
-                .filter(e -> isSignWithinMarker(e.getKey(), "zones_shop").equals(marker))
-                .map(e -> parseContainerLocation(e.getValue(), e.getKey().getWorld()))
-                .filter(Objects::nonNull)
-                .map(Location::getBlock)
-                .filter(b -> b.getState() instanceof Container)
-                .toList();
     }
     @EventHandler
     public void onPlayerInteract(PlayerInteractEvent e) {
@@ -763,29 +751,50 @@ public class SignManager implements Listener {
 
     // Обновление таблички
     private String updateSignView(Sign sign, List<String> items, int offset) {
-        if (items == null || items.isEmpty()) return null;
+        if (items == null || items.isEmpty()) {
+            // Очищаем табличку
+            sign.setLine(1, "");
+            sign.setLine(2, "");
+            sign.setLine(3, "");
+            sign.update();
+            return null;
+        }
 
         String highlighted = null;
 
-        for (int i = 0; i < 3; i++) {
-            int itemIndex = (offset + i) % items.size(); // зацикливание
-            String text = items.get(itemIndex);
+        if (items.size() == 1) {
+            // Одна строка — по центру
+            sign.setLine(1, "");
+            sign.setLine(2, ChatColor.GREEN + truncateToVisible(items.get(0)));
+            sign.setLine(3, "");
+            highlighted = items.get(0);
+        } else if (items.size() == 2) {
+            // Две строки — верх и центр, центральная скроллится, offset 0 или 1
+            int upperIndex = offset % 2;
+            int centerIndex = (offset + 1) % 2;
 
-            if (i == 1) {
-                highlighted = text; // сохраним выделенный текст
-                sign.setLine(i + 1, ChatColor.GREEN + truncateToVisible(text, 15)); // Предварительно обрежем
-            } else {
-                sign.setLine(i + 1, truncateToVisible(text, 15));
+            sign.setLine(1, truncateToVisible(items.get(upperIndex)));
+            sign.setLine(2, ChatColor.GREEN + truncateToVisible(items.get(centerIndex)));
+            sign.setLine(3, "");
+            highlighted = items.get(centerIndex);
+        } else {
+            // Три и более — обычная прокрутка
+            for (int i = 0; i < 3; i++) {
+                int index = (offset + i) % items.size();
+                String text = items.get(index);
+
+                if (i == 1) {
+                    highlighted = text;
+                    sign.setLine(i + 1, ChatColor.GREEN + truncateToVisible(text));
+                } else {
+                    sign.setLine(i + 1, truncateToVisible(text));
+                }
             }
         }
-
         sign.update();
         return highlighted;
     }
-
-    private String truncateToVisible(String text, int maxLen) {
-        return (text.length() > maxLen) ? text.substring(0, maxLen) : text;
-    }
+    private String truncateToVisible(String text) {return (text.length() > 15) ? text.substring(0, 15) : text;}
 
     public void startSignTextScroll(Sign sign, int lineIndex, String fullText, ChatColor color, int visibleWidth, int durationTicks, int intervalTicks, Runnable onComplete) {
         String stripped = ChatColor.stripColor(fullText);
