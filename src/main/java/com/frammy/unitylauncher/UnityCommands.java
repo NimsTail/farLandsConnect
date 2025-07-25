@@ -7,6 +7,8 @@ import org.bukkit.Location;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.permissions.PermissionAttachmentInfo;
+import org.bukkit.scheduler.BukkitRunnable;
+import org.bukkit.util.Consumer;
 import org.jetbrains.annotations.NotNull;
 import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
@@ -523,35 +525,44 @@ public class UnityCommands {
     public void getNotifications(@NotNull CommandSender sender) {
         getNotified(sender);
     }
-    public GeneralData getPlayerInfo(Player sender) {
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                String query = "SELECT GeneralData FROM Users WHERE Name = ?;";
-                PreparedStatement st = con.prepareStatement(query);
-                st.setString(1, sender.getName());
-                ResultSet rs = st.executeQuery();
+    public void getPlayerInfo(Player sender, Consumer<GeneralData> callback) {
+        new BukkitRunnable() {
+            @Override
+            public void run() {
+                GeneralData result = null;
+                Connection con = DBConnect();
+                if (con != null) {
+                    try {
+                        String query = "SELECT GeneralData FROM Users WHERE Name = ?;";
+                        PreparedStatement st = con.prepareStatement(query);
+                        st.setString(1, sender.getName());
+                        ResultSet rs = st.executeQuery();
 
-                if (rs.next()) {
-                    String generalDataJson = rs.getString("GeneralData");
-                    if (generalDataJson == null || generalDataJson.isEmpty()) {
-                        sender.sendMessage(ChatColor.RED + "У тебя нет данных GeneralData.");
-                        return null;
+                        if (rs.next()) {
+                            String generalDataJson = rs.getString("GeneralData");
+                            if (generalDataJson != null && !generalDataJson.isEmpty()) {
+                                Gson gson = new Gson();
+                                result = gson.fromJson(generalDataJson, GeneralData.class);
+                            }
+                        }
+                        rs.close();
+                        st.close();
+                        con.close();
+                    } catch (Exception e) {
+                        onError("getPlayerInfo", e, sender);
                     }
-
-                    Gson gson = new Gson();
-                    GeneralData data = gson.fromJson(generalDataJson, GeneralData.class);
-
-                    return data;
-                } else {
-                    sender.sendMessage(ChatColor.RED + "Ты не найден в базе данных.");
-                    return null;
                 }
-            } catch (Exception e) {
-                onError("getPlayerInfo", e, (Player) sender);
+
+                GeneralData finalResult = result;
+                // Вернуться в главный поток для вызова callback (например, sendMessage)
+                new BukkitRunnable() {
+                    @Override
+                    public void run() {
+                        callback.accept(finalResult);
+                    }
+                }.runTask(UnityLauncher.getInstance());
             }
-        }
-        return null;
+        }.runTaskAsynchronously(UnityLauncher.getInstance());
     }
 
     public static void getNotified(@NotNull CommandSender sender) {

@@ -1,17 +1,20 @@
 package com.frammy.unitylauncher;
 
+import org.bukkit.ChatColor;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.block.Block;
 import org.bukkit.block.Chest;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.HumanEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.*;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerPickupItemEvent;
+import org.bukkit.inventory.AnvilInventory;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
@@ -52,18 +55,18 @@ public class MoneyManager implements Listener {
 
         for (int denomination : dollarDenominations) {
             while (dollars >= denomination) {
-                ItemStack moneyItem = createMoneyItem(Material.PRISMARINE_SHARD, denomination, "Dollar");
+                ItemStack moneyItem = createMoneyItem(Material.PRISMARINE_SHARD, denomination, "Ⓕ");
                 itemsToGive.add(moneyItem);
-                registerMoney(player, moneyItem, denomination, "Dollar");
+               // registerMoney(player, moneyItem, denomination, "Dollar");
                 dollars -= denomination;
             }
         }
 
         for (int denomination : centDenominations) {
             while (cents >= denomination) {
-                ItemStack moneyItem = createMoneyItem(Material.PRISMARINE_CRYSTALS, denomination / 100.0, "Cent");
+                ItemStack moneyItem = createMoneyItem(Material.PRISMARINE_CRYSTALS, denomination / 100.0, "ⓒ");
                 itemsToGive.add(moneyItem);
-                registerMoney(player, moneyItem, denomination / 100.0, "Cent");
+                //registerMoney(player, moneyItem, denomination / 100.0, "Cent");
                 cents -= denomination;
             }
         }
@@ -130,14 +133,14 @@ public class MoneyManager implements Listener {
                         for (int denom : dollarDenominations) {
                             while (changeCents >= denom * 100) {
                                 changeCents -= denom * 100;
-                                ItemStack changeItem = createMoneyItem(Material.PRISMARINE_SHARD, denom, "Dollar");
+                                ItemStack changeItem = createMoneyItem(Material.PRISMARINE_SHARD, denom, "Ⓕ");
                                 changeToGive.add(changeItem);
                             }
                         }
                         for (int denom : centDenominations) {
                             while (changeCents >= denom) {
                                 changeCents -= denom;
-                                ItemStack changeItem = createMoneyItem(Material.PRISMARINE_CRYSTALS, denom / 100.0, "Cent");
+                                ItemStack changeItem = createMoneyItem(Material.PRISMARINE_CRYSTALS, denom / 100.0, "ⓒ");
                                 changeToGive.add(changeItem);
                             }
                         }
@@ -165,8 +168,8 @@ public class MoneyManager implements Listener {
         for (ItemStack item : changeToGive) {
             player.getInventory().addItem(item);
             double value = extractMoneyValue(item);
-            String type = item.getType() == Material.PRISMARINE_SHARD ? "Dollar" : "Cent";
-            registerMoney(player, item, value, type); // Регистрируем сдачу
+            String type = item.getType() == Material.PRISMARINE_SHARD ? "Ⓕ" : "ⓒ";
+           // registerMoney(player, item, value, type); // Регистрируем сдачу
         }
 
         // Проверяем, остались ли неоплаченные средства
@@ -204,18 +207,18 @@ public class MoneyManager implements Listener {
         ItemMeta meta = item.getItemMeta();
         if (meta != null) {
             String displayValue;
-            if (type.equals("Dollar")) {
+            if (type.equals("Ⓕ")) {
                 displayValue = String.valueOf((int) value); // Отображаем целое число для долларов
             } else {
                 displayValue = String.valueOf((int) (value * 100)); // Для центов отображаем в сотых
             }
-            meta.setDisplayName(type + " " + displayValue);
+            meta.setDisplayName(ChatColor.GREEN + type + "                                      " + ChatColor.RESET + displayValue);
             item.setItemMeta(meta);
         }
         return item;
     }
 
-    private void registerMoney(Player player, ItemStack item, double value, String type) {
+   /* private void registerMoney(Player player, ItemStack item, double value, String type) {
         String uniqueID = UUID.randomUUID().toString();
         String playerId = player.getUniqueId().toString();
         issuedMoneyConfig.set(playerId + ".Nickname", player.getName());
@@ -225,7 +228,7 @@ public class MoneyManager implements Listener {
         moneyIds.add(uniqueID); // Добавляем новый ID.
         issuedMoneyConfig.set(path, moneyIds); // Обновляем путь с новым списком.
         saveIssuedMoney();
-    }
+    }*/
 
     private boolean isMoney(ItemStack item) {
         if (item == null || item.getType() == Material.AIR) return false;
@@ -234,7 +237,7 @@ public class MoneyManager implements Listener {
             if (meta == null || !meta.hasDisplayName()) return false;
 
             String displayName = meta.getDisplayName();
-            return displayName.toLowerCase().contains("dollar") || displayName.toLowerCase().contains("cent");
+            return displayName.toLowerCase().contains("Ⓕ") || displayName.toLowerCase().contains("ⓒ");
 
 
     }
@@ -247,9 +250,9 @@ public class MoneyManager implements Listener {
 
         String displayName = meta.getDisplayName();
         try {
-            String[] parts = displayName.split(" ");
+            String[] parts = displayName.split("                                      ");
             double value = Double.parseDouble(parts[1]);
-            return parts[0].equals("Dollar") ? value : value / 100; // Доллары целые, центы делятся на 100
+            return parts[0].equals(ChatColor.GREEN + "Ⓕ") ? value : value / 100; // Доллары целые, центы делятся на 100
         } catch (Exception e) {
             return 0.0;
         }
@@ -263,6 +266,35 @@ public class MoneyManager implements Listener {
         }
     }
 
+    @EventHandler
+    public void onAnvilRename(PrepareAnvilEvent event) {
+        AnvilInventory inventory = event.getInventory();
+        String renameText = inventory.getRenameText();
+
+        if (renameText == null) return;
+
+        // Получаем предмет из первого слота (основной предмет в наковальне)
+        ItemStack item = inventory.getItem(0);
+        if (item == null || item.getType() == Material.AIR) return;
+
+        // Проверяем, что предмет — prismarine shard или crystal
+        Material type = item.getType();
+        if (type != Material.PRISMARINE_SHARD && type != Material.PRISMARINE_CRYSTALS) return;
+
+        // Запрещённые символы
+        List<String> bannedNames = List.of("Ⓕ", "ⓒ", "Ⓒ", "ⓕ");
+
+        for (String banned : bannedNames) {
+            if (renameText.toLowerCase().contains(banned.toLowerCase())) {
+                event.setResult(null); // Убираем результат
+                HumanEntity player = event.getView().getPlayer();
+                if (player instanceof Player) {
+                    ((Player) player).sendMessage(ChatColor.RED + "Этот символ запрещён в названии призмариновых предметов!");
+                }
+                break;
+            }
+        }
+    }
     @EventHandler
     public void onItemDrop(PlayerDropItemEvent event) {
         ItemStack item = event.getItemDrop().getItemStack();
@@ -325,7 +357,7 @@ public class MoneyManager implements Listener {
             }
         }
     }
-    @EventHandler
+    /*@EventHandler
     public void onInventoryClick(InventoryClickEvent event) {
         if (event.getClickedInventory() == null || event.getWhoClicked() == null) return;
 
@@ -415,7 +447,7 @@ public class MoneyManager implements Listener {
                 saveIssuedMoney();
             }
         }
-    }*/
+    }
     // Метод обработки переноса денег в сундук
     private void handleMoneyTransferToChest(ItemStack item, Chest chest, Player player) {
         if (isMoney(item)) {
@@ -517,7 +549,7 @@ public class MoneyManager implements Listener {
 
     private String getChestKey(Location location) {
         return location.getWorld().getName() + "_" + location.getBlockX() + "_" + location.getBlockY() + "_" + location.getBlockZ();
-    }
+    }*/
 }
 
 

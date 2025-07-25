@@ -190,25 +190,40 @@ public class SignManager implements Listener {
             }
             if (e.getLine(0).equalsIgnoreCase("ATM")) {
                 if (unityCommands.hasPermissionContaining(p, "0")) {
-                    String line0 = "ATM [" + UnityCommands.getInstance().getPlayerInfo(p).countryName + "]";
+                    UnityCommands.getInstance().getPlayerInfo(p, data -> {
+                        if (data == null) {
+                            p.sendMessage(ChatColor.RED + "Данные не найдены.");
+                        }
+                        new BukkitRunnable() {
+                            @Override
+                            public void run() {
+                                String line0 = "ATM [" + data.countryName + "]";
+                                Map<Integer, String> linesToScroll = new HashMap<>();
+                                linesToScroll.put(0, line0);
 
-                    e.setLine(0, line0);
-                    Map<Integer, String> linesToScroll = new HashMap<>();
-                    linesToScroll.put(0, line0);
+                                sign.setLine(0, line0);
+                                sign.setLine(1, "Коснитесь,");
+                                sign.setLine(2, "чтобы начать");
+                                sign.setLine(3, "");
+                                sign.update();
 
-                    makeSignScrollingLines(e.getBlock().getLocation(), linesToScroll, 6, 13);
-                    // Если табличка не найдена и это новая табличка с "ATM"
+                                makeSignScrollingLines(e.getBlock().getLocation(), linesToScroll, 6, 13);
 
-                    e.setLine(1, "Коснитесь,");
-                    e.setLine(2, "чтобы начать");
-                    p.sendMessage("АТМ установлен.");
-                    String markerID = "marker_" + UUID.randomUUID();
-
-                    //atmSignData.put(currentID, new ATMData(sign.getLocation(), p.getName(), e.getLines()));
-                    genericSignList.put(sign.getLocation(), new SignVariables(p.getName(), Arrays.asList(line0, "Коснитесь,", "чтобы начать", ""), List.of(0), false, false, SignCategory.ATM, null, markerID));
-                    // saveSignData();
-                    // Добавляем маркер на карту BlueMap
-                    blueMapIntegration.addBlueMapMarker(markerID, sign.getLocation(), "services", "Сервисы", "point_atm", null, p);
+                                p.sendMessage("АТМ установлен.");
+                                String markerID = "marker_" + UUID.randomUUID();
+                                genericSignList.put(sign.getLocation(),
+                                        new SignVariables(p.getName(),
+                                                Arrays.asList(line0, "Коснитесь,", "чтобы начать", ""),
+                                                List.of(0),
+                                                false,
+                                                false,
+                                                SignCategory.ATM,
+                                                null,
+                                                markerID));
+                                blueMapIntegration.addBlueMapMarker(markerID, sign.getLocation(), "services", "Сервисы", "point_atm", null, p);
+                            }
+                        }.runTask(UnityLauncher.getInstance());
+                    });
                 } else {
                     p.sendMessage(ChatColor.RED  +"Недостаточно прав.");
                 }
