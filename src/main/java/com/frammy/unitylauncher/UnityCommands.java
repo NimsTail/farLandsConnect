@@ -8,6 +8,11 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.permissions.PermissionAttachmentInfo;
 import org.jetbrains.annotations.NotNull;
+import org.json.simple.JSONObject;
+import org.json.simple.parser.JSONParser;
+import org.json.simple.parser.ParseException;
+
+
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -26,6 +31,77 @@ public class UnityCommands {
             instance = new UnityCommands();
         }
         return instance;
+    }
+
+    public void getAllData(@NotNull CommandSender sender) {
+        Connection con = DBConnect();
+        if (con != null) {
+            try {
+                String query = "SELECT CustomizationData, SocialData, GeneralData, StatsData FROM Users WHERE Name='" + sender.getName() + "';";
+                Statement st = con.createStatement();
+                ResultSet rs = st.executeQuery(query);
+                if (rs.next()) {
+                    JSONParser parser = new JSONParser();
+
+                    // Парсим JSON
+                    JSONObject customization = (JSONObject) parser.parse(rs.getString("CustomizationData"));
+                    JSONObject social = (JSONObject) parser.parse(rs.getString("SocialData"));
+                    JSONObject general = (JSONObject) parser.parse(rs.getString("GeneralData"));
+                    JSONObject stats = (JSONObject) parser.parse(rs.getString("StatsData"));
+
+                    // Получение данных (проверка и каст типов)
+                    String name = (String) general.get("Name");
+                    double money = (double) general.get("money");
+                    String country = (String) general.get("countryName");
+                    long shopSpots = (long) general.get("shopSpots");
+                    String regCode = (String) general.get("regCode");
+                    String notificationToggle = (String) general.get("notificationToggle");
+
+                    long playtime = (long) stats.get("playtime");
+                    long totalPlaytime = (long) stats.get("totalPlaytime");
+                    long eventsWon = (long) stats.get("eventsWon");
+                    String rating = (String) stats.get("rating");
+
+                    String avatar = (String) customization.get("avatarURL");
+                    String bg = (String) customization.get("bgURL");
+                    String frame = (String) customization.get("frameID");
+
+                    String vk = (String) social.get("vkURL");
+                    String discord = (String) social.get("discordID");
+                    String telegram = (String) social.get("telegramID");
+
+                    // Отправка сообщений игроку
+                    sender.sendMessage(ChatColor.GOLD + "====== [ Данные игрока: " + name + " ] ======");
+                    sender.sendMessage(ChatColor.YELLOW + "Страна: §f" + country);
+                    sender.sendMessage(ChatColor.YELLOW + "Деньги: §f" + money);
+                    sender.sendMessage(ChatColor.YELLOW + "Магазинов: §f" + shopSpots);
+                    sender.sendMessage(ChatColor.YELLOW + "Рег. код: §f" + regCode);
+                    sender.sendMessage(ChatColor.YELLOW + "Уведомления: §f" + notificationToggle);
+
+                    sender.sendMessage(ChatColor.YELLOW + "Время в игре (сессия): §f" + playtime + " сек");
+                    sender.sendMessage(ChatColor.YELLOW + "Время в игре (всего): §f" + totalPlaytime + " сек");
+                    sender.sendMessage(ChatColor.YELLOW + "Побед в ивентах: §f" + eventsWon);
+                    sender.sendMessage(ChatColor.YELLOW + "Рейтинг: §f" + rating);
+
+                    sender.sendMessage(ChatColor.YELLOW + "Аватар: §f" + avatar);
+                    sender.sendMessage(ChatColor.YELLOW + "Фон: §f" + bg);
+                    sender.sendMessage(ChatColor.YELLOW + "Рамка: §f" + frame);
+
+                    sender.sendMessage(ChatColor.YELLOW + "Discord: §f" + (discord.isEmpty() ? "—" : discord));
+                    sender.sendMessage(ChatColor.YELLOW + "VK: §f" + (vk.isEmpty() ? "—" : vk));
+                    sender.sendMessage(ChatColor.YELLOW + "Telegram: §f" + (telegram.isEmpty() ? "—" : telegram));
+
+                } else {
+                    sender.sendMessage(ChatColor.RED + "Игрок не найден в базе данных.");
+                }
+                rs.close();
+            } catch (ParseException e) {
+                sender.sendMessage(ChatColor.RED + "Ошибка при разборе JSON-данных.");
+                e.printStackTrace();
+            } catch (Exception e) {
+                onError("getAllData", e, (Player) sender);
+            }
+        }
     }
 
     public void getGroups(@NotNull CommandSender sender) {

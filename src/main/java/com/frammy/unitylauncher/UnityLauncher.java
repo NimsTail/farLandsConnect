@@ -30,6 +30,7 @@ import java.util.*;
 public final class UnityLauncher extends JavaPlugin implements Listener {
     HashMap<String, Date> sessions = new HashMap<>();
     HashMap<String, Long> playTime = new HashMap<>();
+    HashMap<String, PlayerVariables> playerData = new HashMap<>();
     private static UnityLauncher instance;
     private final Set<Player> awaitingCorrectCommand = new HashSet<>();
     private FileConfiguration shopConfig;
@@ -196,6 +197,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     @EventHandler
     public void onJoin(PlayerJoinEvent e){
         webSocketManager.connectPlayer(e.getPlayer().getName());
+        UnityCommands.getInstance().getAllData(e.getPlayer());
     }
 
     @Nullable
