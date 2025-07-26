@@ -696,7 +696,7 @@ public class SignManager implements Listener {
                     case "страна", "государство", "стр", "ст", "с", "country" ->
                             p.sendMessage(ChatColor.GRAY + "С счёта государства было снято " + amount + "F.");
                     case "игрок", "я", "мой счёт", "me", "игр", "иг" -> {
-                        p.sendMessage(ChatColor.GRAY + "С твоего счёта было снято " + amount + "F.");
+                        p.sendMessage(ChatColor.GRAY + "Обрабатываем операцию..");
                         unityLauncher.moneyManager.giveMoney(p, amount);
                     }
                     case "admin", "админ" ->

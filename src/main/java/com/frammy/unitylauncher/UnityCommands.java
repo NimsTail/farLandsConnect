@@ -20,6 +20,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 import static com.frammy.unitylauncher.UnityLauncher.onError;
@@ -73,7 +74,7 @@ public class UnityCommands {
                     String telegram = (String) social.get("telegramID");
 
                     // Отправка сообщений игроку
-                    sender.sendMessage(ChatColor.GOLD + "====== [ Данные игрока: " + name + " ] ======");
+                  /*  sender.sendMessage(ChatColor.GOLD + "====== [ Данные игрока: " + name + " ] ======");
                     sender.sendMessage(ChatColor.YELLOW + "Страна: §f" + country);
                     sender.sendMessage(ChatColor.YELLOW + "Деньги: §f" + money);
                     sender.sendMessage(ChatColor.YELLOW + "Магазинов: §f" + shopSpots);
@@ -91,7 +92,7 @@ public class UnityCommands {
 
                     sender.sendMessage(ChatColor.YELLOW + "Discord: §f" + (discord.isEmpty() ? "—" : discord));
                     sender.sendMessage(ChatColor.YELLOW + "VK: §f" + (vk.isEmpty() ? "—" : vk));
-                    sender.sendMessage(ChatColor.YELLOW + "Telegram: §f" + (telegram.isEmpty() ? "—" : telegram));
+                    sender.sendMessage(ChatColor.YELLOW + "Telegram: §f" + (telegram.isEmpty() ? "—" : telegram));*/
 
                 } else {
                     sender.sendMessage(ChatColor.RED + "Игрок не найден в базе данных.");
@@ -102,6 +103,60 @@ public class UnityCommands {
                 e.printStackTrace();
             } catch (Exception e) {
                 onError("getAllData", e, (Player) sender);
+            }
+        }
+    }
+    public void mergeAndUpdatePlayerData(String playerName, String column, Map<String, Object> updates) {
+        Connection con = DBConnect();
+        if (con != null) {
+            try {
+                // Проверка допустимых колонок
+                List<String> validColumns = List.of("CustomizationData", "SocialData", "GeneralData", "StatsData");
+                if (!validColumns.contains(column)) {
+                    System.err.println("Недопустимая колонка: " + column);
+                    return;
+                }
+
+                // Получаем текущие данные
+                String selectQuery = "SELECT " + column + " FROM Users WHERE Name = ?;";
+                PreparedStatement selectSt = con.prepareStatement(selectQuery);
+                selectSt.setString(1, playerName);
+                ResultSet rs = selectSt.executeQuery();
+
+                JSONObject currentJson = new JSONObject();
+                if (rs.next()) {
+                    String jsonStr = rs.getString(column);
+                    if (jsonStr != null && !jsonStr.isEmpty()) {
+                        JSONParser parser = new JSONParser();
+                        currentJson = (JSONObject) parser.parse(jsonStr);
+                    }
+                } else {
+                    System.out.println("Игрок не найден: " + playerName);
+                    return;
+                }
+
+                rs.close();
+                selectSt.close();
+
+                // Обновляем нужные поля
+                for (Map.Entry<String, Object> entry : updates.entrySet()) {
+                    currentJson.put(entry.getKey(), entry.getValue());
+                }
+
+                // Записываем обратно
+                String updateQuery = "UPDATE Users SET " + column + " = ? WHERE Name = ?;";
+                PreparedStatement updateSt = con.prepareStatement(updateQuery);
+                updateSt.setString(1, currentJson.toJSONString());
+                updateSt.setString(2, playerName);
+                updateSt.executeUpdate();
+
+                updateSt.close();
+                con.close();
+
+                System.out.println("Обновление успешно: " + playerName + " → " + column);
+            } catch (Exception e) {
+                System.err.println("Ошибка обновления JSON: " + e.getMessage());
+                e.printStackTrace();
             }
         }
     }
