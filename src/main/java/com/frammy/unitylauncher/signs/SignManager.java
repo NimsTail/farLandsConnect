@@ -773,10 +773,10 @@ public class SignManager implements Listener {
             sign.update();
         });
         actions.put("Информация", () -> {
-            sign.setLine(1, "Ком. плата: ");
-            sign.setLine(2, " ");
-            sign.setLine(3, " ");
-            sign.update();
+            p.sendMessage(ChatColor.YELLOW + "=======[ ATM ]=======\n" +
+                    ChatColor.GREEN + "Принадлежит: " + ChatColor.RESET + genericSignList.get(loc).getSignText().get(0).replace("ATM [", "").replace("]", "") + "\n" +
+                    ChatColor.GREEN + "Установлен: " + ChatColor.RESET + genericSignList.get(loc).getOwnerName() + "\n" +
+                    ChatColor.GREEN + "Коммиссионная плата для других банков: " + ChatColor.RESET + " ");
         });
 
         playerScrollIndex.clear();
