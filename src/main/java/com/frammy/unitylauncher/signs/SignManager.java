@@ -700,10 +700,11 @@ public class SignManager implements Listener {
                         unityLauncher.moneyManager.giveMoney(p, amount);
                     }
                     case "admin", "админ" ->
-                            p.sendMessage(ChatColor.YELLOW + "Слушай, а ловко ты это придумал. Я даже в начале не понял.");
+                            p.sendMessage(ChatColor.YELLOW + "Слушай, а ловко ты это придумал. Я даже сначала и не понял.");
                     default ->
                             p.sendMessage(ChatColor.RED + "Необходимо указать счёт, с которого будут сняты деньги - 'Страна' или 'Игрок'.");
                 }
+                genericSignList.get(loc).setSignState(SignState.ATM_ACTION_READY);
             });
         });
         actions.put("Взнос наличных", () -> {
@@ -734,6 +735,7 @@ public class SignManager implements Listener {
                     default ->
                             p.sendMessage(ChatColor.RED + "Необходимо указать счёт, с которого будут сняты деньги - 'Страна' или 'Игрок'.");
                 }
+                genericSignList.get(loc).setSignState(SignState.ATM_ACTION_READY);
             });
         });
         actions.put("Перевод игроку", () -> {
@@ -741,6 +743,28 @@ public class SignManager implements Listener {
             sign.setLine(2, "<Никнейм>");
             sign.setLine(3, "<Сумма>");
             sign.update();
+            genericSignList.get(loc).setSignState(SignState.ATM_ACTION_READY);
+            signClickActions.put(sign.getLocation(), () -> {
+                Sign updatedSign = (Sign) sign.getBlock().getState();
+                double amount;
+                try {
+                    amount = Double.parseDouble(updatedSign.getLine(3));
+                } catch (NumberFormatException ex) {
+                    p.sendMessage(ChatColor.RED + "Введите корректную сумму.");
+                    return; // прерываем выполнение, если ввод некорректный
+                }
+                String nickname = updatedSign.getLine(2).toLowerCase();
+                if (!nickname.isEmpty()) {
+
+
+                } else
+                {
+
+                }
+
+
+                genericSignList.get(loc).setSignState(SignState.ATM_ACTION_READY);
+            });
         });
         actions.put("Перевод стране", () -> {
             sign.setLine(1, "Укажите данные:");

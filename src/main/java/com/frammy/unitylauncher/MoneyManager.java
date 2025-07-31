@@ -251,7 +251,7 @@ public class MoneyManager implements Listener {
             } else {
                 displayValue = String.valueOf((int) (value * 100)); // Для центов отображаем в сотых
             }
-            meta.setDisplayName(ChatColor.GREEN + type + "::" + ChatColor.RESET + displayValue);
+            meta.setDisplayName(ChatColor.GREEN + type + "   " + ChatColor.RESET + displayValue);
             item.setItemMeta(meta);
         }
         return item;
@@ -286,11 +286,7 @@ public class MoneyManager implements Listener {
         ItemMeta meta = item.getItemMeta();
         String displayName = meta.getDisplayName();
         try {
-
-            Bukkit.getLogger().info("DisplayName = [" + displayName + "]");
-            Bukkit.getLogger().info("Stripped = [" + ChatColor.stripColor(displayName) + "]");
-            String[] parts = ChatColor.stripColor(displayName).split("::");
-            Bukkit.getLogger().info("Parts length = " + parts.length);
+            String[] parts = ChatColor.stripColor(displayName).split("   ");
             if (parts.length < 2) return 0.0;
             double value = Double.parseDouble(parts[1]);
             return parts[0].contains("Ⓕ") ? value : value / 100;
