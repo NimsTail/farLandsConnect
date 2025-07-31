@@ -197,7 +197,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     @EventHandler
     public void onJoin(PlayerJoinEvent e){
         webSocketManager.connectPlayer(e.getPlayer().getName());
-        UnityCommands.getInstance().getAllData(e.getPlayer());
+      //  UnityCommands.getInstance().getAllData(e.getPlayer());
     }
 
     @Nullable

@@ -723,13 +723,13 @@ public class SignManager implements Listener {
                 }
 
                 switch (updatedSign.getLine(2).toLowerCase()) {
-                    case "страна", "государство", "стр", "ст", "с", "country" -> {
-                        p.sendMessage(ChatColor.GRAY + "На счёт государства было взнесено " + amount + "F.");
-                        unityLauncher.moneyManager.takeMoney(p, amount);
+                    case "страна", "государство", "стр", "ст", "country" -> {
+                        p.sendMessage(ChatColor.GRAY + "Обрабатываем операцию..");
+                        unityLauncher.moneyManager.takeMoney(p, amount, true);
                     }
                     case "игрок", "я", "мой счёт", "me", "игр", "иг" -> {
-                        p.sendMessage(ChatColor.GRAY + "На твой счёт было взнесено " + amount + "F.");
-                        unityLauncher.moneyManager.takeMoney(p, amount);
+                        p.sendMessage(ChatColor.GRAY + "Обрабатываем операцию..");
+                        unityLauncher.moneyManager.takeMoney(p, amount, false);
                     }
                     default ->
                             p.sendMessage(ChatColor.RED + "Необходимо указать счёт, с которого будут сняты деньги - 'Страна' или 'Игрок'.");

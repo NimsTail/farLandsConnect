@@ -1,9 +1,6 @@
 package com.frammy.unitylauncher;
 
-import org.bukkit.ChatColor;
-import org.bukkit.Location;
-import org.bukkit.Material;
-import org.bukkit.NamespacedKey;
+import org.bukkit.*;
 import org.bukkit.block.Block;
 import org.bukkit.block.Chest;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -88,9 +85,9 @@ public class MoneyManager implements Listener {
                     updates.put("money", data.money - amount);
 
                     UnityCommands.getInstance().mergeAndUpdatePlayerData(player.getName(), "GeneralData", updates);
-                    player.sendMessage(ChatColor.GRAY + "С твоего счёта было снято " + ChatColor.YELLOW + amount + ChatColor.GRAY + " F.");
+                    player.sendMessage(ChatColor.GRAY + "С твоего счёта было снято " + ChatColor.YELLOW + amount + ChatColor.GRAY + "F.");
                 } else {
-                    player.sendMessage(ChatColor.RED + "Недостаточно средств. Текущий баланс: " + ChatColor.YELLOW + data.money + ChatColor.RED + " F.");
+                    player.sendMessage(ChatColor.RED + "Недостаточно средств. Текущий баланс: " + ChatColor.YELLOW + data.money + ChatColor.RED + "F.");
                 }
                 }
             }.runTask(UnityLauncher.getInstance());
@@ -100,7 +97,8 @@ public class MoneyManager implements Listener {
        // player.sendMessage("Вы получили " + totalCents / 100 + " долларов и " + totalCents % 100 + " центов.");
     }
 
-    public boolean takeMoney(Player player, double amount) {
+    public boolean takeMoney(Player player, double amount, boolean isCountry) {
+
         int totalCents = (int) Math.round(amount * 100); // Сумма в центах
         int remainingCents = totalCents;
 
@@ -109,10 +107,9 @@ public class MoneyManager implements Listener {
 
         // Сканируем инвентарь игрока
         for (ItemStack item : player.getInventory().getContents()) {
-            if (item == null || item.getType() == Material.AIR) continue;
-
             if (isMoney(item)) {
                 double itemValue = extractMoneyValue(item);
+                player.sendMessage(String.valueOf(itemValue));
                 int itemCents = (int) Math.round(itemValue * 100);
                 totalInventoryCents += itemCents * item.getAmount();
 
@@ -123,7 +120,7 @@ public class MoneyManager implements Listener {
 
         // Проверяем, достаточно ли средств
         if (totalInventoryCents < totalCents) {
-            player.sendMessage("Недостаточно средств для выполнения операции.");
+            player.sendMessage(ChatColor.GRAY + "Недостаточно средств для выполнения операции.");
             return false;
         }
 
@@ -199,6 +196,26 @@ public class MoneyManager implements Listener {
             player.sendMessage("Ошибка: не удалось снять полную сумму. Обратитесь к администратору.");
             return false;
         }
+        if (isCountry) {
+
+        } else {
+            UnityCommands.getInstance().getPlayerInfo(player, data -> {
+                new BukkitRunnable() {
+                    @Override
+                    public void run() {
+                        Map<String, Object> updates = new HashMap<>();
+                        updates.put("money", data.money + amount);
+                        UnityCommands.getInstance().mergeAndUpdatePlayerData(player.getName(),"GeneralData", updates);
+
+                    }
+
+                }.runTask(UnityLauncher.getInstance());
+            });
+            player.sendMessage(ChatColor.GRAY + "На твой счёт было взнесено " + ChatColor.YELLOW + amount + ChatColor.GRAY +"F.");
+
+        }
+
+
 
        // player.sendMessage("С вашего счета снято " + amount + " долларов.");
         return true;
@@ -234,7 +251,7 @@ public class MoneyManager implements Listener {
             } else {
                 displayValue = String.valueOf((int) (value * 100)); // Для центов отображаем в сотых
             }
-            meta.setDisplayName(ChatColor.GREEN + type + "                                        " + ChatColor.RESET + displayValue);
+            meta.setDisplayName(ChatColor.GREEN + type + "::" + ChatColor.RESET + displayValue);
             item.setItemMeta(meta);
         }
         return item;
@@ -254,27 +271,29 @@ public class MoneyManager implements Listener {
 
     private boolean isMoney(ItemStack item) {
         if (item == null || item.getType() == Material.AIR) return false;
-
+        if (item.getType() == Material.PRISMARINE_SHARD || item.getType() == Material.PRISMARINE_CRYSTALS) {
             ItemMeta meta = item.getItemMeta();
-            if (meta == null || !meta.hasDisplayName()) return false;
-
             String displayName = meta.getDisplayName();
-            return displayName.toLowerCase().contains("Ⓕ") || displayName.toLowerCase().contains("ⓒ");
-
-
+            if (meta == null || !meta.hasDisplayName()) {
+                Bukkit.getLogger().info("NO META FOR " + item);
+                return false;
+            }
+            return meta.getDisplayName().contains("Ⓕ") || meta.getDisplayName().contains("ⓒ");
+        } else return false;
     }
 
     private double extractMoneyValue(ItemStack item) {
-        if (item == null || !isMoney(item)) return 0.0;
-
         ItemMeta meta = item.getItemMeta();
-        if (meta == null || meta.getDisplayName() == null) return 0.0;
-
         String displayName = meta.getDisplayName();
         try {
-            String[] parts = displayName.split(" {40}");
+
+            Bukkit.getLogger().info("DisplayName = [" + displayName + "]");
+            Bukkit.getLogger().info("Stripped = [" + ChatColor.stripColor(displayName) + "]");
+            String[] parts = ChatColor.stripColor(displayName).split("::");
+            Bukkit.getLogger().info("Parts length = " + parts.length);
+            if (parts.length < 2) return 0.0;
             double value = Double.parseDouble(parts[1]);
-            return parts[0].equals(ChatColor.GREEN + "Ⓕ") ? value : value / 100; // Доллары целые, центы делятся на 100
+            return parts[0].contains("Ⓕ") ? value : value / 100;
         } catch (Exception e) {
             return 0.0;
         }
