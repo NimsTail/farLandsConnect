@@ -45,7 +45,7 @@ public class MoneyManager implements Listener {
     }
 
     public void giveMoney(Player player, double amount) {
-        UnityCommands.getInstance().getPlayerInfo(player, data -> {
+        UnityCommands.getInstance().getPlayerInfo(player.getName(), data -> {
             if (data == null) {
                 player.sendMessage(ChatColor.RED + "Данные не найдены.");
             }
@@ -199,7 +199,7 @@ public class MoneyManager implements Listener {
         if (isCountry) {
 
         } else {
-            UnityCommands.getInstance().getPlayerInfo(player, data -> {
+            UnityCommands.getInstance().getPlayerInfo(player.getName(), data -> {
                 new BukkitRunnable() {
                     @Override
                     public void run() {

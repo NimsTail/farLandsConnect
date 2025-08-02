@@ -573,7 +573,7 @@ public class UnityCommands {
     public void getNotifications(@NotNull CommandSender sender) {
         getNotified(sender);
     }
-    public void getPlayerInfo(Player sender, Consumer<GeneralData> callback) {
+    public void getPlayerInfo(String sender, Consumer<GeneralData> callback) {
         new BukkitRunnable() {
             @Override
             public void run() {
@@ -583,7 +583,7 @@ public class UnityCommands {
                     try {
                         String query = "SELECT GeneralData FROM Users WHERE Name = ?;";
                         PreparedStatement st = con.prepareStatement(query);
-                        st.setString(1, sender.getName());
+                        st.setString(1, sender);
                         ResultSet rs = st.executeQuery();
 
                         if (rs.next()) {
@@ -597,7 +597,7 @@ public class UnityCommands {
                         st.close();
                         con.close();
                     } catch (Exception e) {
-                        onError("getPlayerInfo", e, sender);
+                        onError("getPlayerInfo", e, Bukkit.getPlayer(sender));
                     }
                 }
 

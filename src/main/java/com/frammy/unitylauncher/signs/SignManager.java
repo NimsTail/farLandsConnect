@@ -11,6 +11,7 @@ import de.bluecolored.bluemap.api.markers.ExtrudeMarker;
 import de.bluecolored.bluemap.api.markers.Marker;
 import de.bluecolored.bluemap.api.markers.MarkerSet;
 import de.bluecolored.bluemap.api.math.Shape;
+import org.apache.commons.lang.WordUtils;
 import org.bukkit.*;
 import org.bukkit.block.Block;
 import org.bukkit.block.Container;
@@ -193,7 +194,7 @@ public class SignManager implements Listener {
             }
             if (e.getLine(0).equalsIgnoreCase("ATM")) {
                 if (unityCommands.hasPermissionContaining(p, "0")) {
-                    UnityCommands.getInstance().getPlayerInfo(p, data -> {
+                    UnityCommands.getInstance().getPlayerInfo(p.getName(), data -> {
                         if (data == null) {
                             p.sendMessage(ChatColor.RED + "Данные не найдены.");
                         }
@@ -343,77 +344,78 @@ public class SignManager implements Listener {
             if (signVariables == null) return;
             if (!e.getPlayer().getInventory().getItemInMainHand().equals(new ItemStack(Material.AIR))) return;
 
-            if (!genericSignList.get(loc).getOwnerName().equalsIgnoreCase(p.getName())) return;
+            if (genericSignList.get(loc).getOwnerName().equalsIgnoreCase(p.getName())) {
+                if (signVariables.getSignState() == SignState.SHOP_UNDEFINED) {
+                    if (p.isSneaking()) {
+                        if (!sign.getLine(2).isEmpty() && !sign.getLine(3).isEmpty()) {
+                            if (getContainerLocation(sign) == null) {
+                                p.sendMessage(ChatColor.RED + "Вторая строка не содержит координаты хранилища!");
+                                return;
+                            }
+                            double price;
+                            int amount;
+                            try {
+                                amount = Integer.parseInt(ChatColor.stripColor(sign.getLine(2)));
+                                price = Double.parseDouble(ChatColor.stripColor(sign.getLine(3)));
 
-            if (signVariables.getSignState() == SignState.SHOP_UNDEFINED) {
-                if (p.isSneaking()) {
-                    if (!sign.getLine(2).isEmpty() && !sign.getLine(3).isEmpty()) {
-                        if (getContainerLocation(sign) == null) {
-                            p.sendMessage(ChatColor.RED + "Вторая строка не содержит координаты хранилища!");
-                            return;
-                        }
-                        double price;
-                        int amount;
-                        try {
-                            amount = Integer.parseInt(ChatColor.stripColor(sign.getLine(2)));
-                            price = Double.parseDouble(ChatColor.stripColor(sign.getLine(3)));
+                            } catch (NumberFormatException exc) {
+                                p.sendMessage(ChatColor.RED + "3 и 4 строки должны быть числами.");
+                                sign.setLine(2, "<Количество>");
+                                sign.setLine(3, "<Цена>");
+                                sign.update();
+                                return;
+                            }
 
-                        } catch (NumberFormatException exc) {
-                            p.sendMessage(ChatColor.RED + "3 и 4 строки должны быть числами.");
-                            sign.setLine(2, "<Количество>");
-                            sign.setLine(3, "<Цена>");
+                            List<String> signTexts = genericSignList.get(sign.getLocation()).getSignText();
+                            String line3 = "Цена: " + ChatColor.GREEN + String.valueOf(price);
+                            String line2 = "Кол-во: " + ChatColor.YELLOW + String.valueOf(amount);
+
+                            signVariables.setSignText(Arrays.asList(signTexts.get(0), signTexts.get(1), line2, line3));
+                            sign.setLine(2, line2);
+                            sign.setLine(3, line3);
                             sign.update();
-                            return;
+                            signVariables.setSignState(SignState.SHOP_DEFINED);
+                            if (genericSignList.get(sign.getLocation()).getMarkerID() == null) {
+                                String markerID = "marker_" + UUID.randomUUID();
+                                signVariables.setMarkerID(markerID);
+                                blueMapIntegration.addBlueMapMarker(markerID, sign.getLocation(), "services", "Сервисы", "point_shop", null, p);
+                            }
+                            p.sendMessage(ChatColor.GREEN + "Табличка товара подтверждена.");
                         }
-
-                        List<String> signTexts = genericSignList.get(sign.getLocation()).getSignText();
-                        String line3 = "Цена: " + ChatColor.GREEN + String.valueOf(price);
-                        String line2 = "Кол-во: " + ChatColor.YELLOW + String.valueOf(amount);
-
-                        signVariables.setSignText(Arrays.asList(signTexts.get(0), signTexts.get(1), line2, line3));
-                        sign.setLine(2, line2);
-                        sign.setLine(3, line3);
-                        sign.update();
-                        signVariables.setSignState(SignState.SHOP_DEFINED);
-                        if (genericSignList.get(sign.getLocation()).getMarkerID() == null) {
-                            String markerID = "marker_" + UUID.randomUUID();
-                            signVariables.setMarkerID(markerID);
-                            blueMapIntegration.addBlueMapMarker(markerID, sign.getLocation(), "services", "Сервисы", "point_shop", null, p);
-                        }
-                        p.sendMessage(ChatColor.GREEN + "Табличка товара подтверждена.");
+                        return;
                     }
-                    return;
-                }
-                String secondLine = ChatColor.stripColor(sign.getLine(1)).toLowerCase();
+                    String secondLine = ChatColor.stripColor(sign.getLine(1)).toLowerCase();
 
-                if (signVariables.getSignCategory() == SignCategory.SHOP_SOURCE) {
-                    if (!secondLine.isEmpty()) {
-                        signSelectionMap.put(p, b); // добавляем игрока в режим выбора
-                        p.sendMessage(ChatColor.YELLOW + "Теперь открой нужное хранилище, чтобы выбрать его.");
-                        e.setCancelled(true); // предотвращаем случайный удар по табличке
+                    if (signVariables.getSignCategory() == SignCategory.SHOP_SOURCE) {
+                        if (!secondLine.isEmpty()) {
+                            signSelectionMap.put(p, b); // добавляем игрока в режим выбора
+                            p.sendMessage(ChatColor.YELLOW + "Теперь открой нужное хранилище, чтобы выбрать его.");
+                            e.setCancelled(true); // предотвращаем случайный удар по табличке
+                        }
                     }
                 }
             }
             if (signVariables.getSignState() == SignState.SHOP_DEFINED && signVariables.getSignCategory().equals(SignCategory.SHOP_SOURCE)) {
                 if (p.isSneaking()) {
-                    List<String> text = signVariables.getSignText();
-                    String line2 = text.get(2).replace("Кол-во: " + ChatColor.YELLOW , ChatColor.RESET + "");
-                    String line3 = text.get(3).replace( "Цена: " + ChatColor.GREEN, ChatColor.RESET + "");
-                    signVariables.setSignText(Arrays.asList(text.get(0), text.get(1), line2, line3));
-                    sign.setLine(2, line2);
-                    sign.setLine(3, line3);
-                    sign.update();
+                    if (genericSignList.get(loc).getOwnerName().equalsIgnoreCase(p.getName())) {
+                        List<String> text = signVariables.getSignText();
+                        String line2 = text.get(2).replace("Кол-во: " + ChatColor.YELLOW, ChatColor.RESET + "");
+                        String line3 = text.get(3).replace("Цена: " + ChatColor.GREEN, ChatColor.RESET + "");
+                        signVariables.setSignText(Arrays.asList(text.get(0), text.get(1), line2, line3));
+                        sign.setLine(2, line2);
+                        sign.setLine(3, line3);
+                        sign.update();
 
-                    p.sendMessage(ChatColor.GRAY + "Табличка переключена в режим редактирования.");
-                    genericSignList.get(loc).setSignState(SignState.SHOP_UNDEFINED);
+                        p.sendMessage(ChatColor.GRAY + "Табличка переключена в режим редактирования.");
+                        genericSignList.get(loc).setSignState(SignState.SHOP_UNDEFINED);
+                    }
                 } else {
-                    p.sendMessage("Начало.");
                     String sellerNickname = signVariables.getOwnerName();
                     if (sellerNickname.equalsIgnoreCase(p.getName())) return;
-                    p.sendMessage("Выполнение метода.");
 
                     Double price = Double.parseDouble(signVariables.getSignText().get(3).replace("Цена: " + ChatColor.GREEN, ""));
                     Integer quantity = Integer.parseInt(signVariables.getSignText().get(2).replace("Кол-во: " + ChatColor.YELLOW, ""));
+                    p.sendMessage(ChatColor.GRAY + "Обработка транзакции..");
 
                     new BukkitRunnable() {
                         @Override
@@ -423,7 +425,7 @@ public class SignManager implements Listener {
                             Map<String, Object> result = UnityCommands.getInstance().getJsonFieldValues("Users", "GeneralData", "Name", p.getName(), keys);
                             Double money = result.get("money") instanceof Number ? ((Number) result.get("money")).doubleValue() : null;
 
-                            UnityCommands.getInstance().getPlayerInfo(Bukkit.getPlayer(sellerNickname), data -> {
+                            UnityCommands.getInstance().getPlayerInfo(sellerNickname, data -> {
                                 if (data == null) {
                                     // Возвращаемся на основной поток
                                     new BukkitRunnable() {
@@ -469,9 +471,15 @@ public class SignManager implements Listener {
 
                                             ItemStack item = container.getInventory().getItem(slot);
                                             ItemMeta itemMeta = item.getItemMeta();
-                                            String itemName = itemMeta.getDisplayName();
+                                            String itemName;
+
+                                            if (itemMeta != null && itemMeta.hasDisplayName()) {
+                                                itemName = itemMeta.getDisplayName();
+                                            } else {
+                                                itemName = WordUtils.capitalizeFully(item.getType().name().toLowerCase().replace("_", " "));
+                                            }
                                             Map<Enchantment, Integer> enchantments = itemMeta.getEnchants();
-                                            p.sendMessage(ChatColor.GREEN + "Покупка успешна.");
+                                            p.sendMessage(ChatColor.GREEN + "Покупка успешна. " + itemName);
                                             // БД-обновления можно снова вынести в фоновый поток, если нужно
                                             new BukkitRunnable() {
                                                 @Override
