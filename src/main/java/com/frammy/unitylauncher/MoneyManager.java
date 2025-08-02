@@ -52,43 +52,43 @@ public class MoneyManager implements Listener {
             new BukkitRunnable() {
                 @Override
                 public void run() {
-                if (data.money >= amount) {
-                    int totalCents = (int) Math.round(amount * 100);
-                    int dollars = totalCents / 100;
-                    int cents = totalCents % 100;
+                    if (data.money >= amount) {
+                        int totalCents = (int) Math.round(amount * 100);
+                        int dollars = totalCents / 100;
+                        int cents = totalCents % 100;
 
-                    List<ItemStack> itemsToGive = new ArrayList<>();
+                        List<ItemStack> itemsToGive = new ArrayList<>();
 
-                    for (int denomination : dollarDenominations) {
-                        while (dollars >= denomination) {
-                            ItemStack moneyItem = createMoneyItem(Material.PRISMARINE_SHARD, denomination, "Ⓕ");
-                            itemsToGive.add(moneyItem);
-                            // registerMoney(player, moneyItem, denomination, "Dollar");
-                            dollars -= denomination;
+                        for (int denomination : dollarDenominations) {
+                            while (dollars >= denomination) {
+                                ItemStack moneyItem = createMoneyItem(Material.PRISMARINE_SHARD, denomination, "Ⓕ");
+                                itemsToGive.add(moneyItem);
+                                // registerMoney(player, moneyItem, denomination, "Dollar");
+                                dollars -= denomination;
+                            }
                         }
-                    }
 
-                    for (int denomination : centDenominations) {
-                        while (cents >= denomination) {
-                            ItemStack moneyItem = createMoneyItem(Material.PRISMARINE_CRYSTALS, denomination / 100.0, "ⓒ");
-                            itemsToGive.add(moneyItem);
-                            //registerMoney(player, moneyItem, denomination / 100.0, "Cent");
-                            cents -= denomination;
+                        for (int denomination : centDenominations) {
+                            while (cents >= denomination) {
+                                ItemStack moneyItem = createMoneyItem(Material.PRISMARINE_CRYSTALS, denomination / 100.0, "ⓒ");
+                                itemsToGive.add(moneyItem);
+                                //registerMoney(player, moneyItem, denomination / 100.0, "Cent");
+                                cents -= denomination;
+                            }
                         }
+
+                        for (ItemStack item : itemsToGive) {
+                            player.getInventory().addItem(item);
+                        }
+
+                        Map<String, Object> updates = new HashMap<>();
+                        updates.put("money", data.money - amount);
+
+                        UnityCommands.getInstance().mergeAndUpdatePlayerData(player.getName(), "GeneralData", updates);
+                        player.sendMessage(ChatColor.GRAY + "С твоего счёта было снято " + ChatColor.YELLOW + amount + ChatColor.GRAY + "F.");
+                    } else {
+                        player.sendMessage(ChatColor.RED + "Недостаточно средств. Текущий баланс: " + ChatColor.YELLOW + data.money + ChatColor.RED + "F.");
                     }
-
-                    for (ItemStack item : itemsToGive) {
-                        player.getInventory().addItem(item);
-                    }
-
-                    Map<String, Object> updates = new HashMap<>();
-                    updates.put("money", data.money - amount);
-
-                    UnityCommands.getInstance().mergeAndUpdatePlayerData(player.getName(), "GeneralData", updates);
-                    player.sendMessage(ChatColor.GRAY + "С твоего счёта было снято " + ChatColor.YELLOW + amount + ChatColor.GRAY + "F.");
-                } else {
-                    player.sendMessage(ChatColor.RED + "Недостаточно средств. Текущий баланс: " + ChatColor.YELLOW + data.money + ChatColor.RED + "F.");
-                }
                 }
             }.runTask(UnityLauncher.getInstance());
         });

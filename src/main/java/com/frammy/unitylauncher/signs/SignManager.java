@@ -18,6 +18,7 @@ import org.bukkit.block.Sign;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -31,6 +32,8 @@ import org.bukkit.event.player.PlayerItemHeldEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
 
@@ -338,10 +341,7 @@ public class SignManager implements Listener {
             SignVariables signVariables = genericSignList.get(sign.getLocation());
 
             if (signVariables == null) return;
-
-            //
-            //Some purchase action here
-            //
+            if (!e.getPlayer().getInventory().getItemInMainHand().equals(new ItemStack(Material.AIR))) return;
 
             if (!genericSignList.get(loc).getOwnerName().equalsIgnoreCase(p.getName())) return;
 
@@ -406,6 +406,99 @@ public class SignManager implements Listener {
 
                     p.sendMessage(ChatColor.GRAY + "Табличка переключена в режим редактирования.");
                     genericSignList.get(loc).setSignState(SignState.SHOP_UNDEFINED);
+                } else {
+                    p.sendMessage("Начало.");
+                    String sellerNickname = signVariables.getOwnerName();
+                    if (sellerNickname.equalsIgnoreCase(p.getName())) return;
+                    p.sendMessage("Выполнение метода.");
+
+                    Double price = Double.parseDouble(signVariables.getSignText().get(3).replace("Цена: " + ChatColor.GREEN, ""));
+                    Integer quantity = Integer.parseInt(signVariables.getSignText().get(2).replace("Кол-во: " + ChatColor.YELLOW, ""));
+
+                    new BukkitRunnable() {
+                        @Override
+                        public void run() {
+                            // Работа с БД в фоновом потоке
+                            List<String> keys = List.of("money");
+                            Map<String, Object> result = UnityCommands.getInstance().getJsonFieldValues("Users", "GeneralData", "Name", p.getName(), keys);
+                            Double money = result.get("money") instanceof Number ? ((Number) result.get("money")).doubleValue() : null;
+
+                            UnityCommands.getInstance().getPlayerInfo(Bukkit.getPlayer(sellerNickname), data -> {
+                                if (data == null) {
+                                    // Возвращаемся на основной поток
+                                    new BukkitRunnable() {
+                                        @Override
+                                        public void run() {
+                                            p.sendMessage(ChatColor.RED + "Данные о продавце не найдены.");
+                                        }
+                                    }.runTask(UnityLauncher.getInstance());
+                                    return;
+                                }
+
+                                if (money == null || money < price) {
+                                    new BukkitRunnable() {
+                                        @Override
+                                        public void run() {
+                                            p.sendMessage(ChatColor.RED + "Недостаточно средств.");
+                                        }
+                                    }.runTask(UnityLauncher.getInstance());
+                                    return;
+                                }
+
+                                // Переход на основной поток: Bukkit-операции
+                                new BukkitRunnable() {
+                                    @Override
+                                    public void run() {
+                                        try {
+                                            Location chestLocation;
+                                            String[] parts = signVariables.getSignText().get(1).trim().split(" ");
+                                            if (parts.length != 3) throw new IllegalArgumentException("Ожидается 3 координаты");
+
+                                            int x = Integer.parseInt(parts[0]);
+                                            int y = Integer.parseInt(parts[1]);
+                                            int z = Integer.parseInt(parts[2]);
+                                            chestLocation = new Location(sign.getWorld(), x, y, z);
+
+                                            Container container = (Container) chestLocation.getBlock().getState();
+                                            Integer slot = getFirstOccupiedSlot(container.getInventory());
+
+                                            if (slot == -1) {
+                                                p.sendMessage(ChatColor.RED + "Контейнер пуст, транзакция отменена.");
+                                                return;
+                                            }
+
+                                            ItemStack item = container.getInventory().getItem(slot);
+                                            ItemMeta itemMeta = item.getItemMeta();
+                                            String itemName = itemMeta.getDisplayName();
+                                            Map<Enchantment, Integer> enchantments = itemMeta.getEnchants();
+                                            p.sendMessage(ChatColor.GREEN + "Покупка успешна.");
+                                            // БД-обновления можно снова вынести в фоновый поток, если нужно
+                                            new BukkitRunnable() {
+                                                @Override
+                                                public void run() {
+                                                    UnityCommands uc = UnityCommands.getInstance();
+
+                                                    Map<String, Object> sellerUpdates = new HashMap<>();
+                                                    sellerUpdates.put("money", price + data.money);
+                                                    uc.mergeAndUpdatePlayerData(sellerNickname, "GeneralData", sellerUpdates);
+
+                                                    Map<String, Object> buyerUpdates = new HashMap<>();
+                                                    buyerUpdates.put("money", money - price);
+                                                    uc.mergeAndUpdatePlayerData(p.getName(), "GeneralData", buyerUpdates);
+
+                                                    uc.createOrder(sellerNickname, p.getName(), itemName, price, quantity, sign.getLocation(), enchantments);
+                                                }
+                                            }.runTaskAsynchronously(UnityLauncher.getInstance());
+
+                                        } catch (Exception e) {
+                                            p.sendMessage(ChatColor.RED + "Ошибка транзакции: " + e.getMessage());
+                                            e.printStackTrace();
+                                        }
+                                    }
+                                }.runTask(UnityLauncher.getInstance());
+                            });
+                        }
+                    }.runTaskAsynchronously(UnityLauncher.getInstance());
                 }
             }
         }
@@ -475,6 +568,17 @@ public class SignManager implements Listener {
         }
     }
 
+    public int getFirstOccupiedSlot(Inventory inventory) {
+        ItemStack[] contents = inventory.getContents();
+
+        for (int i = 0; i < contents.length; i++) {
+            ItemStack item = contents[i];
+            if (item != null && item.getType() != Material.AIR) {
+                return i;
+            }
+        }
+        return -1; // если нет ни одного занятого слота
+    }
     @EventHandler
     public void onInventoryOpen(InventoryOpenEvent e) {
         Player p = (Player) e.getPlayer();

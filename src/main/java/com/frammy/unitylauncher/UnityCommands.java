@@ -5,6 +5,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
 import org.bukkit.command.CommandSender;
+import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.Player;
 import org.bukkit.permissions.PermissionAttachmentInfo;
 import org.bukkit.scheduler.BukkitRunnable;
@@ -21,6 +22,7 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.List;
 import java.util.Map;
+import java.util.HashMap;
 import java.util.Objects;
 
 import static com.frammy.unitylauncher.UnityLauncher.onError;
@@ -35,76 +37,59 @@ public class UnityCommands {
         }
         return instance;
     }
-
-    public void getAllData(@NotNull CommandSender sender) {
+    public Map<String, Object> getJsonFieldValues(
+            String tableName,
+            String jsonColumn,
+            String whereColumn,
+            String whereValue,
+            List<String> jsonKeys
+    ) {
+        Map<String, Object> resultMap = new HashMap<>();
         Connection con = DBConnect();
         if (con != null) {
             try {
-                String query = "SELECT CustomizationData, SocialData, GeneralData, StatsData FROM Users WHERE Name='" + sender.getName() + "';";
-                Statement st = con.createStatement();
-                ResultSet rs = st.executeQuery(query);
-                if (rs.next()) {
-                    JSONParser parser = new JSONParser();
+                // Допустимые таблицы и их JSON-колонки
+                Map<String, List<String>> allowedJsonColumns = Map.of(
+                        "Users", List.of("CustomizationData", "SocialData", "GeneralData", "StatsData"),
+                        "Countries", List.of("GeneralData", "StatsData") // Добавь нужные колонки для Countries
+                );
 
-                    // Парсим JSON
-                    JSONObject customization = (JSONObject) parser.parse(rs.getString("CustomizationData"));
-                    JSONObject social = (JSONObject) parser.parse(rs.getString("SocialData"));
-                    JSONObject general = (JSONObject) parser.parse(rs.getString("GeneralData"));
-                    JSONObject stats = (JSONObject) parser.parse(rs.getString("StatsData"));
-
-                    // Получение данных (проверка и каст типов)
-                    String name = (String) general.get("Name");
-                    double money = (double) general.get("money");
-                    String country = (String) general.get("countryName");
-                    long shopSpots = (long) general.get("shopSpots");
-                    String regCode = (String) general.get("regCode");
-                    String notificationToggle = (String) general.get("notificationToggle");
-
-                    long playtime = (long) stats.get("playtime");
-                    long totalPlaytime = (long) stats.get("totalPlaytime");
-                    long eventsWon = (long) stats.get("eventsWon");
-                    String rating = (String) stats.get("rating");
-
-                    String avatar = (String) customization.get("avatarURL");
-                    String bg = (String) customization.get("bgURL");
-                    String frame = (String) customization.get("frameID");
-
-                    String vk = (String) social.get("vkURL");
-                    String discord = (String) social.get("discordID");
-                    String telegram = (String) social.get("telegramID");
-
-                    // Отправка сообщений игроку
-                  /*  sender.sendMessage(ChatColor.GOLD + "====== [ Данные игрока: " + name + " ] ======");
-                    sender.sendMessage(ChatColor.YELLOW + "Страна: §f" + country);
-                    sender.sendMessage(ChatColor.YELLOW + "Деньги: §f" + money);
-                    sender.sendMessage(ChatColor.YELLOW + "Магазинов: §f" + shopSpots);
-                    sender.sendMessage(ChatColor.YELLOW + "Рег. код: §f" + regCode);
-                    sender.sendMessage(ChatColor.YELLOW + "Уведомления: §f" + notificationToggle);
-
-                    sender.sendMessage(ChatColor.YELLOW + "Время в игре (сессия): §f" + playtime + " сек");
-                    sender.sendMessage(ChatColor.YELLOW + "Время в игре (всего): §f" + totalPlaytime + " сек");
-                    sender.sendMessage(ChatColor.YELLOW + "Побед в ивентах: §f" + eventsWon);
-                    sender.sendMessage(ChatColor.YELLOW + "Рейтинг: §f" + rating);
-
-                    sender.sendMessage(ChatColor.YELLOW + "Аватар: §f" + avatar);
-                    sender.sendMessage(ChatColor.YELLOW + "Фон: §f" + bg);
-                    sender.sendMessage(ChatColor.YELLOW + "Рамка: §f" + frame);
-
-                    sender.sendMessage(ChatColor.YELLOW + "Discord: §f" + (discord.isEmpty() ? "—" : discord));
-                    sender.sendMessage(ChatColor.YELLOW + "VK: §f" + (vk.isEmpty() ? "—" : vk));
-                    sender.sendMessage(ChatColor.YELLOW + "Telegram: §f" + (telegram.isEmpty() ? "—" : telegram));*/
-
-                } else {
-                    sender.sendMessage(ChatColor.RED + "Игрок не найден в базе данных.");
+                if (!allowedJsonColumns.containsKey(tableName)) {
+                    System.err.println("Недопустимая таблица: " + tableName);
+                    return resultMap;
                 }
+
+                if (!allowedJsonColumns.get(tableName).contains(jsonColumn)) {
+                    System.err.println("Недопустимая JSON-колонка '" + jsonColumn + "' для таблицы '" + tableName + "'");
+                    return resultMap;
+                }
+
+                String query = "SELECT " + jsonColumn + " FROM " + tableName + " WHERE " + whereColumn + " = ?;";
+                PreparedStatement st = con.prepareStatement(query);
+                st.setString(1, whereValue);
+
+                ResultSet rs = st.executeQuery();
+                if (rs.next()) {
+                    String jsonStr = rs.getString(1);
+                    if (jsonStr != null && !jsonStr.isEmpty()) {
+                        JSONParser parser = new JSONParser();
+                        JSONObject json = (JSONObject) parser.parse(jsonStr);
+
+                        for (String key : jsonKeys) {
+                            resultMap.put(key, json.getOrDefault(key, null));
+                        }
+                    }
+                }
+
                 rs.close();
-            } catch (ParseException e) {
-                sender.sendMessage(ChatColor.RED + "Ошибка при разборе JSON-данных.");
-                e.printStackTrace();
+                st.close();
+                con.close();
             } catch (Exception e) {
-                onError("getAllData", e, (Player) sender);
+                System.err.println("Ошибка чтения JSON: " + e.getMessage());
+                e.printStackTrace();
             }
         }
+        return resultMap;
     }
     public void mergeAndUpdatePlayerData(String playerName, String column, Map<String, Object> updates) {
         Connection con = DBConnect();
@@ -283,7 +268,7 @@ public class UnityCommands {
                 if (rs.next()) {
                     Bukkit.getConsoleSender().sendMessage(rs.getString("DayDealCode"));
                     if (rs.getString("DayDealCode").equals("0")) {
-                        sender.sendMessage(ChatColor.RED + "Получи задание!");
+                        sender.sendMessage(ChatColor.RED + "Задание ещё не было получено. Для этого зайди в FarLands клиент.");
                         return;
                     }
                     String[] tableCode = rs.getString("DayDealCode").split(";");
@@ -302,7 +287,7 @@ public class UnityCommands {
                         String query2 = "Update Users SET DayDealCode='" + updCode + "', Money=" + money + " WHERE Name='" + sender.getName() + "';";
                         Statement st2 = con.createStatement();
                         st2.executeUpdate(query2);
-                        sender.sendMessage(ChatColor.GREEN + "Вы выполнили задание!" + ChatColor.RESET + " Возвращайтесь завтра");
+                        sender.sendMessage(ChatColor.GREEN + "Вы выполнили задание!" + ChatColor.RESET + " Возвращайтесь завтра.");
                     } else {
                         sender.sendMessage(ChatColor.RED + "Такого кода не существует!");
                     }
@@ -397,7 +382,7 @@ public class UnityCommands {
                         return;
                     }
                 } else {
-                    sender.sendMessage(ChatColor.RED + "Сначала зарегистрируйтесь в лаунчере");
+                    sender.sendMessage(ChatColor.RED + "Сначала зарегистрируйтесь в FarLands клиенте");
                     return;
                 }
                 rs.close();
@@ -411,29 +396,37 @@ public class UnityCommands {
         }
     }
 
-    public void getMoney(@NotNull CommandSender sender) {
+    public Double getMoney(@NotNull CommandSender sender) {
         Connection con = DBConnect();
         if (con != null) {
             try {
-                String query = "SELECT Money FROM Users WHERE Name='"+sender.getName()+"';";
+                String query = "SELECT Money FROM Users WHERE Name='" + sender.getName() + "';";
                 Statement st = con.createStatement();
                 ResultSet rs = st.executeQuery(query);
+                Double result = null;
+
                 if (rs.next()) {
                     String money = rs.getString(1);
                     if (money == null || money.equals("0")) {
                         sender.sendMessage(ChatColor.RED + "Твои карманы пусты, странник!");
-                        return;
-                    } else
-                        sender.sendMessage("У тебя: " + ChatColor.GREEN + money + ChatColor.RESET + " шекелей!");
+                    } else {
+                        sender.sendMessage("У тебя " + ChatColor.GREEN + money + ChatColor.RESET + " шекелей!");
+                        result = Double.valueOf(money);
+                    }
                 } else {
                     sender.sendMessage(ChatColor.RED + "Вас нет в базе!");
-                    return;
                 }
+
                 rs.close();
+                st.close();
+                con.close();
+
+                return result;
             } catch (Exception e) {
                 onError("getMoney", e, (Player) sender);
             }
         }
+        return null;
     }
 
     public void setShops(@NotNull CommandSender sender, int shopCount) {
@@ -679,6 +672,38 @@ public class UnityCommands {
             }
         }
     }
+    public void createOrder(String sellerName, String customerName, String spriteName, Double price, Integer quantity, Location location, Map<Enchantment, Integer> enchantments /*, String customerName, ..., другие параметры */) {
+        Connection con = DBConnect();
+        if (con != null) {
+            try {
+                // Пример с одной колонкой Seller — добавь остальные по аналогии
+                String insertQuery = "INSERT INTO Orders (Seller, Customer, SpriteName, Price, Quantity, Description, IsFinished, Enchantments) VALUES (?,?,?,?,?,?,?,?);";
+
+                PreparedStatement st = con.prepareStatement(insertQuery);
+                st.setString(1, sellerName); // Заполняем колонку Seller
+                st.setString(2, customerName);
+                st.setString(3, spriteName);
+                st.setString(4, price.toString());
+                st.setString(5, quantity.toString());
+                st.setString(6, "Покупка в магазине (" + location.getX() + ", " + location.getY() + ", " + location.getZ() + ")");
+                st.setString(7, "Yes");
+                st.setString(8, ""); // СЮДА ЗАЧАРОВАНИЯ НУЖНО
+                int rowsAffected = st.executeUpdate();
+                if (rowsAffected > 0) {
+                    System.out.println("Новый заказ успешно создан!");
+                } else {
+                    System.err.println("Не удалось создать заказ.");
+                }
+
+                st.close();
+                con.close();
+            } catch (Exception e) {
+                System.err.println("Ошибка при создании заказа: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }
+    }
+
 
     public void pay(@NotNull CommandSender sender, String receiver, double money, double customFee) {
         if (sender.getName().equals(receiver)) {
