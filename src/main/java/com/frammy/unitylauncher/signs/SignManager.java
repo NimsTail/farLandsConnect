@@ -56,6 +56,7 @@ public class SignManager implements Listener {
     private final Map<Player, Block> signSelectionMap = new HashMap<>();
     private final Map<Location, BukkitTask> resetTasks = new HashMap<>();
     private final Map<Location, Map<Integer, BukkitTask>> activeScrolls = new HashMap<>();
+    Map<Location, List<ItemData>> signItemData = new HashMap<>();
     private final ZoneManager zoneManager;
     private final UnityCommands unityCommands;
     private final BlueMapIntegration blueMapIntegration;
@@ -262,54 +263,75 @@ public class SignManager implements Listener {
         ExtrudeMarker marker = isSignWithinMarker(containerLocation, "zones_shop");
         if (marker == null) return;
 
-        // Найти все таблички типа SHOP_LIST в этой зоне
-        for (Map.Entry<Location, SignVariables> entry : genericSignList.entrySet()) {
-            Location signLoc = entry.getKey();
+        List<Location> shopListSigns = genericSignList.entrySet().stream()
+                .filter(e -> e.getValue().getSignCategory() == SignCategory.SHOP_LIST)
+                .filter(e -> {
+                    ExtrudeMarker m = isSignWithinMarker(e.getKey(), "zones_shop");
+                    return m != null && m.getLabel().equals(marker.getLabel());
+                })
+                .map(Map.Entry::getKey)
+                .toList();
 
-            if (entry.getValue().getSignCategory() != SignCategory.SHOP_LIST) continue;
-            ExtrudeMarker marker2 = isSignWithinMarker(signLoc, "zones_shop");
-            if (marker2 == null || !marker2.getLabel().equals(marker.getLabel())) continue;
+        List<Location> sourceSignLocations = genericSignList.entrySet().stream()
+                .filter(e -> e.getValue().getSignCategory() == SignCategory.SHOP_SOURCE && e.getValue().getSignState() == SignState.SHOP_DEFINED)
+                .filter(e -> {
+                    ExtrudeMarker m = isSignWithinMarker(e.getKey(), "zones_shop");
+                    return m != null && m.getLabel().equals(marker.getLabel());
+                })
+                .map(Map.Entry::getKey)
+                .toList();
 
-            // Найти все source таблички этой зоны
-            List<Location> sourceSignLocations = genericSignList.entrySet().stream()
-                    .filter(e -> e.getValue().getSignCategory() == SignCategory.SHOP_SOURCE)
-                    .filter(e -> isSignWithinMarker(e.getKey(), "zones_shop").equals(marker))
-                    .map(Map.Entry::getKey).toList();
+        Set<Block> containers = new HashSet<>();
+        for (Location loc : sourceSignLocations) {
+            SignVariables sourceVars = genericSignList.get(loc);
+            if (sourceVars == null || sourceVars.getSignText().size() < 2) continue;
 
-            Set<Block> containers = new HashSet<>();
-            for (Location loc : sourceSignLocations) {
-                SignVariables sourceVars = genericSignList.get(loc);
-                if (sourceVars == null || sourceVars.getSignText().size() < 2) continue;
+            String[] coords = sourceVars.getSignText().get(1).split(" ");
+            if (coords.length != 3) continue;
 
-                String[] coords = sourceVars.getSignText().get(1).split(" ");
-                if (coords.length != 3) continue;
+            try {
+                int x = Integer.parseInt(coords[0]);
+                int y = Integer.parseInt(coords[1]);
+                int z = Integer.parseInt(coords[2]);
+                Block block = loc.getWorld().getBlockAt(x, y, z);
+                if (block.getState() instanceof Container) {
+                    containers.add(block);
+                }
+            } catch (NumberFormatException ignored) {}
+        }
 
-                try {
-                    int x = Integer.parseInt(coords[0]);
-                    int y = Integer.parseInt(coords[1]);
-                    int z = Integer.parseInt(coords[2]);
-                    Block block = loc.getWorld().getBlockAt(x, y, z);
-                    if (block.getState() instanceof Container) {
-                        containers.add(block);
-                    }
-                } catch (NumberFormatException ignored) {}
-            }
+        Map<Location, List<ItemData>> summary = zoneManager.getItemSummaryFromContainers(
+                new ArrayList<>(containers),
+                sourceSignLocations
+        );
 
-            Map<String, Integer> summary = zoneManager.getItemSummaryFromContainers(new ArrayList<>(containers));
-            List<String> itemLines = summary.entrySet().stream()
-                    .map(e -> Arrays.stream(e.getKey().split("_"))
+        // Объединяем всё в один общий список
+        List<ItemData> allItems = summary.values().stream()
+                .flatMap(List::stream)
+                .collect(Collectors.toList());
+
+        // Назначаем один и тот же список на каждую SHOP_LIST табличку
+        for (Location signLoc : shopListSigns) {
+            if (allItems.isEmpty()) continue;
+
+            List<String> itemLines = allItems.stream()
+                    .map(e -> Arrays.stream(e.name.split("_"))
                             .map(w -> w.charAt(0) + w.substring(1).toLowerCase())
-                            .collect(Collectors.joining(" ")) + ": " + e.getValue())
+                            .collect(Collectors.joining(" ")))
                     .collect(Collectors.toList());
 
-
             signPages.put(signLoc, itemLines);
-            playerScrollIndex.put(Bukkit.getOfflinePlayer(entry.getValue().getOwnerName()).getUniqueId(), 0);
+            signItemData.put(signLoc, allItems);
 
+            SignVariables signVars = genericSignList.get(signLoc);
+            if (signVars != null) {
+                UUID playerId = Bukkit.getOfflinePlayer(signVars.getOwnerName()).getUniqueId();
+                playerScrollIndex.put(playerId, 0);
+            }
 
             Block block = signLoc.getBlock();
             if (block.getState() instanceof Sign sign) {
-                updateSignView(sign, itemLines, 0);
+                updateSignView(sign, itemLines, 0); // Показываем первые 3 строки
             }
         }
     }
@@ -343,6 +365,28 @@ public class SignManager implements Listener {
 
             if (signVariables == null) return;
             if (!e.getPlayer().getInventory().getItemInMainHand().equals(new ItemStack(Material.AIR))) return;
+
+            if (signVariables.getSignCategory() == SignCategory.SHOP_LIST) {
+                if (!signPages.containsKey(loc)) return;
+
+                List<String> items = signPages.get(loc);
+                List<ItemData> dataList = signItemData.get(loc);
+
+                if (items == null || items.isEmpty() || dataList == null || dataList.isEmpty()) return;
+
+                int index = playerScrollIndex.getOrDefault(p.getUniqueId(), 0);
+                if (index + 1 >= items.size() || index + 1 >= dataList.size()) return;
+
+                String selectedItemName = ChatColor.stripColor(items.get(index + 1));
+                ItemData selectedItem = dataList.get(index + 1);
+
+                p.sendMessage(ChatColor.YELLOW + "=======" + ChatColor.GOLD + " [Магазин] " + ChatColor.YELLOW + "=======\n" +
+                        "\n" + ChatColor.GREEN + "Предмет: " + ChatColor.RESET + selectedItemName +
+                        "\n" + ChatColor.GREEN + "Доступное количество: " + ChatColor.RESET + selectedItem.overallQuantity + " шт." +
+                        "\n" + ChatColor.GREEN + "Количество одной сделки: " + ChatColor.RESET + selectedItem.quantity + " шт." +
+                        "\n" + ChatColor.GREEN + "Цена одной сделки: " + ChatColor.RESET + selectedItem.price + " Ⓕ" +
+                        "\n" + ChatColor.GREEN + "Координаты сундука: " + ChatColor.RESET + formatLocation(selectedItem.chestLocation));
+            }
 
             if (genericSignList.get(loc).getOwnerName().equalsIgnoreCase(p.getName())) {
                 if (signVariables.getSignState() == SignState.SHOP_UNDEFINED) {
@@ -472,12 +516,8 @@ public class SignManager implements Listener {
                                             ItemStack item = container.getInventory().getItem(slot);
                                             ItemMeta itemMeta = item.getItemMeta();
                                             String itemName;
+                                            itemName = WordUtils.capitalizeFully(item.getType().name().toLowerCase().replace("_", " "));
 
-                                            if (itemMeta != null && itemMeta.hasDisplayName()) {
-                                                itemName = itemMeta.getDisplayName();
-                                            } else {
-                                                itemName = WordUtils.capitalizeFully(item.getType().name().toLowerCase().replace("_", " "));
-                                            }
                                             Map<Enchantment, Integer> enchantments = itemMeta.getEnchants();
                                             p.sendMessage(ChatColor.GREEN + "Покупка успешна. " + itemName);
                                             // БД-обновления можно снова вынести в фоновый поток, если нужно
@@ -574,6 +614,9 @@ public class SignManager implements Listener {
             genericSignList.get(loc).setSignState(SignState.ATM_MENU);
             scheduleSignReset(loc);
         }
+    }
+    private String formatLocation(Location loc) {
+        return String.format("X: %d Y: %d Z: %d", loc.getBlockX(), loc.getBlockY(), loc.getBlockZ());
     }
 
     public int getFirstOccupiedSlot(Inventory inventory) {
@@ -691,8 +734,6 @@ public class SignManager implements Listener {
                             sign.setLine(3, line3);
                             sign.update();
                         }
-
-
                     }
                 }
             }
@@ -734,10 +775,8 @@ public class SignManager implements Listener {
         }
 
         if (allStrings.size() < 3) {
-            System.out.println("Точно меньше или равно 3");
             int toAdd = 3 - allStrings.size();
             for (int i = 0; i < toAdd; i++) {
-                System.out.println("Отображаем пустую строку " + i);
                 signPages.get(loc).add("  "); // добавляем пустые строки
             }
         }

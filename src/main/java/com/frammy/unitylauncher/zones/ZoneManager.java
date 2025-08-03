@@ -1,7 +1,9 @@
 package com.frammy.unitylauncher.zones;
 import com.frammy.unitylauncher.UnityLauncher;
+import com.frammy.unitylauncher.signs.ItemData;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.BlueMapIntegration;
+import com.frammy.unitylauncher.signs.SignVariables;
 import de.bluecolored.bluemap.api.math.Shape;
 import net.md_5.bungee.api.ChatMessageType;
 import net.md_5.bungee.api.chat.ClickEvent;
@@ -58,6 +60,7 @@ public class ZoneManager {
         put(ZoneType.REGION, new ZoneTypeData("Регион", 10000.0, 1, 300.0, true));
         put(ZoneType.COUNTRY, new ZoneTypeData("Государство", 30000.0, 0, 100.0, true));
     }};
+
 
     // Карта для хранения последней посещённой зоны игрока
     private final Map<UUID, ZoneInfo> playerLastZone = new HashMap<>();
@@ -714,16 +717,39 @@ public class ZoneManager {
         }
         return result;
     }
-    public Map<String, Integer> getItemSummaryFromContainers(List<Block> containers) {
-        Map<String, Integer> result = new HashMap<>();
-        for (Block containerBlock : containers) {
+    public Map<Location, List<ItemData>> getItemSummaryFromContainers(List<Block> containers, List<Location> signLocations) {
+        Map<Location, List<ItemData>> result = new HashMap<>();
+
+        for (int i = 0; i < containers.size(); i++) {
+            Block containerBlock = containers.get(i);
             if (!(containerBlock.getState() instanceof Container container)) continue;
+
+            Location signLocation = signLocations.get(i);
+            SignVariables signVars = signManager.genericSignList.get(signLocation);
+            if (signVars == null || signVars.getSignText().size() < 4) continue;
+
+            String quantityString = ChatColor.stripColor(signVars.getSignText().get(2).replace("Кол-во: ", ""));
+            String priceString = ChatColor.stripColor(signVars.getSignText().get(3).replace("Цена: ", ""));
+            System.out.println(quantityString + " " + priceString);
+
+            int quantity = Integer.parseInt(quantityString);
+            double price = Double.parseDouble(priceString);
+
             for (ItemStack item : container.getInventory().getContents()) {
                 if (item == null || item.getType() == Material.AIR) continue;
-                String key = item.getType().toString();
-                result.put(key, result.getOrDefault(key, 0) + item.getAmount());
+
+                ItemData itemData = new ItemData(
+                        container.getLocation(),
+                        item.getType().toString(),
+                        quantity,
+                        item.getAmount(),
+                        price
+                );
+
+                result.computeIfAbsent(signLocation, k -> new ArrayList<>()).add(itemData);
             }
         }
+
         return result;
     }
 }
