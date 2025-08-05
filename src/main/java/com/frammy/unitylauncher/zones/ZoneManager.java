@@ -730,24 +730,37 @@ public class ZoneManager {
 
             String quantityString = ChatColor.stripColor(signVars.getSignText().get(2).replace("Кол-во: ", ""));
             String priceString = ChatColor.stripColor(signVars.getSignText().get(3).replace("Цена: ", ""));
-            System.out.println(quantityString + " " + priceString);
 
             int quantity = Integer.parseInt(quantityString);
             double price = Double.parseDouble(priceString);
 
+            // Временная мапа для одного контейнера: тип предмета → агрегированные данные
+            Map<Material, ItemData> combinedItems = new HashMap<>();
+
             for (ItemStack item : container.getInventory().getContents()) {
                 if (item == null || item.getType() == Material.AIR) continue;
 
-                ItemData itemData = new ItemData(
-                        container.getLocation(),
-                        item.getType().toString(),
-                        quantity,
-                        item.getAmount(),
-                        price
-                );
+                Material type = item.getType();
 
-                result.computeIfAbsent(signLocation, k -> new ArrayList<>()).add(itemData);
+                if (combinedItems.containsKey(type)) {
+                    // Увеличиваем общее количество
+                    ItemData existing = combinedItems.get(type);
+                    existing.overallQuantity += item.getAmount();
+                } else {
+                    // Новый предмет — создаём и добавляем
+                    ItemData newItem = new ItemData(
+                            container.getLocation(),
+                            type.toString(),
+                            quantity,
+                            item.getAmount(),
+                            price
+                    );
+                    combinedItems.put(type, newItem);
+                }
             }
+
+            // Помещаем агрегированный список в результат
+            result.put(signLocation, new ArrayList<>(combinedItems.values()));
         }
 
         return result;

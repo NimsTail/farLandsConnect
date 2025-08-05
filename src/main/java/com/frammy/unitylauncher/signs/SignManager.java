@@ -375,6 +375,8 @@ public class SignManager implements Listener {
                 if (items == null || items.isEmpty() || dataList == null || dataList.isEmpty()) return;
 
                 int index = playerScrollIndex.getOrDefault(p.getUniqueId(), 0);
+                p.sendMessage(index+1 + " " + items.get(index+1));
+
                 if (index + 1 >= items.size() || index + 1 >= dataList.size()) return;
 
                 String selectedItemName = ChatColor.stripColor(items.get(index + 1));
