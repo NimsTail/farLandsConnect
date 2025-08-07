@@ -1,4 +1,5 @@
 package com.frammy.unitylauncher;
+import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
 import com.frammy.unitylauncher.signs.SignCategory;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.signs.SignVariables;
@@ -53,10 +54,12 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         this.zoneManager = new ZoneManager(this, null, blueMapIntegration); // пока передаём null, позже установим SignManager
         this.signManager = new SignManager(this, getDataFolder(), zoneManager, blueMapIntegration, UnityCommands.getInstance());
         this.zoneManager.setSignManager(signManager);
+        ActivityTracker tracker = new ActivityTracker(this);
         getServer().getPluginManager().registerEvents(signManager, this);
         HelpCommandManager helpManager = new HelpCommandManager();
-        Objects.requireNonNull(getCommand("unityLauncher")).setExecutor(new Unity(helpManager, webSocketManager));
+        Objects.requireNonNull(getCommand("unityLauncher")).setExecutor(new Unity(helpManager, webSocketManager, tracker));
         this.getCommand("unityLauncher").setTabCompleter(new CommandCompleter());
+
 
         commandCategories.add("Авторизация");
         commandCategories.add("Финансы");
@@ -147,6 +150,8 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
         blueMapIntegration.saveBlueMapMarkers("services");
         blueMapIntegration.saveBlueMapMarkers("shops");
+        blueMapIntegration.saveBlueMapMarkers("chunk-activity");
+
         instance = null;
     }
     public static UnityLauncher getInstance() {

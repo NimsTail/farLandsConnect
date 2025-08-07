@@ -1,6 +1,8 @@
 package com.frammy.unitylauncher;
 
 import com.flowpowered.math.vector.Vector3d;
+import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
+import com.frammy.unitylauncher.chunkactivity.ChunkActivityHeatmapExporter;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.mysql.cj.util.StringUtils;
 import net.kyori.adventure.text.Component;
@@ -38,10 +40,12 @@ public class Unity implements CommandExecutor {
     private BlueMapIntegration blueMapIntegration;
     private SignManager signManager;
     private final WebSocketManager webSocketManager;
+    private final ActivityTracker tracker;
     // Конструктор принимает HelpCommandManager
-    public Unity(HelpCommandManager helpManager, WebSocketManager webSocketManager) {
+    public Unity(HelpCommandManager helpManager, WebSocketManager webSocketManager, ActivityTracker tracker) {
         this.helpManager = helpManager;
         this.webSocketManager = webSocketManager;
+        this.tracker = tracker;
     }
 
     @Override
@@ -77,6 +81,13 @@ public class Unity implements CommandExecutor {
 
             if (args.length == 1) {
                 switch (args[0].toLowerCase()) {
+                    case "expo":
+                        ChunkActivityHeatmapExporter.exportHeatmapToBlueMapLayer(
+                                tracker.getChunkStatsMap(),
+                                "world" // замени на нужный мир
+                        );                               // имя мира (важно!)
+
+                        return false;
                     case "rcode":
                         UnityCommands.getInstance().rCode(sender);
                         return false;
