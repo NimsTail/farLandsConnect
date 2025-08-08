@@ -15,10 +15,7 @@ import org.bukkit.Bukkit;
 import java.io.FileWriter;
 import java.io.File;
 import java.io.IOException;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 public class ChunkActivityHeatmapExporter {
 
@@ -63,8 +60,15 @@ public class ChunkActivityHeatmapExporter {
 
         return smoothed;
     }
+    private static double getPercentile(Collection<Double> values, double percentile) {
+        List<Double> sorted = new ArrayList<>(values);
+        Collections.sort(sorted);
 
-    public static void exportHeatmapToBlueMapLayer(Map<String, ChunkStats> statsMap, String worldName) {
+        int index = (int) Math.ceil((percentile / 100.0) * sorted.size()) - 1;
+        return sorted.get(Math.max(index, 0));
+    }
+
+    public static void exportHeatmapToBlueMapLayer(Map<String, ChunkStats> statsMap, String worldName, ActivityWeights weights) {
         if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
 
         BlueMapAPI.getInstance().ifPresent(api -> {
@@ -82,9 +86,7 @@ public class ChunkActivityHeatmapExporter {
                     int chunkX = Integer.parseInt(coords[0]);
                     int chunkZ = Integer.parseInt(coords[1]);
 
-                    double value = entry.getValue().timeSpent / 1000.0 +
-                            entry.getValue().blocksPlaced * 2 +
-                            entry.getValue().blocksBroken;
+                    double value = weights.calculateValue(entry.getValue());
 
                     rawActivityMap.put(chunkX + ";" + chunkZ, value);
                 }
@@ -159,15 +161,15 @@ public class ChunkActivityHeatmapExporter {
 
                         String id = "empty_" + cx + "_" + cz;
                         ShapeMarker marker = new ShapeMarker(id, shape, 256);
-                        marker.setLabel("[X: " + cx + "; Z:" + cz + "] : 0");
+                        marker.setLabel("0 | X: " + cx + "; Z:" + cz);
                         marker.setDetail("0");
 
                         Color fill = getColorFromValue(0.0);
                         Color stroke = new Color(
-                                Math.min(fill.getRed() + 40, 0),
-                                Math.min(fill.getGreen() + 40, 0),
-                                Math.min(fill.getBlue() + 40, 0),
-                                fill.getAlpha()
+                                Math.min(fill.getRed() + 40, 255),
+                                Math.min(fill.getGreen() + 40, 255),
+                                Math.min(fill.getBlue() + 40, 255),
+                                0
                         );
 
                         marker.setColors(stroke, fill);
@@ -195,16 +197,18 @@ public class ChunkActivityHeatmapExporter {
                     Shape shape = new Shape(square);
                     String id = "active_" + cx + "_" + cz;
                     ShapeMarker marker = new ShapeMarker(id, shape, 256);
-                    marker.setLabel("[X: " + cx + "; Z:" + cz + "] : " + String.format("%.2f", value));
+                    marker.setLabel(String.format("%.2f", value) + " | X: " + cx + "; Z:" + cz);
                     marker.setDetail(String.format("%.2f", value));
 
-                    double normalized = value / maxValue;
+                    double cutoff = getPercentile(activityMap.values(), 95.0);
+
+                    double normalized = Math.min(1.0, Math.log1p(value) / Math.log1p(cutoff));
                     Color fill = getColorFromValue(normalized);
                     Color stroke = new Color(
-                            Math.min(fill.getRed() + 40, 0),
-                            Math.min(fill.getGreen() + 40, 0),
-                            Math.min(fill.getBlue() + 40, 0),
-                            fill.getAlpha()
+                            Math.min(fill.getRed() + 40, 255),
+                            Math.min(fill.getGreen() + 40, 255),
+                            Math.min(fill.getBlue() + 40, 255),
+                            0
                     );
 
                     marker.setColors(stroke, fill);
@@ -231,6 +235,6 @@ public class ChunkActivityHeatmapExporter {
             g = Math.round((1f - t * 0.5f) * 255);
         }
 
-        return new Color(r, g, 0, 0.45f); // Полупрозрачный
+        return new Color(r, g, 0, 0.4f); // Полупрозрачный
     }
 }

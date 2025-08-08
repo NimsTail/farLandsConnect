@@ -3,6 +3,7 @@ package com.frammy.unitylauncher.zones;
 import org.bukkit.Location;
 
 import java.util.List;
+import java.util.function.Supplier;
 
 public class ZoneInfo {
     ZoneType zoneType;
@@ -11,6 +12,10 @@ public class ZoneInfo {
     String zoneOwner;
     String markerID;
     List<Location> zoneCorners;
+
+    private double cachedDailyCost = 0;
+    private long lastCostUpdate = 0;
+    private static final long COST_CACHE_DURATION_MS = 5 * 60 * 1000; // 5 минут
 
     public ZoneInfo(ZoneType zoneType, String zoneID, String zoneName, String markerID, List<Location> zoneCorners, String zoneOwner) {
         this.zoneType = zoneType;
@@ -58,4 +63,14 @@ public class ZoneInfo {
         this.zoneOwner = owner;
     }
 
+    public double getCachedCost(Supplier<Double> calculateFunction) {
+        long now = System.currentTimeMillis();
+
+        if (now - lastCostUpdate > COST_CACHE_DURATION_MS) {
+            cachedDailyCost = calculateFunction.get();
+            lastCostUpdate = now;
+        }
+
+        return cachedDailyCost;
+    }
 }

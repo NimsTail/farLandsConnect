@@ -2,6 +2,7 @@ package com.frammy.unitylauncher;
 
 import com.flowpowered.math.vector.Vector3d;
 import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
+import com.frammy.unitylauncher.chunkactivity.ActivityWeights;
 import com.frammy.unitylauncher.chunkactivity.ChunkActivityHeatmapExporter;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.mysql.cj.util.StringUtils;
@@ -82,10 +83,16 @@ public class Unity implements CommandExecutor {
             if (args.length == 1) {
                 switch (args[0].toLowerCase()) {
                     case "expo":
+                        ActivityWeights weights = new ActivityWeights();
+                        weights.timeWeight = 0.025;
+                        weights.blockPlacedWeight = 0.003;
+                        weights.blockBrokenWeight = 0.0018;
+                        //tracker.applyCoolingToAll();
                         ChunkActivityHeatmapExporter.exportHeatmapToBlueMapLayer(
                                 tracker.getChunkStatsMap(),
-                                "world" // замени на нужный мир
-                        );                               // имя мира (важно!)
+                                p.getLocation().getWorld().getName(),
+                                weights
+                        );
 
                         return false;
                     case "rcode":

@@ -49,12 +49,12 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         moneyManager = new MoneyManager(getDataFolder(), "unity_launcher");
         getServer().getPluginManager().registerEvents(moneyManager, this);
         webSocketManager = new WebSocketManager(getLogger());
-
+        ActivityTracker tracker = new ActivityTracker(this);
         this.blueMapIntegration = new BlueMapIntegration(this, getLogger(), getDataFolder());
-        this.zoneManager = new ZoneManager(this, null, blueMapIntegration); // пока передаём null, позже установим SignManager
+        this.zoneManager = new ZoneManager(this, null, blueMapIntegration, tracker); // пока передаём null, позже установим SignManager
         this.signManager = new SignManager(this, getDataFolder(), zoneManager, blueMapIntegration, UnityCommands.getInstance());
         this.zoneManager.setSignManager(signManager);
-        ActivityTracker tracker = new ActivityTracker(this);
+
         getServer().getPluginManager().registerEvents(signManager, this);
         HelpCommandManager helpManager = new HelpCommandManager();
         Objects.requireNonNull(getCommand("unityLauncher")).setExecutor(new Unity(helpManager, webSocketManager, tracker));

@@ -1,5 +1,8 @@
 package com.frammy.unitylauncher.zones;
 import com.frammy.unitylauncher.UnityLauncher;
+import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
+import com.frammy.unitylauncher.chunkactivity.ActivityWeights;
+import com.frammy.unitylauncher.chunkactivity.ChunkStats;
 import com.frammy.unitylauncher.signs.ItemData;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.BlueMapIntegration;
@@ -34,16 +37,18 @@ public class ZoneManager {
     private final UnityLauncher unityLauncher;
     private SignManager signManager;
     private BlueMapIntegration blueMapIntegration;
+    private ActivityTracker activityTracker;
     private final File zonesFile;
     private YamlConfiguration zonesConfig;
     private final Map<UUID, List<Location>> zonePoints = new HashMap<>();
 
     public HashMap<String, ZoneInfo> zoneList = new HashMap<>();
 
-    public ZoneManager(UnityLauncher plugin, SignManager signManager, BlueMapIntegration blueMapIntegration) {
+    public ZoneManager(UnityLauncher plugin, SignManager signManager, BlueMapIntegration blueMapIntegration, ActivityTracker activityTracker) {
         this.unityLauncher = plugin;
         this.signManager = signManager;
         this.blueMapIntegration = blueMapIntegration;
+        this.activityTracker = activityTracker;
 
         this.zonesFile = new File(plugin.getDataFolder(), "zones.yml"); // <-- создаём файл в папке плагина
         this.zonesConfig = YamlConfiguration.loadConfiguration(zonesFile); // загружаем конфиг
@@ -100,6 +105,26 @@ public class ZoneManager {
                     return;
                 }
                 updateZone(player, args[1].toLowerCase(), args.length > 2 ? args[2] : "");
+                break;
+            case "price":
+                ZoneInfo zoneInfo = playerLastZone.get(player.getUniqueId());
+                if (zoneInfo != null) {
+                    for (ZoneInfo zone : zoneList.values()) {
+                        if (zone.getOwner().equals(player.getName())) {
+                            double cost = zoneInfo.getCachedCost(() -> {
+                                return calculateZoneDailyCost(
+                                        zoneInfo,
+                                        activityTracker.getChunkStatsMap(),
+                                        activityTracker.getWeights()
+                                );
+                            });
+
+                            player.sendMessage("Цена: " + cost);
+
+                        }
+
+                    }
+                }
                 break;
             case "remove":
                 removeZone(player);
@@ -484,6 +509,87 @@ public class ZoneManager {
     private String locToStr(Location loc) {
         return String.format("(%s: %.1f, %.1f, %.1f)", loc.getWorld().getName(), loc.getX(), loc.getY(), loc.getZ());
     }
+    public Map<Chunk, Double> getChunkFractions(List<Location> corners) {
+        Map<Chunk, Double> result = new HashMap<>();
+
+        if (corners.size() < 3) return result;
+
+        // Преобразуем в 2D
+        List<Vector2d> polygon = corners.stream()
+                .map(loc -> new Vector2d(loc.getX(), loc.getZ()))
+                .collect(Collectors.toList());
+
+        World world = corners.get(0).getWorld(); // предполагаем одна зона = один мир
+
+        // Определяем границы
+        double minX = polygon.stream().mapToDouble(p -> p.getX()).min().orElse(0);
+        double maxX = polygon.stream().mapToDouble(p -> p.getX()).max().orElse(0);
+        double minZ = polygon.stream().mapToDouble(p -> p.getY()).min().orElse(0);
+        double maxZ = polygon.stream().mapToDouble(p -> p.getY()).max().orElse(0);
+
+        // Количество шагов в чанке (разрешение)
+        int step = 4;
+        double stepSize = 16.0 / step;
+
+        int chunkMinX = (int) Math.floor(minX / 16);
+        int chunkMaxX = (int) Math.floor(maxX / 16);
+        int chunkMinZ = (int) Math.floor(minZ / 16);
+        int chunkMaxZ = (int) Math.floor(maxZ / 16);
+
+        for (int cx = chunkMinX; cx <= chunkMaxX; cx++) {
+            for (int cz = chunkMinZ; cz <= chunkMaxZ; cz++) {
+                int inside = 0;
+                int total = step * step;
+
+                for (int i = 0; i < step; i++) {
+                    for (int j = 0; j < step; j++) {
+                        double x = cx * 16 + i * stepSize + stepSize / 2;
+                        double z = cz * 16 + j * stepSize + stepSize / 2;
+
+                        if (isPointInsidePolygon(new Vector2d(x, z), polygon)) {
+                            inside++;
+                        }
+                    }
+                }
+
+                if (inside > 0) {
+                    double fraction = (double) inside / total;
+                    Chunk chunk = world.getChunkAt(cx, cz);
+                    result.put(chunk, fraction);
+                }
+            }
+        }
+
+        return result;
+    }
+    public double calculateWeeklyCost(ZoneInfo zone, Map<String, ChunkStats> statsMap, ActivityWeights weights, double multiplierPerPoint) {
+        double daily = calculateZoneDailyCost(zone, statsMap, weights);
+        return daily * multiplierPerPoint * 7; // умножаем на 7 дней
+    }
+
+
+    public double calculateZoneDailyCost(ZoneInfo zone, Map<String, ChunkStats> statsMap, ActivityWeights weights) {
+        Map<Chunk, Double> chunkFractions = getChunkFractions(zone.zoneCorners);
+
+        double totalWeightedValue = 0;
+        double totalWeight = 0;
+
+        for (Map.Entry<Chunk, Double> entry : chunkFractions.entrySet()) {
+            Chunk chunk = entry.getKey();
+            double fraction = entry.getValue();
+
+            String key = chunk.getWorld().getName() + ":" + chunk.getX() + "," + chunk.getZ();
+            ChunkStats stats = statsMap.get(key);
+            if (stats == null || stats.dailySamples.isEmpty()) continue;
+
+            double dailyAvg = stats.dailySamples.stream().mapToDouble(d -> d).average().orElse(0);
+
+            totalWeightedValue += dailyAvg * fraction;
+            totalWeight += fraction;
+        }
+
+        return totalWeight > 0 ? totalWeightedValue / totalWeight : 0;
+    }
 
     private void addBlueMapMarker(ZoneType zoneType, String markerID, List<Location> locations, String zoneName) {
         if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
@@ -706,16 +812,19 @@ public class ZoneManager {
     }
 
     public boolean isPointInsidePolygon(Vector2d point, List<Vector2d> polygon) {
-        boolean result = false;
+        boolean inside = false;
         int j = polygon.size() - 1;
         for (int i = 0; i < polygon.size(); i++) {
-            if ((polygon.get(i).getY() > point.getY()) != (polygon.get(j).getY() > point.getY()) &&
-                    (point.getX() < (polygon.get(j).getX() - polygon.get(i).getX()) * (point.getY() - polygon.get(i).getY()) / (polygon.get(j).getY() - polygon.get(i).getY()) + polygon.get(i).getX())) {
-                result = !result;
+            Vector2d vi = polygon.get(i);
+            Vector2d vj = polygon.get(j);
+
+            if ((vi.getY() > point.getY()) != (vj.getY() > point.getY()) &&
+                    (point.getX() < (vj.getX() - vi.getX()) * (point.getY() - vi.getY()) / (vj.getY() - vi.getY()) + vi.getX())) {
+                inside = !inside;
             }
             j = i;
         }
-        return result;
+        return inside;
     }
     public Map<Location, List<ItemData>> getItemSummaryFromContainers(List<Block> containers, List<Location> signLocations) {
         Map<Location, List<ItemData>> result = new HashMap<>();

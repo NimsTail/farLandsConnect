@@ -20,17 +20,41 @@ public class ActivityTracker implements Listener {
 
     private final Map<String, ChunkStats> chunkStatsMap = new ConcurrentHashMap<>();
     private final Map<UUID, PlayerChunkSession> playerChunks = new HashMap<>();
+    private final ActivityWeights weights = new ActivityWeights();
 
     private final UnityLauncher plugin;
 
+    public ActivityWeights getWeights() {
+        return weights;
+    }
     public ActivityTracker(UnityLauncher plugin) {
         this.plugin = plugin;
         Bukkit.getPluginManager().registerEvents(this, plugin);
         startAutoSave();
+        startDailySampleRecording();
     }
 
     private void startAutoSave() {
         Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, this::saveAllToDisk, 20 * 60 * 5L, 20 * 60 * 5L); // каждые 5 минут
+        Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, this::applyCoolingToAll, 20 * 60 * 10L, 20 * 60 * 10L); // каждые 10 мин
+    }
+    private void startDailySampleRecording() {
+        long oneDay = 20L * 60 * 60 * 24;
+        Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, () -> {
+            for (ChunkStats stats : chunkStatsMap.values()) {
+                stats.recordDailySample(getWeights());
+            }
+            Bukkit.getLogger().info("[Heatmap] Сохранён ежедневный срез активности.");
+        }, oneDay, oneDay);
+    }
+
+    public void applyCoolingToAll() {
+        long now = System.currentTimeMillis();
+        double decayRatePerHour = 0.9; // уменьшается на 10% каждый час
+
+        for (ChunkStats stats : chunkStatsMap.values()) {
+            stats.applyCooling(now);
+        }
     }
 
     @EventHandler
@@ -57,13 +81,13 @@ public class ActivityTracker implements Listener {
     @EventHandler
     public void onBlockPlace(BlockPlaceEvent event) {
         Chunk chunk = event.getBlock().getChunk();
-        getStats(chunk).blocksPlaced++;
+        getStats(chunk).incrementPlace();
     }
 
     @EventHandler
     public void onBlockBreak(BlockBreakEvent event) {
         Chunk chunk = event.getBlock().getChunk();
-        getStats(chunk).blocksBroken++;
+        getStats(chunk).incrementBreak();
     }
 
     private ChunkStats getStats(Chunk chunk) {
