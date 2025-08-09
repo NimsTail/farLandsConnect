@@ -159,6 +159,17 @@ public class ZoneManager {
                 return;
             }
         }
+        World.Environment env = player.getWorld().getEnvironment();
+        if (zoneType == ZoneType.COUNTRY && env != World.Environment.NORMAL) {
+            player.sendMessage(ChatColor.RED + "Государство можно создавать только в обычном мире (Overworld).");
+            return;
+        }
+
+        // Запрет смешивать миры в одной зоне
+        if (points != null && !points.isEmpty() && !points.get(0).getWorld().equals(player.getWorld())) {
+            player.sendMessage(ChatColor.RED + "Нельзя добавлять точки зоны из разных миров.");
+            return;
+        }
         // Временное добавление точки для проверки площади
         List<Location> tempPoints = new ArrayList<>(points);
         tempPoints.add(player.getLocation().clone());
@@ -211,6 +222,18 @@ public class ZoneManager {
                 player.sendMessage(ChatColor.RED + "Нельзя создать зону, точка " + loc.toVector().toString() + " пересекается с существующей зоной!");
                 return;
             }
+        }
+
+        World world0 = points.get(0).getWorld();
+        boolean sameWorld = points.stream().allMatch(l -> l.getWorld().equals(world0));
+        if (!sameWorld) {
+            player.sendMessage(ChatColor.RED + "Все точки зоны должны быть в одном мире.");
+            return;
+        }
+
+        if (zoneType == ZoneType.COUNTRY && world0.getEnvironment() != World.Environment.NORMAL) {
+            player.sendMessage(ChatColor.RED + "Государство можно создавать только в обычном мире (Overworld).");
+            return;
         }
 
         String playerName = player.getName();
@@ -423,23 +446,24 @@ public class ZoneManager {
     private boolean isPointInOtherZone(Location loc, String ownerName, ZoneType currentZoneType, String currentZoneID) {
         for (ZoneInfo zone : zoneList.values()) {
             // Пропускаем текущую зону (по типу и ID)
-            if (zone.zoneType == currentZoneType && zone.zoneID.equals(currentZoneID))
-                continue;
+            if (zone.zoneType == currentZoneType && zone.zoneID.equals(currentZoneID)) continue;
 
             // Пропускаем зону, если она принадлежит текущему игроку и уже была проверена ранее
-            if (zone.zoneOwner.equals(ownerName) && zone.zoneType == currentZoneType)
-                continue;
+            if (zone.zoneOwner.equals(ownerName) && zone.zoneType == currentZoneType) continue;
 
-            // Проверка, находится ли точка в другой зоне
-            if (isPlayerInZone(loc, zone.zoneCorners)) {
-                return true;
-            }
+            if (zone.zoneCorners == null || zone.zoneCorners.size() < 3) continue;
+
+            if (!zone.zoneCorners.get(0).getWorld().equals(loc.getWorld())) continue;
+
+            // проверка попадания в зону
+            if (isPlayerInZone(loc, zone.zoneCorners)) return true;
         }
         return false;
     }
 
     private boolean isPlayerInZone(Location loc, List<Location> zoneCorners) {
         if (zoneCorners == null || zoneCorners.size() < 3) return false;
+        if (!zoneCorners.get(0).getWorld().equals(loc.getWorld())) return false;
 
         double minY = 42;
         double maxY = 255;
@@ -474,15 +498,17 @@ public class ZoneManager {
         Map<Integer, ZoneInfo> zonesByIndex = new TreeMap<>(Collections.reverseOrder());
         boolean isInsideZone = false;
 
+        World playerWorld = player.getWorld();
         for (ZoneInfo zone : zoneList.values()) {
-            // Раскомментировать при необходимости:
-            // if (!zone.getOwner().equals(player.getName())) continue;
+            // пропускаем сломанные/пустые зоны
+            if (zone.getCorners() == null || zone.getCorners().size() < 3) continue;
+
+            if (!zone.getCorners().get(0).getWorld().equals(playerWorld)) continue;
 
             if (isPlayerInZone(playerLoc, zone.getCorners())) {
                 ZoneTypeData zoneTypeData = zoneLimits.get(zone.getType());
-                if (zoneTypeData == null) {
-                    continue;
-                }
+                if (zoneTypeData == null) continue;
+
                 isInsideZone = true;
                 zonesByIndex.put(zoneTypeData.getIndex(), zone);
             }
@@ -494,8 +520,11 @@ public class ZoneManager {
 
             ZoneTypeData zoneTypeData = zoneLimits.get(highestPriorityZone.zoneType);
             if (zoneTypeData != null) {
-                player.spigot().sendMessage(ChatMessageType.ACTION_BAR,
-                        new TextComponent(ChatColor.GREEN + "Зона: " + ChatColor.GOLD + zoneTypeData.getDisplayName() + " \"" + highestPriorityZone.zoneName + "\""));
+                player.spigot().sendMessage(
+                        ChatMessageType.ACTION_BAR,
+                        new TextComponent(ChatColor.GREEN + "Зона: " + ChatColor.GOLD +
+                                zoneTypeData.getDisplayName() + " \"" + highestPriorityZone.zoneName + "\"")
+                );
             }
         } else {
             if (playerZoneStatus.getOrDefault(playerId, false)) {
@@ -700,15 +729,12 @@ public class ZoneManager {
     }
 
     public void loadZonesFromConfig() {
-        zoneList.clear(); // очистить на случай перезапуска
+        zoneList.clear();
 
         for (String typeKey : zonesConfig.getKeys(false)) {
             ZoneType zoneType;
-            try {
-                zoneType = ZoneType.valueOf(typeKey.toUpperCase());
-            } catch (IllegalArgumentException e) {
-                continue; // пропустить неизвестные типы
-            }
+            try { zoneType = ZoneType.valueOf(typeKey.toUpperCase()); }
+            catch (IllegalArgumentException e) { continue; }
 
             ConfigurationSection ownersSection = zonesConfig.getConfigurationSection(typeKey);
             if (ownersSection == null) continue;
@@ -723,41 +749,44 @@ public class ZoneManager {
 
                     String name = zoneData.getString("name", "Без названия");
                     String markerID = zoneData.getString("marker_ID", "");
+                    String worldNameSaved = zoneData.getString("world", null);
 
                     List<Location> corners = new ArrayList<>();
                     List<Map<?, ?>> rawCorners = zoneData.getMapList("corners");
                     for (Map<?, ?> corner : rawCorners) {
                         String worldName = (String) corner.get("world");
-                        double x = (double) corner.get("x");
-                        double y = (double) corner.get("y");
-                        double z = (double) corner.get("z");
+                        if (worldNameSaved != null) worldName = worldNameSaved;
+
+                        World w = Bukkit.getWorld(worldName);
+                        if (w == null) continue;
+
+                        double x = ((Number) corner.get("x")).doubleValue();
+                        double y = ((Number) corner.get("y")).doubleValue();
+                        double z = ((Number) corner.get("z")).doubleValue();
                         float pitch = ((Number) corner.get("pitch")).floatValue();
                         float yaw = ((Number) corner.get("yaw")).floatValue();
-                        Location loc = new Location(Bukkit.getWorld(worldName), x, y, z, yaw, pitch);
-                        corners.add(loc);
+
+                        corners.add(new Location(w, x, y, z, yaw, pitch));
                     }
 
                     String key = typeKey + "_" + owner + "_" + zoneId;
                     ZoneInfo zoneInfo = new ZoneInfo(zoneType, zoneId, name, markerID, corners, owner);
-                    System.out.println(zoneInfo.zoneName + " есть!!!");
-
                     zoneList.put(key, zoneInfo);
                 }
             }
         }
-        System.out.println(zoneList.size() + " зон загнружено!!");
     }
 
     public void saveZonesToConfig() {
-        zonesConfig = new YamlConfiguration(); // Очистить перед сохранением
+        zonesConfig = new YamlConfiguration();
 
         for (ZoneInfo zone : zoneList.values()) {
-            System.out.println(zone.zoneName + " имеется!!");
             String typeKey = zone.zoneType.name().toLowerCase();
             String path = typeKey + "." + zone.zoneOwner + "." + zone.zoneID;
 
             zonesConfig.set(path + ".name", zone.zoneName);
             zonesConfig.set(path + ".marker_ID", zone.markerID);
+            zonesConfig.set(path + ".world", zone.getWorldName());
 
             List<Map<String, Object>> serializedCorners = new ArrayList<>();
             for (Location loc : zone.zoneCorners) {
@@ -772,7 +801,7 @@ public class ZoneManager {
             }
             zonesConfig.set(path + ".corners", serializedCorners);
         }
-        saveZonesConfig(); // сохраняем в файл
+        saveZonesConfig();
     }
 
     public void loadZoneData() {
@@ -780,7 +809,7 @@ public class ZoneManager {
         if (zoneFile.exists()) {
             YamlConfiguration zoneConfig = YamlConfiguration.loadConfiguration(zoneFile);
 
-            for (String typeKey : zoneConfig.getKeys(false)) { // "hospital", "shop" и т.д.
+            for (String typeKey : zoneConfig.getKeys(false)) {
                 ConfigurationSection typeSection = zoneConfig.getConfigurationSection(typeKey);
                 if (typeSection == null) continue;
 
@@ -794,18 +823,20 @@ public class ZoneManager {
 
                         String zoneName = zoneSection.getString("name");
                         String markerID = zoneSection.getString("marker_ID");
+                        String worldNameSaved = zoneSection.getString("world", null);
 
                         List<Location> corners = new ArrayList<>();
                         List<Map<?, ?>> rawCorners = zoneSection.getMapList("corners");
                         for (Map<?, ?> cornerMap : rawCorners) {
                             try {
                                 String worldName = (String) cornerMap.get("world");
-                                double x = (double) cornerMap.get("x");
-                                double y = (double) cornerMap.get("y");
-                                double z = (double) cornerMap.get("z");
-
+                                if (worldNameSaved != null) worldName = worldNameSaved; // ✅ форсим мир зоны
                                 World world = Bukkit.getWorld(worldName);
                                 if (world == null) continue;
+
+                                double x = ((Number) cornerMap.get("x")).doubleValue();
+                                double y = ((Number) cornerMap.get("y")).doubleValue();
+                                double z = ((Number) cornerMap.get("z")).doubleValue();
 
                                 Location cornerLoc = new Location(world, x, y, z);
                                 corners.add(cornerLoc);
@@ -813,17 +844,21 @@ public class ZoneManager {
                                 Bukkit.getLogger().warning("Ошибка при загрузке угла зоны: " + e.getMessage());
                             }
                         }
+                        String zoneWorld = (corners.isEmpty() || corners.get(0).getWorld() == null)
+                                ? null : corners.get(0).getWorld().getName();
+
                         List<Vector2d> corners2D = corners.stream()
                                 .map(cornerLoc -> new Vector2d(cornerLoc.getX(), cornerLoc.getZ()))
                                 .collect(Collectors.toList());
+
                         for (Location loc : signManager.genericSignList.keySet()) {
+                            if (zoneWorld != null && !loc.getWorld().getName().equals(zoneWorld)) continue; // ✅ игнор других миров
                             Vector2d point = new Vector2d(loc.getX(), loc.getZ());
                             if (isPointInsidePolygon(point, corners2D)) {
                                 signManager.genericSignList.get(loc).setOwnerName(playerName);
                             }
                         }
 
-                        // Пример: логгирование загрузки
                         Bukkit.getLogger().info("Загружена зона: " + typeKey + " / " + playerName + " → " + zoneID + " (" + zoneName + ")");
                     }
                 }

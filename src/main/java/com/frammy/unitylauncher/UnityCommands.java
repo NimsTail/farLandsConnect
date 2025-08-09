@@ -13,8 +13,6 @@ import org.bukkit.util.Consumer;
 import org.jetbrains.annotations.NotNull;
 import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
-import org.json.simple.parser.ParseException;
-
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -441,7 +439,6 @@ public class UnityCommands {
                 onError("getShops", e, (Player) sender);
             }
         }
-
     }
     public int getShops(@NotNull CommandSender sender) {
         Connection con = DBConnect();
@@ -704,7 +701,6 @@ public class UnityCommands {
         }
     }
 
-
     public void pay(@NotNull CommandSender sender, String receiver, double money, double customFee) {
         if (sender.getName().equals(receiver)) {
             sender.sendMessage(ChatColor.RED + "Отправлять деньги себе запрещено.");
@@ -778,10 +774,7 @@ public class UnityCommands {
                 String users = "";
                 if (rs.next()) {
                     users = rs.getString("Users");
-                    if (rs.getString("Users").isEmpty()) {
-                        //   sender.sendMessage(ChatColor.RED + "Ты не состоишь ни в одной стране! Будь осторожнее!");
-                        return;
-                    }
+                    if (rs.getString("Users").isEmpty()) return;
                 }
                 rs.close();
                 String query2 = "UPDATE Frames SET Users='" + users + nickname + ",' WHERE FrameID='" + FrameID + "';";
@@ -794,10 +787,7 @@ public class UnityCommands {
     }
 
     public static double calculateSurfaceArea(List<Location> points) {
-        if (points.size() < 3) {
-            // Если точек меньше трех, многоугольник не существует
-            return 0;
-        }
+        if (points.size() < 3) return 0;
 
         double area = 0;
         int n = points.size();
