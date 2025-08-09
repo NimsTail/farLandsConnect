@@ -58,12 +58,12 @@ public class ZoneManager {
     }
 
     private final Map<ZoneType, ZoneTypeData> zoneLimits = new HashMap<>() {{
-        put(ZoneType.SHOP, new ZoneTypeData("Торговая точка", 500.0, 2, 3.0, false));
-        put(ZoneType.BANK, new ZoneTypeData("Банк", 300.0,2, 20.0, false));
-        put(ZoneType.HOSPITAL, new ZoneTypeData("Госпиталь", 700.0, 2, 15.0, false));
-        put(ZoneType.INDUSTRIAL, new ZoneTypeData("Промышленная зона", 1000.0, 2, 30.0, false));
-        put(ZoneType.REGION, new ZoneTypeData("Регион", 10000.0, 1, 300.0, true));
-        put(ZoneType.COUNTRY, new ZoneTypeData("Государство", 30000.0, 0, 100.0, true));
+        put(ZoneType.SHOP, new ZoneTypeData("Торговая точка", 500.0, 2, 3.0, false, 1));
+        put(ZoneType.BANK, new ZoneTypeData("Банк", 300.0,2, 20.0, false, 1));
+        put(ZoneType.HOSPITAL, new ZoneTypeData("Госпиталь", 700.0, 2, 15.0, false, 1));
+        put(ZoneType.INDUSTRIAL, new ZoneTypeData("Промышленная зона", 1000.0, 2, 30.0, false, 1));
+        put(ZoneType.REGION, new ZoneTypeData("Регион", 10000.0, 1, 300.0, true, 0.85));
+        put(ZoneType.COUNTRY, new ZoneTypeData("Государство", 30000.0, 0, 100.0, true, 0.7));
     }};
 
 
@@ -165,7 +165,7 @@ public class ZoneManager {
         double newArea = calculateSurfaceArea(tempPoints);
 
         if (newArea < zoneData.getMinSize() && tempPoints.size() >= 3) {
-            player.sendMessage(ChatColor.GRAY + "Зона слишком маленькая: " + ChatColor.RED + newArea + ChatColor.GRAY + " < " + ChatColor.YELLOW + "1");
+            player.sendMessage(ChatColor.GRAY + "Зона слишком маленькая: " + ChatColor.RED + newArea + ChatColor.GRAY + " < " + ChatColor.YELLOW + zoneData.getMinSize());
             return;
         }
         if (newArea > maxArea) {
@@ -569,7 +569,12 @@ public class ZoneManager {
 
 
     public double calculateZoneDailyCost(ZoneInfo zone, Map<String, ChunkStats> statsMap, ActivityWeights weights) {
-        Map<Chunk, Double> chunkFractions = getChunkFractions(zone.zoneCorners);
+        Bukkit.getLogger().info("=== [ZoneCost Debug] ===");
+        Bukkit.getLogger().info("Зона: " + zone.getName() + " (" + zone.getID() + ")");
+        Bukkit.getLogger().info("Количество углов: " + zone.getCorners().size());
+
+        Map<Chunk, Double> chunkFractions = getChunkFractions(zone.getCorners());
+        Bukkit.getLogger().info("Найдено чанков в зоне: " + chunkFractions.size());
 
         double totalWeightedValue = 0;
         double totalWeight = 0;
@@ -580,15 +585,30 @@ public class ZoneManager {
 
             String key = chunk.getWorld().getName() + ":" + chunk.getX() + "," + chunk.getZ();
             ChunkStats stats = statsMap.get(key);
-            if (stats == null || stats.dailySamples.isEmpty()) continue;
 
-            double dailyAvg = stats.dailySamples.stream().mapToDouble(d -> d).average().orElse(0);
+            if (stats == null) {
+                Bukkit.getLogger().info("Чанк " + key + " → нет данных в statsMap");
+                continue;
+            }
+
+            double dailyAvg = stats.getDailyAverage(weights); // <-- ВАЖНО: используем новый метод
+
+            Bukkit.getLogger().info("Чанк " + key + " → fraction=" + fraction +
+                    ", dailyAvg=" + dailyAvg +
+                    ", contrib=" + (dailyAvg * fraction));
 
             totalWeightedValue += dailyAvg * fraction;
             totalWeight += fraction;
         }
 
-        return totalWeight > 0 ? totalWeightedValue / totalWeight : 0;
+        double result = totalWeight > 0 ? totalWeightedValue / totalWeight : 0;
+        double typeMultiplier = zoneLimits.get(zone.getType()).getPriceMultiplier();
+        Bukkit.getLogger().info("Сумма значений: " + totalWeightedValue);
+        Bukkit.getLogger().info("Сумма весов: " + totalWeight);
+        Bukkit.getLogger().info("Результат: " + result);
+        Bukkit.getLogger().info("=========================");
+
+        return result * typeMultiplier;
     }
 
     private void addBlueMapMarker(ZoneType zoneType, String markerID, List<Location> locations, String zoneName) {

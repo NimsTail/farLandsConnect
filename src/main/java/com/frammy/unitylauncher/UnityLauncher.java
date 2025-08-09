@@ -1,5 +1,6 @@
 package com.frammy.unitylauncher;
 import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
+import com.frammy.unitylauncher.chunkactivity.ChunkActivityHeatmapExporter;
 import com.frammy.unitylauncher.signs.SignCategory;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.signs.SignVariables;
@@ -39,6 +40,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     public MoneyManager moneyManager;
     private ZoneManager zoneManager;
     private SignManager signManager;
+    private ActivityTracker tracker;
     private WebSocketManager webSocketManager;
     private BlueMapIntegration blueMapIntegration;
     public Set<Player> getAwaitingCorrectCommand() {return awaitingCorrectCommand;}
@@ -49,7 +51,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         moneyManager = new MoneyManager(getDataFolder(), "unity_launcher");
         getServer().getPluginManager().registerEvents(moneyManager, this);
         webSocketManager = new WebSocketManager(getLogger());
-        ActivityTracker tracker = new ActivityTracker(this);
+        tracker = new ActivityTracker(this);
         this.blueMapIntegration = new BlueMapIntegration(this, getLogger(), getDataFolder());
         this.zoneManager = new ZoneManager(this, null, blueMapIntegration, tracker); // пока передаём null, позже установим SignManager
         this.signManager = new SignManager(this, getDataFolder(), zoneManager, blueMapIntegration, UnityCommands.getInstance());
@@ -105,6 +107,14 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             getLogger().warning("BlueMap не включён. Таблички и зоны не будут инициализированы!");
         }
         instance = this;
+
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            ChunkActivityHeatmapExporter.exportHeatmapToBlueMapLayer(
+                    tracker.getChunkStatsMap(),
+                    "world",
+                    tracker.getWeights()
+            );
+        }, 40L);
     }
     public ZoneManager getZoneManager() {
         return zoneManager;
@@ -114,6 +124,10 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     public void onDisable() {
         signManager.saveSignData();
         zoneManager.saveZonesToConfig();
+        if (tracker != null) {
+            tracker.forceSampleNow();   // зафиксируем текущий час
+            tracker.saveAllToDisk();    // сохраним на диск
+        }
         if (webSocketManager != null) {
             webSocketManager.disconnectAll();
         }

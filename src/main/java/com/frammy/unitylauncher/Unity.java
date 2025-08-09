@@ -84,9 +84,6 @@ public class Unity implements CommandExecutor {
                 switch (args[0].toLowerCase()) {
                     case "expo":
                         ActivityWeights weights = new ActivityWeights();
-                        weights.timeWeight = 0.025;
-                        weights.blockPlacedWeight = 0.003;
-                        weights.blockBrokenWeight = 0.0018;
                         //tracker.applyCoolingToAll();
                         ChunkActivityHeatmapExporter.exportHeatmapToBlueMapLayer(
                                 tracker.getChunkStatsMap(),

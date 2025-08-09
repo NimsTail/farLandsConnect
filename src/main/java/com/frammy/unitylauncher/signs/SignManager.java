@@ -14,6 +14,7 @@ import de.bluecolored.bluemap.api.math.Shape;
 import org.apache.commons.lang.WordUtils;
 import org.bukkit.*;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockFace;
 import org.bukkit.block.Container;
 import org.bukkit.block.Sign;
 import org.bukkit.configuration.ConfigurationSection;
@@ -1393,15 +1394,18 @@ public class SignManager implements Listener {
     private boolean isAttachedToBlock(Block signBlock, Block possibleSupportingBlock) {
         if (!(signBlock.getState() instanceof Sign)) return false;
 
-        // Для обычных табличек проверяем прикрепленный блок с помощью метода getAttachedFace
-        try {
-            org.bukkit.material.Sign signMaterial = (org.bukkit.material.Sign) signBlock.getState().getData();
-            Block attachedBlock = signBlock.getRelative(signMaterial.getAttachedFace());
+        Sign signState = (Sign) signBlock.getState();
+
+        // Получаем блок, с которым табличка соединена
+        Block attachedBlock = signBlock.getRelative(signState.getBlock().getFace(possibleSupportingBlock));
+
+        // Проверяем, что блок существует (не равен null) и совпадает с ожидаемым блоком
+        if (attachedBlock != null && attachedBlock.getType() != Material.AIR) {
             return attachedBlock.equals(possibleSupportingBlock);
-        } catch (ClassCastException e) {
-            // Если это не обычная табличка, например Hanging Sign или другой тип, не обрабатываем
-            return false;
         }
+
+        // Если attachedBlock == null или пустой (например, пустое место)
+        return false;
     }
 
     public ExtrudeMarker isSignWithinMarker(Location signLocation, String setName) {

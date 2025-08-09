@@ -17,35 +17,52 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 public class ActivityTracker implements Listener {
-
     private final Map<String, ChunkStats> chunkStatsMap = new ConcurrentHashMap<>();
     private final Map<UUID, PlayerChunkSession> playerChunks = new HashMap<>();
-    private final ActivityWeights weights = new ActivityWeights();
-
     private final UnityLauncher plugin;
+    private final ActivityWeights weights = new ActivityWeights(); // + геттер, если надо
+    public ActivityWeights getWeights() { return weights; }
 
-    public ActivityWeights getWeights() {
-        return weights;
-    }
+
     public ActivityTracker(UnityLauncher plugin) {
         this.plugin = plugin;
         Bukkit.getPluginManager().registerEvents(this, plugin);
+
+        // Загрузка сохранённой статистики
+        Map<String, ChunkStats> loaded = ChunkActivityStorage.loadFromFile(plugin.getDataFolder());
+        if (!loaded.isEmpty()) {
+            chunkStatsMap.putAll(loaded);
+            Bukkit.getLogger().info("[Heatmap] Loaded " + loaded.size() + " chunks from disk");
+        } else {
+            Bukkit.getLogger().info("[Heatmap] No previous chunk stats found");
+        }
+
         startAutoSave();
-        startDailySampleRecording();
+        startHourlySampling();
     }
+
+    private void startHourlySampling() {
+        long hour = 20L * 60 * 60; // 1 час в тиках
+        Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, () -> {
+            for (ChunkStats stats : chunkStatsMap.values()) {
+                stats.recordHourlySample(weights);
+            }
+            Bukkit.getLogger().info("[Heatmap] Hourly samples recorded");
+        }, hour, hour);
+    }
+
+    // Для быстрой проверки в онлайне: можешь вызвать из команды
+    public void forceSampleNow() {
+        for (ChunkStats stats : chunkStatsMap.values()) {
+            stats.recordHourlySample(weights);
+        }
+        Bukkit.getLogger().info("[Heatmap] Forced hourly sample recorded");
+    }
+
 
     private void startAutoSave() {
         Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, this::saveAllToDisk, 20 * 60 * 5L, 20 * 60 * 5L); // каждые 5 минут
         Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, this::applyCoolingToAll, 20 * 60 * 10L, 20 * 60 * 10L); // каждые 10 мин
-    }
-    private void startDailySampleRecording() {
-        long oneDay = 20L * 60 * 60 * 24;
-        Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, () -> {
-            for (ChunkStats stats : chunkStatsMap.values()) {
-                stats.recordDailySample(getWeights());
-            }
-            Bukkit.getLogger().info("[Heatmap] Сохранён ежедневный срез активности.");
-        }, oneDay, oneDay);
     }
 
     public void applyCoolingToAll() {

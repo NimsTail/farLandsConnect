@@ -9,22 +9,9 @@ public class ChunkStats {
     public int blocksBroken = 0;
 
     public long lastUpdated = System.currentTimeMillis();
-    public final Deque<Double> dailySamples = new ArrayDeque<>();
 
-    public void recordDailySample(ActivityWeights weights) {
-        double dailyValue = weights.calculateValue(this);
-        dailySamples.addLast(dailyValue);
-
-        // Храним только 7 последних дней
-        if (dailySamples.size() > 7) {
-            dailySamples.removeFirst();
-        }
-
-        // Сбросим счётчики на новый день
-        timeSpent = 0;
-        blocksPlaced = 0;
-        blocksBroken = 0;
-    }
+    // Храним последние 24 часовых среза
+    public final Deque<Double> hourlySamples = new ArrayDeque<>(24);
 
     public void addTime(long millis) {
         timeSpent += millis;
@@ -41,20 +28,41 @@ public class ChunkStats {
         lastUpdated = System.currentTimeMillis();
     }
 
+    // cooling (сигмоида как у тебя)
     public void applyCooling(long now) {
         long delta = now - lastUpdated;
         double hours = delta / 3600000.0;
-
         double decay = getSigmoidDecay(hours);
-
         timeSpent *= decay;
         blocksPlaced *= decay;
         blocksBroken *= decay;
+        // lastUpdated не трогаем
     }
 
     private double getSigmoidDecay(double hoursSinceLastActivity) {
         double k = 1.2;
         double t0 = 5.0;
         return 1.0 / (1.0 + Math.exp(k * (hoursSinceLastActivity - t0)));
+    }
+
+    // Запись часового среза и обнуление текущих счётчиков
+    public void recordHourlySample(ActivityWeights weights) {
+        double snapshot = weights.calculateValue(this);
+        hourlySamples.addLast(snapshot);
+        while (hourlySamples.size() > 24) hourlySamples.removeFirst();
+
+        // начинаем новый час с нуля
+        timeSpent = 0;
+        blocksPlaced = 0;
+        blocksBroken = 0;
+    }
+
+    // Среднее за "сутки" (по имеющимся часам), с фолбэком
+    public double getDailyAverage(ActivityWeights weights) {
+        if (hourlySamples.isEmpty()) {
+            // ещё нет срезов — берём текущее “мгновенное” значение
+            return weights.calculateValue(this);
+        }
+        return hourlySamples.stream().mapToDouble(d -> d).average().orElse(0.0);
     }
 }
