@@ -376,12 +376,15 @@ public class SignManager implements Listener {
                 if (items == null || items.isEmpty() || dataList == null || dataList.isEmpty()) return;
 
                 int index = playerScrollIndex.getOrDefault(p.getUniqueId(), 0);
-                p.sendMessage(index+1 + " " + items.get(index+1));
 
-                if (index + 1 >= items.size() || index + 1 >= dataList.size()) return;
+                int n = Math.min(items.size(), dataList.size());
 
-                String selectedItemName = ChatColor.stripColor(items.get(index + 1));
-                ItemData selectedItem = dataList.get(index + 1);
+                int selected = (index + 1) % n;
+                if (selected >= n) selected = n - 1;
+                if (selected < 0) selected = 0;
+
+                String selectedItemName = ChatColor.stripColor(items.get(selected));
+                ItemData selectedItem   = dataList.get(selected);
 
                 p.sendMessage(ChatColor.YELLOW + "=======" + ChatColor.GOLD + " [Магазин] " + ChatColor.YELLOW + "=======\n" +
                         "\n" + ChatColor.GREEN + "Предмет: " + ChatColor.RESET + selectedItemName +
