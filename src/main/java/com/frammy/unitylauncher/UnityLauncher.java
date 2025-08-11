@@ -59,7 +59,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
         getServer().getPluginManager().registerEvents(signManager, this);
         HelpCommandManager helpManager = new HelpCommandManager();
-        Objects.requireNonNull(getCommand("unityLauncher")).setExecutor(new Unity(helpManager, webSocketManager, tracker));
+        Objects.requireNonNull(getCommand("unityLauncher")).setExecutor(new Unity(helpManager, webSocketManager, tracker, zoneManager));
         this.getCommand("unityLauncher").setTabCompleter(new CommandCompleter());
 
 
@@ -287,4 +287,5 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                 break;
         }
     }
+
 }

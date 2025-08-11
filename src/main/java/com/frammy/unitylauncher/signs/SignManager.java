@@ -697,13 +697,17 @@ public class SignManager implements Listener {
                 }
             }
         } else {
-            // Проверка соседних блоков на наличие табличек (включая hanging signs), которые зависят от этого блока
+            // Проверка на наличие прикрепленной таблички у разрушенного блока
+            boolean hasAttachedSign = false;
+
+            // Проверяем соседние блоки на наличие табличек (включая hanging signs), которые могут зависеть от этого блока
             for (Map.Entry<Location, SignVariables> entry : genericSignList.entrySet()) {
                 Location signLocation = entry.getKey();
                 Block signBlock = signLocation.getBlock();
 
-                // Проверяем, прикреплена ли табличка (обычная или hanging) к разрушенному блоку
+                // Если табличка прикреплена к разрушенному блоку
                 if (isAttachedToBlock(signBlock, brokenBlock)) {
+                    hasAttachedSign = true;
                     // Проверяем, совпадает ли ник игрока с ником, который установил табличку
                     if (!entry.getValue().getOwnerName().equals(player.getName())) {
                         player.sendMessage(ChatColor.RED + "Вы не можете сломать эту табличку, так как её установил другой игрок.");
@@ -722,6 +726,9 @@ public class SignManager implements Listener {
                     playerScrollIndex.remove(Bukkit.getOfflinePlayer(genericSignList.get(signLocation).getOwnerName()).getUniqueId());
                     break;
                 }
+            }
+            if (!hasAttachedSign) {
+                return;
             }
             if (brokenBlock.getState() instanceof Container) {
                 for (Location loc : genericSignList.keySet()) {
@@ -1395,20 +1402,31 @@ public class SignManager implements Listener {
     }
 
     private boolean isAttachedToBlock(Block signBlock, Block possibleSupportingBlock) {
-        if (!(signBlock.getState() instanceof Sign)) return false;
+        // Проверка, что блок является табличкой
+        if (!(signBlock.getState() instanceof Sign)) {
+            return false;
+        }
 
         Sign signState = (Sign) signBlock.getState();
 
-        // Получаем блок, с которым табличка соединена
-        Block attachedBlock = signBlock.getRelative(signState.getBlock().getFace(possibleSupportingBlock));
+        // Получаем направление, к которому прикреплена табличка
+        BlockFace face = signState.getBlock().getFace(possibleSupportingBlock);
 
-        // Проверяем, что блок существует (не равен null) и совпадает с ожидаемым блоком
-        if (attachedBlock != null && attachedBlock.getType() != Material.AIR) {
-            return attachedBlock.equals(possibleSupportingBlock);
+        // Проверяем, что face не равно null, иначе не выполняем дальнейшую логику
+        if (face == null) {
+            return false;
         }
 
-        // Если attachedBlock == null или пустой (например, пустое место)
-        return false;
+        // Получаем блок, с которым табличка соединена
+        Block attachedBlock = signBlock.getRelative(face);
+
+        // Проверка, что прикреплённый блок существует и не является пустым
+        if (attachedBlock == null || attachedBlock.getType() == Material.AIR) {
+            return false;
+        }
+
+        // Проверяем, что блок совпадает с предполагаемым
+        return attachedBlock.equals(possibleSupportingBlock);
     }
 
     public ExtrudeMarker isSignWithinMarker(Location signLocation, String setName) {

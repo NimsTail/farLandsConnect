@@ -1,4 +1,5 @@
 package com.frammy.unitylauncher.zones;
+import com.frammy.unitylauncher.MoneyManager;
 import com.frammy.unitylauncher.UnityLauncher;
 import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
 import com.frammy.unitylauncher.chunkactivity.ActivityWeights;
@@ -22,6 +23,8 @@ import org.bukkit.block.Block;
 
 import java.io.File;
 import java.io.IOException;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.*;
 import java.util.stream.Collectors;
 import com.flowpowered.math.vector.Vector2d;
@@ -38,9 +41,11 @@ public class ZoneManager {
     private SignManager signManager;
     private BlueMapIntegration blueMapIntegration;
     private ActivityTracker activityTracker;
+    //private MoneyManager moneyManager;
     private final File zonesFile;
     private YamlConfiguration zonesConfig;
     private final Map<UUID, List<Location>> zonePoints = new HashMap<>();
+    private final ZoneId zoneId = ZoneId.systemDefault();
 
     public HashMap<String, ZoneInfo> zoneList = new HashMap<>();
 
@@ -52,6 +57,8 @@ public class ZoneManager {
 
         this.zonesFile = new File(plugin.getDataFolder(), "zones.yml"); // <-- создаём файл в папке плагина
         this.zonesConfig = YamlConfiguration.loadConfiguration(zonesFile); // загружаем конфиг
+        startZoneBillingScheduler();
+
     }
     public void setSignManager(SignManager signManager) {
         this.signManager = signManager;
@@ -66,7 +73,64 @@ public class ZoneManager {
         put(ZoneType.COUNTRY, new ZoneTypeData("Государство", 30000.0, 0, 100.0, true, 0.7));
     }};
 
+    private void startZoneBillingScheduler() {
+        long delay = ticksUntilNextTime(0, 5, 0);      // старт в 00:05
+        long period = 20L * 60 * 60 * 24;              // 24 часа
 
+        Bukkit.getScheduler().runTaskTimerAsynchronously(
+                unityLauncher,
+                this::snapshotAndMaybeBillAllZones,
+                delay,
+                period
+        );
+    }
+    private long ticksUntilNextTime(int hour, int minute, int second) {
+        long nowMs = System.currentTimeMillis();
+        java.time.ZonedDateTime now = java.time.ZonedDateTime.ofInstant(
+                java.time.Instant.ofEpochMilli(nowMs), zoneId);
+        java.time.ZonedDateTime next = now.withHour(hour).withMinute(minute).withSecond(second).withNano(0);
+        if (!next.isAfter(now)) next = next.plusDays(1);
+        long diffMs = java.time.Duration.between(now, next).toMillis();
+        return Math.max(1L, diffMs / 50L); // 20 тиков = 1 секунда
+    }
+
+    public void snapshotAndMaybeBillAllZones() {
+        LocalDate today = LocalDate.now(zoneId);
+
+        // 1) посчитать дневную цену каждой зоны и записать в её историю (последние 7)
+        for (ZoneInfo zone : zoneList.values()) {
+            double dailyCost = calculateZoneDailyCost(
+                    zone,
+                    activityTracker.getChunkStatsMap(),
+                    activityTracker.getWeights()
+            );
+
+            // применяем множитель типа (если ты этого ещё не сделал внутри calculateZoneDailyCost)
+            ZoneTypeData typeData = zoneLimits.get(zone.getType());
+            double typeMultiplier = (typeData != null) ? typeData.getPriceMultiplier() : 1.0;
+            double finalDailyCost = dailyCost * typeMultiplier;
+
+            zone.addDailyCost(finalDailyCost, today);
+        }
+
+        // 2) еженедельный биллинг (в день смены недели)
+        for (ZoneInfo zone : zoneList.values()) {
+            if (!zone.shouldBillWeekly(today)) continue;
+
+            double weeklyTotal = zone.getRolling7DayTotal(); // сумма 7 дней
+            // здесь списываем деньги
+            try {
+                // пример: moneyManager.withdraw(zone.getOwner(), weeklyTotal);
+             //   moneyManager.withdraw(zone.getOwner(), weeklyTotal);
+                zone.markBilled(today);
+                Bukkit.getLogger().info("[Zones] Billed " + zone.getName() + " owner=" + zone.getOwner()
+                        + " weeklyTotal=" + String.format(Locale.US, "%.2f", weeklyTotal));
+            } catch (Exception ex) {
+                Bukkit.getLogger().warning("[Zones] Billing failed for " + zone.getName()
+                        + " owner=" + zone.getOwner() + " : " + ex.getMessage());
+            }
+        }
+    }
     // Карта для хранения последней посещённой зоны игрока
     private final Map<UUID, ZoneInfo> playerLastZone = new HashMap<>();
 
@@ -109,21 +173,20 @@ public class ZoneManager {
             case "price":
                 ZoneInfo zoneInfo = playerLastZone.get(player.getUniqueId());
                 if (zoneInfo != null) {
-                    for (ZoneInfo zone : zoneList.values()) {
-                        if (zone.getOwner().equals(player.getName())) {
-                            double cost = zoneInfo.getCachedCost(() -> {
-                                return calculateZoneDailyCost(
-                                        zoneInfo,
-                                        activityTracker.getChunkStatsMap(),
-                                        activityTracker.getWeights()
-                                );
-                            });
-
-                            player.sendMessage("Цена: " + cost);
-
-                        }
-
+                    if (zoneInfo.getOwner().equals(player.getName())) {
+                        double cost = zoneInfo.getCachedCost(() -> {
+                            return calculateZoneDailyCost(
+                                    zoneInfo,
+                                    activityTracker.getChunkStatsMap(),
+                                    activityTracker.getWeights()
+                            );
+                        });
+                        player.sendMessage(ChatColor.GREEN + "Текущая дневная стоимость: " + cost + "Ⓕ");
+                    } else {
+                        player.sendMessage(ChatColor.RED + "Ты не владеешь этой зоной.");
                     }
+                } else {
+                    player.sendMessage(ChatColor.GRAY + "Зона не найдена.");
                 }
                 break;
             case "remove":
@@ -161,7 +224,7 @@ public class ZoneManager {
         }
         World.Environment env = player.getWorld().getEnvironment();
         if (zoneType == ZoneType.COUNTRY && env != World.Environment.NORMAL) {
-            player.sendMessage(ChatColor.RED + "Государство можно создавать только в обычном мире (Overworld).");
+            player.sendMessage(ChatColor.RED + "Государство можно создавать только в верхнем мире (Overworld).");
             return;
         }
 
@@ -187,7 +250,7 @@ public class ZoneManager {
                 .map(loc -> new Vector2d(loc.getX(), loc.getZ())) // Используем только X и Z
                 .collect(Collectors.toList());
         if (hasSelfIntersections(tempPoints2D)) {
-            player.sendMessage(ChatColor.RED + "Точки пересекаются - фигура имеет неверную форму.");
+            player.sendMessage(ChatColor.RED + "Точки пересекаются - фигура имеет неправильную форму.");
             return;
         }
         // Если проверка пройдена — добавляем точку в основной список
@@ -205,7 +268,7 @@ public class ZoneManager {
         }
 
         points.remove(points.size() - 1);
-        player.sendMessage(ChatColor.GRAY + "Удалена последняя точка.");
+        player.sendMessage(ChatColor.GRAY + "Удалена последняя точка. Текущее количество точек: " + (points.size() - 2));
     }
 
     private void buildZone(Player player, ZoneType zoneType, String zoneName) {
@@ -232,7 +295,7 @@ public class ZoneManager {
         }
 
         if (zoneType == ZoneType.COUNTRY && world0.getEnvironment() != World.Environment.NORMAL) {
-            player.sendMessage(ChatColor.RED + "Государство можно создавать только в обычном мире (Overworld).");
+            player.sendMessage(ChatColor.RED + "Государство можно создавать только в верхнем мире (Overworld).");
             return;
         }
 
@@ -465,7 +528,7 @@ public class ZoneManager {
         if (zoneCorners == null || zoneCorners.size() < 3) return false;
         if (!zoneCorners.get(0).getWorld().equals(loc.getWorld())) return false;
 
-        double minY = 42;
+        double minY = -64;
         double maxY = 255;
 
         if (loc.getY() < minY || loc.getY() > maxY) {
@@ -634,7 +697,9 @@ public class ZoneManager {
         double typeMultiplier = zoneLimits.get(zone.getType()).getPriceMultiplier();
         Bukkit.getLogger().info("Сумма значений: " + totalWeightedValue);
         Bukkit.getLogger().info("Сумма весов: " + totalWeight);
-        Bukkit.getLogger().info("Результат: " + result);
+        Bukkit.getLogger().info("Множитель зоны: " + typeMultiplier);
+        Bukkit.getLogger().info("Саб-Результат: " + result);
+        Bukkit.getLogger().info("Результат: " + result * typeMultiplier);
         Bukkit.getLogger().info("=========================");
 
         return result * typeMultiplier;
@@ -654,7 +719,7 @@ public class ZoneManager {
 
                 ExtrudeMarker.Builder markerBuilder = ExtrudeMarker.builder()
                         .label(zoneName) // Заголовок маркера
-                        .shape(new Shape(basePoints), 42, 255) // Контур зоны
+                        .shape(new Shape(basePoints), -64, 255) // Контур зоны
                         .detail("<b>" + zoneLimits.get(zoneType).getDisplayName() + " \"" + zoneName + "\"</b><br><br><i> Владелец:</i> " + zoneList.get(markerID).getOwner() + "<br><i>Площадь:</i> " + calculateSurfaceArea(locations)); // 📌 Добавляем описание
                 markerSet.getMarkers().put(markerID, markerBuilder.build());
                 blueMapIntegration.saveBlueMapMarkers(markerSetID);

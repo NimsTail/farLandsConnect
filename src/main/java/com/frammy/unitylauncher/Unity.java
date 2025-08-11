@@ -5,6 +5,8 @@ import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
 import com.frammy.unitylauncher.chunkactivity.ActivityWeights;
 import com.frammy.unitylauncher.chunkactivity.ChunkActivityHeatmapExporter;
 import com.frammy.unitylauncher.signs.SignManager;
+import com.frammy.unitylauncher.zones.ZoneInfo;
+import com.frammy.unitylauncher.zones.ZoneManager;
 import com.mysql.cj.util.StringUtils;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
@@ -42,11 +44,13 @@ public class Unity implements CommandExecutor {
     private SignManager signManager;
     private final WebSocketManager webSocketManager;
     private final ActivityTracker tracker;
+    private ZoneManager zoneManager;
     // Конструктор принимает HelpCommandManager
-    public Unity(HelpCommandManager helpManager, WebSocketManager webSocketManager, ActivityTracker tracker) {
+    public Unity(HelpCommandManager helpManager, WebSocketManager webSocketManager, ActivityTracker tracker, ZoneManager zoneManager) {
         this.helpManager = helpManager;
         this.webSocketManager = webSocketManager;
         this.tracker = tracker;
+        this.zoneManager = zoneManager;
     }
 
     @Override
@@ -91,6 +95,9 @@ public class Unity implements CommandExecutor {
                                 weights
                         );
 
+                        return false;
+                    case "fsnap":
+                        zoneManager.snapshotAndMaybeBillAllZones();
                         return false;
                     case "rcode":
                         UnityCommands.getInstance().rCode(sender);

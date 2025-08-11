@@ -1,6 +1,11 @@
 package com.frammy.unitylauncher.zones;
 
 import org.bukkit.Location;
+
+import java.time.LocalDate;
+import java.time.temporal.WeekFields;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.List;
 import java.util.function.Supplier;
 
@@ -15,6 +20,13 @@ public class ZoneInfo {
     private double cachedDailyCost = 0;
     private long lastCostUpdate = 0;
     private static final long COST_CACHE_DURATION_MS = 5 * 60 * 1000; // 5 минут
+    // --- NEW: история последних 7 дневных цен ---
+    private final Deque<Double> last7DailyCosts = new ArrayDeque<>(7);
+    private LocalDate lastDailySnapshotDate = null;
+
+    // --- NEW: когда последний раз списали (ISO неделя) ---
+    private Integer lastBilledWeek = null;           // номер недели
+    private Integer lastBilledWeekYear = null;       // год «week-based year»
 
     public ZoneInfo(ZoneType zoneType, String zoneID, String zoneName,
                     String markerID, List<Location> zoneCorners, String zoneOwner) {
@@ -53,4 +65,46 @@ public class ZoneInfo {
         }
         return cachedDailyCost;
     }
+    public void addDailyCost(double cost, LocalDate date) {
+        // защита от повторного снапшота за тот же день
+        if (lastDailySnapshotDate != null && lastDailySnapshotDate.equals(date)) return;
+
+        lastDailySnapshotDate = date;
+
+        last7DailyCosts.addLast(cost);
+        while (last7DailyCosts.size() > 7) last7DailyCosts.removeFirst();
+    }
+
+    public double getRolling7DayTotal() {
+        return last7DailyCosts.stream().mapToDouble(d -> d).sum();
+    }
+
+    public double getRolling7DayAverage() {
+        return last7DailyCosts.isEmpty() ? 0.0 : getRolling7DayTotal() / last7DailyCosts.size();
+    }
+
+    public boolean shouldBillWeekly(LocalDate today) {
+        // ISO-неделя
+        WeekFields wf = WeekFields.ISO;
+        int week = today.get(wf.weekOfWeekBasedYear());
+        int yweek = today.get(wf.weekBasedYear());
+
+        // Биллим, если:
+        // 1) набралось >= 7 дневных точек (иначе нечего списывать корректно)
+        // 2) неделя сменилась относительно последнего биллинга
+        if (last7DailyCosts.size() < 7) return false;
+
+        if (lastBilledWeek == null || lastBilledWeekYear == null) return true; // ещё ни разу не билили
+        // биллим в момент смены недели: текущая неделя != последней биллинговой
+        return !(lastBilledWeek == week && lastBilledWeekYear == yweek);
+    }
+
+    public void markBilled(LocalDate today) {
+        WeekFields wf = WeekFields.ISO;
+        lastBilledWeek = today.get(wf.weekOfWeekBasedYear());
+        lastBilledWeekYear = today.get(wf.weekBasedYear());
+    }
+
+    // геттеры/сеттеры (твои) остаются как есть
+
 }
