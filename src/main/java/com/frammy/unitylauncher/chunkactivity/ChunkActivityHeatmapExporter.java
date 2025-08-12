@@ -21,7 +21,7 @@ public class ChunkActivityHeatmapExporter {
 
     // сколько доверяем “моментальной” активности (остальное — суточное среднее)
     private static final double SNAP_ALPHA = 0.30;     // 0..1
-    private static final double PERCENTILE = 93.0;     // для cutoff
+    private static final double PERCENTILE = 95.0;     // для cutoff
     private static final int CHUNK_RADIUS = 250;       // область покрытия вокруг 0,0 (в чанках)
 
     private static Map<String, Double> smoothActivityMap(Map<String, Double> original) {
@@ -230,20 +230,40 @@ public class ChunkActivityHeatmapExporter {
         }));
     }
 
+    private static final float[][] GRADIENT_STOPS = {
+            {154f, 156f, 154f}, // серый
+            {110f, 180f, 110f}, // мягко-зелёный
+            {0f,   255f, 0f  }, // зелёный
+            {190f, 255f, 0f  }, // жёлто-зелёный
+            {255f, 255f, 0f  }, // жёлтый
+            {255f, 210f, 0f  }, // янтарный
+            {255f, 165f, 0f  }, // оранжевый
+            {255f, 100f, 0f  }, // оранжево-красный
+            {255f, 0f,   0f  }, // красный
+            {200f, 0f,   0f  }, // тёмно-красный
+            {128f, 0f,   0f  }  // бордовый
+    };
+
+    private static float clamp01(float v) { return Math.max(0f, Math.min(1f, v)); }
+    private static float smoothstep(float t) { return t * t * (3f - 2f * t); } // более мягкий переход
+    private static int lerp255(float a, float b, float t) { return Math.round(a + (b - a) * t); }
+
     private static Color getColorFromValue(double normalized) {
-        normalized = Math.max(0, Math.min(1, normalized));
-        int r, g;
+        float n = clamp01((float) normalized);
 
-        if (normalized < 0.5) {
-            float t = (float) (normalized / 0.5);
-            r = Math.round(t * 255);
-            g = 255;
-        } else {
-            float t = (float) ((normalized - 0.5) / 0.5);
-            r = 255;
-            g = Math.round((1f - t * 0.5f) * 255);
-        }
+        int segments = GRADIENT_STOPS.length - 1;
+        float scaled = n * segments;                         // [0..segments]
+        int i = Math.min((int) Math.floor(scaled), segments - 1);
+        float t = scaled - i;
+        float te = smoothstep(t);                            // сгладим переход внутри сегмента
 
-        return new Color(r, g, 0, 0.40f); // полупрозрачный
+        int r = lerp255(GRADIENT_STOPS[i][0], GRADIENT_STOPS[i + 1][0], te);
+        int g = lerp255(GRADIENT_STOPS[i][1], GRADIENT_STOPS[i + 1][1], te);
+        int b = lerp255(GRADIENT_STOPS[i][2], GRADIENT_STOPS[i + 1][2], te);
+
+        float a = clamp01(0.4f + 0.1f * n);                 // 0.4 .. 0.6
+
+        // ВАЖНО: конструктор BlueMap Color — (int r, int g, int b, float a)
+        return new Color(r, g, b, a);
     }
 }

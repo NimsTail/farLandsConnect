@@ -4,6 +4,7 @@ import com.frammy.unitylauncher.chunkactivity.ChunkActivityHeatmapExporter;
 import com.frammy.unitylauncher.signs.SignCategory;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.signs.SignVariables;
+import com.frammy.unitylauncher.zones.ZoneActivityCalculations;
 import com.frammy.unitylauncher.zones.ZoneManager;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import net.md_5.bungee.api.chat.ClickEvent;
@@ -39,6 +40,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     public ArrayList<String> commandCategories= new ArrayList<String>();
     public MoneyManager moneyManager;
     private ZoneManager zoneManager;
+    public ZoneActivityCalculations zoneActivityCalculations;
     private SignManager signManager;
     private ActivityTracker tracker;
     private WebSocketManager webSocketManager;
@@ -56,6 +58,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         this.zoneManager = new ZoneManager(this, null, blueMapIntegration, tracker); // пока передаём null, позже установим SignManager
         this.signManager = new SignManager(this, getDataFolder(), zoneManager, blueMapIntegration, UnityCommands.getInstance());
         this.zoneManager.setSignManager(signManager);
+        this.zoneActivityCalculations = new ZoneActivityCalculations(zoneManager);
+        zoneActivityCalculations.startZoneBillingScheduler();
+
 
         getServer().getPluginManager().registerEvents(signManager, this);
         HelpCommandManager helpManager = new HelpCommandManager();
@@ -188,6 +193,12 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
     @EventHandler
     public void onPlayerMove(PlayerMoveEvent event) {
+        // вызываем только при смене блока (уменьшит нагрузку и дребезг)
+        if (event.getFrom().getBlockX() == event.getTo().getBlockX()
+                && event.getFrom().getBlockY() == event.getTo().getBlockY()
+                && event.getFrom().getBlockZ() == event.getTo().getBlockZ()) {
+            return;
+        }
         zoneManager.checkPlayerZone(event.getPlayer());
     }
 

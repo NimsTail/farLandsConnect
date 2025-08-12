@@ -26,6 +26,7 @@ import java.io.IOException;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 import com.flowpowered.math.vector.Vector2d;
 import de.bluecolored.bluemap.api.*;
@@ -37,34 +38,36 @@ import org.bukkit.potion.PotionEffectType;
 import static com.frammy.unitylauncher.UnityCommands.calculateSurfaceArea;
 
 public class ZoneManager {
-    private final UnityLauncher unityLauncher;
-    private SignManager signManager;
-    private BlueMapIntegration blueMapIntegration;
-    private ActivityTracker activityTracker;
+    public final UnityLauncher ul;
+    public SignManager signManager;
+    public BlueMapIntegration blueMapIntegration;
+    public ActivityTracker activityTracker;
     //private MoneyManager moneyManager;
     private final File zonesFile;
     private YamlConfiguration zonesConfig;
-    private final Map<UUID, List<Location>> zonePoints = new HashMap<>();
-    private final ZoneId zoneId = ZoneId.systemDefault();
+    public final Map<UUID, List<Location>> zonePoints = new HashMap<>();
+    public final ZoneId zoneId = ZoneId.systemDefault();
+    private static final long PRICE_COOLDOWN_MS = 5 * 60_000L;
+    private final Map<UUID, Long> lastPriceUse = new ConcurrentHashMap<>();
 
     public HashMap<String, ZoneInfo> zoneList = new HashMap<>();
 
+
     public ZoneManager(UnityLauncher plugin, SignManager signManager, BlueMapIntegration blueMapIntegration, ActivityTracker activityTracker) {
-        this.unityLauncher = plugin;
+        this.ul = plugin;
         this.signManager = signManager;
         this.blueMapIntegration = blueMapIntegration;
         this.activityTracker = activityTracker;
 
         this.zonesFile = new File(plugin.getDataFolder(), "zones.yml"); // <-- создаём файл в папке плагина
         this.zonesConfig = YamlConfiguration.loadConfiguration(zonesFile); // загружаем конфиг
-        startZoneBillingScheduler();
 
     }
     public void setSignManager(SignManager signManager) {
         this.signManager = signManager;
     }
 
-    private final Map<ZoneType, ZoneTypeData> zoneLimits = new HashMap<>() {{
+    public final Map<ZoneType, ZoneTypeData> zoneLimits = new HashMap<>() {{
         put(ZoneType.SHOP, new ZoneTypeData("Торговая точка", 500.0, 2, 3.0, false, 1));
         put(ZoneType.BANK, new ZoneTypeData("Банк", 300.0,2, 20.0, false, 1));
         put(ZoneType.HOSPITAL, new ZoneTypeData("Госпиталь", 700.0, 2, 15.0, false, 1));
@@ -73,64 +76,6 @@ public class ZoneManager {
         put(ZoneType.COUNTRY, new ZoneTypeData("Государство", 30000.0, 0, 100.0, true, 0.7));
     }};
 
-    private void startZoneBillingScheduler() {
-        long delay = ticksUntilNextTime(0, 5, 0);      // старт в 00:05
-        long period = 20L * 60 * 60 * 24;              // 24 часа
-
-        Bukkit.getScheduler().runTaskTimerAsynchronously(
-                unityLauncher,
-                this::snapshotAndMaybeBillAllZones,
-                delay,
-                period
-        );
-    }
-    private long ticksUntilNextTime(int hour, int minute, int second) {
-        long nowMs = System.currentTimeMillis();
-        java.time.ZonedDateTime now = java.time.ZonedDateTime.ofInstant(
-                java.time.Instant.ofEpochMilli(nowMs), zoneId);
-        java.time.ZonedDateTime next = now.withHour(hour).withMinute(minute).withSecond(second).withNano(0);
-        if (!next.isAfter(now)) next = next.plusDays(1);
-        long diffMs = java.time.Duration.between(now, next).toMillis();
-        return Math.max(1L, diffMs / 50L); // 20 тиков = 1 секунда
-    }
-
-    public void snapshotAndMaybeBillAllZones() {
-        LocalDate today = LocalDate.now(zoneId);
-
-        // 1) посчитать дневную цену каждой зоны и записать в её историю (последние 7)
-        for (ZoneInfo zone : zoneList.values()) {
-            double dailyCost = calculateZoneDailyCost(
-                    zone,
-                    activityTracker.getChunkStatsMap(),
-                    activityTracker.getWeights()
-            );
-
-            // применяем множитель типа (если ты этого ещё не сделал внутри calculateZoneDailyCost)
-            ZoneTypeData typeData = zoneLimits.get(zone.getType());
-            double typeMultiplier = (typeData != null) ? typeData.getPriceMultiplier() : 1.0;
-            double finalDailyCost = dailyCost * typeMultiplier;
-
-            zone.addDailyCost(finalDailyCost, today);
-        }
-
-        // 2) еженедельный биллинг (в день смены недели)
-        for (ZoneInfo zone : zoneList.values()) {
-            if (!zone.shouldBillWeekly(today)) continue;
-
-            double weeklyTotal = zone.getRolling7DayTotal(); // сумма 7 дней
-            // здесь списываем деньги
-            try {
-                // пример: moneyManager.withdraw(zone.getOwner(), weeklyTotal);
-             //   moneyManager.withdraw(zone.getOwner(), weeklyTotal);
-                zone.markBilled(today);
-                Bukkit.getLogger().info("[Zones] Billed " + zone.getName() + " owner=" + zone.getOwner()
-                        + " weeklyTotal=" + String.format(Locale.US, "%.2f", weeklyTotal));
-            } catch (Exception ex) {
-                Bukkit.getLogger().warning("[Zones] Billing failed for " + zone.getName()
-                        + " owner=" + zone.getOwner() + " : " + ex.getMessage());
-            }
-        }
-    }
     // Карта для хранения последней посещённой зоны игрока
     private final Map<UUID, ZoneInfo> playerLastZone = new HashMap<>();
 
@@ -170,25 +115,75 @@ public class ZoneManager {
                 }
                 updateZone(player, args[1].toLowerCase(), args.length > 2 ? args[2] : "");
                 break;
-            case "price":
-                ZoneInfo zoneInfo = playerLastZone.get(player.getUniqueId());
-                if (zoneInfo != null) {
-                    if (zoneInfo.getOwner().equals(player.getName())) {
-                        double cost = zoneInfo.getCachedCost(() -> {
-                            return calculateZoneDailyCost(
-                                    zoneInfo,
-                                    activityTracker.getChunkStatsMap(),
-                                    activityTracker.getWeights()
-                            );
-                        });
-                        player.sendMessage(ChatColor.GREEN + "Текущая дневная стоимость: " + cost + "Ⓕ");
-                    } else {
-                        player.sendMessage(ChatColor.RED + "Ты не владеешь этой зоной.");
+            case "price": {
+                // кулдаун (разреши обход правом, если нужно)
+                if (!player.hasPermission("zones.price.bypass")) {
+                    long now = System.currentTimeMillis();
+                    long last = lastPriceUse.getOrDefault(player.getUniqueId(), 0L);
+                    long left = PRICE_COOLDOWN_MS - (now - last);
+                    if (left > 0) {
+                        long sec = (left + 999) / 1000;
+                        player.sendMessage(ChatColor.GRAY + "Команда будет доступна через "
+                                + ChatColor.YELLOW + sec + ChatColor.GRAY + " сек.");
+                        break;
                     }
-                } else {
-                    player.sendMessage(ChatColor.GRAY + "Зона не найдена.");
+                    lastPriceUse.put(player.getUniqueId(), now);
                 }
+
+                ZoneInfo zoneInfo = playerLastZone.get(player.getUniqueId());
+                if (zoneInfo == null) {
+                    player.sendMessage(ChatColor.GRAY + "Зона не найдена.");
+                    break;
+                }
+                if (!zoneInfo.getOwner().equals(player.getName())) {
+                    player.sendMessage(ChatColor.RED + "Ты не владеешь этой зоной.");
+                    break;
+                }
+
+                // дневная цена — ИСПОЛЬЗУЕМ кэш (твоя реализация calculateZoneDailyCostCached)
+                double cost = ul.zoneActivityCalculations.calculateZoneDailyCostCached(
+                        zoneInfo,
+                        activityTracker.getChunkStatsMap(),
+                        activityTracker.getWeights()
+                );
+
+                // серия по часам (последние 24ч), если нужно — оставляем как есть
+                java.util.List<Double> hours = ul.zoneActivityCalculations.getZoneHourlySeries(
+                        zoneInfo,
+                        activityTracker.getChunkStatsMap(),
+                        activityTracker.getWeights(),
+                        12
+                );
+
+                // hover-текст
+                StringBuilder hover = new StringBuilder();
+                hover.append(ChatColor.GOLD).append("Активность по часам (последние ")
+                        .append(hours.size()).append("):").append("\n");
+
+                for (int i = 0; i < hours.size(); i++) {
+                    int hAgo = (hours.size() - 1) - i; // H-23 ... H-0
+                    hover.append(ChatColor.YELLOW)
+                            .append("H-").append(hAgo < 10 ? "0" + hAgo : hAgo)
+                            .append(ChatColor.GRAY).append(": ")
+                            .append(ChatColor.WHITE)
+                            .append(String.format(java.util.Locale.US, "%.3f", hours.get(i)))
+                            .append("\n");
+                }
+
+                net.md_5.bungee.api.chat.TextComponent msg =
+                        new net.md_5.bungee.api.chat.TextComponent(
+                                ChatColor.GREEN + "Текущая дневная стоимость: "
+                                        + ChatColor.GOLD + String.format(java.util.Locale.US, "%.2f", cost) + "Ⓕ"
+                        );
+
+                msg.setHoverEvent(new net.md_5.bungee.api.chat.HoverEvent(
+                        net.md_5.bungee.api.chat.HoverEvent.Action.SHOW_TEXT,
+                        new net.md_5.bungee.api.chat.ComponentBuilder(hover.toString()).create()
+                ));
+
+                player.spigot().sendMessage(msg);
                 break;
+            }
             case "remove":
                 removeZone(player);
                 break;
@@ -198,6 +193,7 @@ public class ZoneManager {
             case "cancelremove":
                 cancelRemoveZone(player);
                 break;
+
             default:
                 player.sendMessage(ChatColor.RED + "Неизвестная команда!");
         }
@@ -355,6 +351,27 @@ public class ZoneManager {
 
         switch (updateType.toLowerCase()) {
             case "corners":
+                LocalDate today = LocalDate.now(zoneId);
+
+                // 3.1 Рассчитать долг зоны
+                double due = zoneInfo.getDueSinceLastBill(today);
+                int days = zoneInfo.getDueDaysCount(today);
+                if (due > 0) {
+                    player.sendMessage(ChatColor.GRAY + "Перед изменением границ необходимо оплатить " +
+                            ChatColor.YELLOW + days + ChatColor.GRAY + " дн. задолженности: " +
+                            ChatColor.GOLD + String.format(Locale.US,"%.2f", due));
+
+                    // Можно сделать подтверждение: требовать вторую команду /ul zone update corners pay
+                    // Или списывать сразу:
+                    try {
+                        //moneyManager.withdraw(zoneInfo.getOwner(), due);
+                        zoneInfo.markBilled(today); // фиксируем закрытие недели/периода на сегодня
+                        player.sendMessage(ChatColor.GREEN + "Оплачено " + String.format(Locale.US,"%.2f", due) + ". Можно изменять границы.");
+                    } catch (Exception ex) {
+                        player.sendMessage(ChatColor.RED + "Недостаточно средств: " + ex.getMessage());
+                        return; // прерываем апдейт, пока не оплатит
+                    }
+                }
                 if (newValue.equals("+")) {
                     // Проверка пересечения с другими зонами
                     if (isPointInOtherZone(playerLoc, playerName, zoneInfo.zoneType, zoneInfo.zoneID)) {
@@ -559,150 +576,65 @@ public class ZoneManager {
         UUID playerId = player.getUniqueId();
 
         Map<Integer, ZoneInfo> zonesByIndex = new TreeMap<>(Collections.reverseOrder());
-        boolean isInsideZone = false;
-
         World playerWorld = player.getWorld();
-        for (ZoneInfo zone : zoneList.values()) {
-            // пропускаем сломанные/пустые зоны
-            if (zone.getCorners() == null || zone.getCorners().size() < 3) continue;
 
+        for (ZoneInfo zone : zoneList.values()) {
+            if (zone.getCorners() == null || zone.getCorners().size() < 3) continue;
             if (!zone.getCorners().get(0).getWorld().equals(playerWorld)) continue;
 
             if (isPlayerInZone(playerLoc, zone.getCorners())) {
-                ZoneTypeData zoneTypeData = zoneLimits.get(zone.getType());
-                if (zoneTypeData == null) continue;
-
-                isInsideZone = true;
-                zonesByIndex.put(zoneTypeData.getIndex(), zone);
+                ZoneTypeData ztd = zoneLimits.get(zone.getType());
+                if (ztd == null) continue;
+                zonesByIndex.put(ztd.getIndex(), zone);
             }
         }
 
-        if (!zonesByIndex.isEmpty()) {
-            ZoneInfo highestPriorityZone = zonesByIndex.values().iterator().next();
-            playerLastZone.put(playerId, highestPriorityZone);
+        ZoneInfo prevZone = playerLastZone.get(playerId);              // что было
+        ZoneInfo newZone  = zonesByIndex.isEmpty() ? null
+                : zonesByIndex.values().iterator().next();    // что стало
 
-            ZoneTypeData zoneTypeData = zoneLimits.get(highestPriorityZone.zoneType);
-            if (zoneTypeData != null) {
+        // Если ничего не поменялось — выходим без сообщений
+        if (Objects.equals(prevZone, newZone)) {
+            return;
+        }
+
+        // Переходы
+        if (prevZone == null && newZone != null) {
+            // Вход в зону
+            ZoneTypeData ztd = zoneLimits.get(newZone.zoneType);
+            if (ztd != null) {
                 player.spigot().sendMessage(
                         ChatMessageType.ACTION_BAR,
                         new TextComponent(ChatColor.GREEN + "Зона: " + ChatColor.GOLD +
-                                zoneTypeData.getDisplayName() + " \"" + highestPriorityZone.zoneName + "\"")
+                                ztd.getDisplayName() + " \"" + newZone.zoneName + "\"")
                 );
             }
+        } else if (prevZone != null && newZone == null) {
+            // Выход из зоны
+            player.spigot().sendMessage(
+                    ChatMessageType.ACTION_BAR,
+                    new TextComponent(ChatColor.RED + "Вы покинули зону \"" + prevZone.zoneName + "\"")
+            );
         } else {
-            if (playerZoneStatus.getOrDefault(playerId, false)) {
-                player.spigot().sendMessage(ChatMessageType.ACTION_BAR, new TextComponent(ChatColor.RED + "Вы покинули зону"));
+            // Смена зоны A -> B
+            ZoneTypeData ztd = zoneLimits.get(newZone.zoneType);
+            if (ztd != null) {
+                player.spigot().sendMessage(
+                        ChatMessageType.ACTION_BAR,
+                        new TextComponent(ChatColor.YELLOW + "Зона: " + prevZone.zoneName +
+                                ChatColor.GRAY + " → " + ChatColor.GOLD + ztd.getDisplayName() +
+                                " \"" + newZone.zoneName + "\"")
+                );
             }
         }
-        playerZoneStatus.put(playerId, isInsideZone);
+
+        playerLastZone.put(playerId, newZone);
+        playerZoneStatus.put(playerId, newZone != null);
     }
 
     // Утилита для читаемого отображения локации
     private String locToStr(Location loc) {
         return String.format("(%s: %.1f, %.1f, %.1f)", loc.getWorld().getName(), loc.getX(), loc.getY(), loc.getZ());
-    }
-    public Map<Chunk, Double> getChunkFractions(List<Location> corners) {
-        Map<Chunk, Double> result = new HashMap<>();
-
-        if (corners.size() < 3) return result;
-
-        // Преобразуем в 2D
-        List<Vector2d> polygon = corners.stream()
-                .map(loc -> new Vector2d(loc.getX(), loc.getZ()))
-                .collect(Collectors.toList());
-
-        World world = corners.get(0).getWorld(); // предполагаем одна зона = один мир
-
-        // Определяем границы
-        double minX = polygon.stream().mapToDouble(p -> p.getX()).min().orElse(0);
-        double maxX = polygon.stream().mapToDouble(p -> p.getX()).max().orElse(0);
-        double minZ = polygon.stream().mapToDouble(p -> p.getY()).min().orElse(0);
-        double maxZ = polygon.stream().mapToDouble(p -> p.getY()).max().orElse(0);
-
-        // Количество шагов в чанке (разрешение)
-        int step = 4;
-        double stepSize = 16.0 / step;
-
-        int chunkMinX = (int) Math.floor(minX / 16);
-        int chunkMaxX = (int) Math.floor(maxX / 16);
-        int chunkMinZ = (int) Math.floor(minZ / 16);
-        int chunkMaxZ = (int) Math.floor(maxZ / 16);
-
-        for (int cx = chunkMinX; cx <= chunkMaxX; cx++) {
-            for (int cz = chunkMinZ; cz <= chunkMaxZ; cz++) {
-                int inside = 0;
-                int total = step * step;
-
-                for (int i = 0; i < step; i++) {
-                    for (int j = 0; j < step; j++) {
-                        double x = cx * 16 + i * stepSize + stepSize / 2;
-                        double z = cz * 16 + j * stepSize + stepSize / 2;
-
-                        if (isPointInsidePolygon(new Vector2d(x, z), polygon)) {
-                            inside++;
-                        }
-                    }
-                }
-
-                if (inside > 0) {
-                    double fraction = (double) inside / total;
-                    Chunk chunk = world.getChunkAt(cx, cz);
-                    result.put(chunk, fraction);
-                }
-            }
-        }
-
-        return result;
-    }
-    public double calculateWeeklyCost(ZoneInfo zone, Map<String, ChunkStats> statsMap, ActivityWeights weights, double multiplierPerPoint) {
-        double daily = calculateZoneDailyCost(zone, statsMap, weights);
-        return daily * multiplierPerPoint * 7; // умножаем на 7 дней
-    }
-
-
-    public double calculateZoneDailyCost(ZoneInfo zone, Map<String, ChunkStats> statsMap, ActivityWeights weights) {
-        Bukkit.getLogger().info("=== [ZoneCost Debug] ===");
-        Bukkit.getLogger().info("Зона: " + zone.getName() + " (" + zone.getID() + ")");
-        Bukkit.getLogger().info("Количество углов: " + zone.getCorners().size());
-
-        Map<Chunk, Double> chunkFractions = getChunkFractions(zone.getCorners());
-        Bukkit.getLogger().info("Найдено чанков в зоне: " + chunkFractions.size());
-
-        double totalWeightedValue = 0;
-        double totalWeight = 0;
-
-        for (Map.Entry<Chunk, Double> entry : chunkFractions.entrySet()) {
-            Chunk chunk = entry.getKey();
-            double fraction = entry.getValue();
-
-            String key = chunk.getWorld().getName() + ":" + chunk.getX() + "," + chunk.getZ();
-            ChunkStats stats = statsMap.get(key);
-
-            if (stats == null) {
-                Bukkit.getLogger().info("Чанк " + key + " → нет данных в statsMap");
-                continue;
-            }
-
-            double dailyAvg = stats.getDailyAverage(weights); // <-- ВАЖНО: используем новый метод
-
-            Bukkit.getLogger().info("Чанк " + key + " → fraction=" + fraction +
-                    ", dailyAvg=" + dailyAvg +
-                    ", contrib=" + (dailyAvg * fraction));
-
-            totalWeightedValue += dailyAvg * fraction;
-            totalWeight += fraction;
-        }
-
-        double result = totalWeight > 0 ? totalWeightedValue / totalWeight : 0;
-        double typeMultiplier = zoneLimits.get(zone.getType()).getPriceMultiplier();
-        Bukkit.getLogger().info("Сумма значений: " + totalWeightedValue);
-        Bukkit.getLogger().info("Сумма весов: " + totalWeight);
-        Bukkit.getLogger().info("Множитель зоны: " + typeMultiplier);
-        Bukkit.getLogger().info("Саб-Результат: " + result);
-        Bukkit.getLogger().info("Результат: " + result * typeMultiplier);
-        Bukkit.getLogger().info("=========================");
-
-        return result * typeMultiplier;
     }
 
     private void addBlueMapMarker(ZoneType zoneType, String markerID, List<Location> locations, String zoneName) {
@@ -851,7 +783,7 @@ public class ZoneManager {
 
             zonesConfig.set(path + ".name", zone.zoneName);
             zonesConfig.set(path + ".marker_ID", zone.markerID);
-            zonesConfig.set(path + ".world", zone.getWorldName());
+            zonesConfig.set(path + ".world", zone.zoneCorners.get(0).getWorld().getName());
 
             List<Map<String, Object>> serializedCorners = new ArrayList<>();
             for (Location loc : zone.zoneCorners) {
@@ -870,7 +802,7 @@ public class ZoneManager {
     }
 
     public void loadZoneData() {
-        File zoneFile = new File(unityLauncher.getDataFolder(), "zones.yml");
+        File zoneFile = new File(ul.getDataFolder(), "zones.yml");
         if (zoneFile.exists()) {
             YamlConfiguration zoneConfig = YamlConfiguration.loadConfiguration(zoneFile);
 

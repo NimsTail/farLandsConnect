@@ -22,9 +22,8 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
+import java.time.LocalDate;
+import java.util.*;
 import java.util.stream.Collectors;
 
 import static com.frammy.unitylauncher.UnityCommands.calculateSurfaceArea;
@@ -97,7 +96,26 @@ public class Unity implements CommandExecutor {
 
                         return false;
                     case "fsnap":
-                        zoneManager.snapshotAndMaybeBillAllZones();
+                        unityLauncher.zoneActivityCalculations.snapshotAndMaybeBillAllZones();
+                        return false;
+                    case "blist":
+                        LocalDate today = LocalDate.now(zoneManager.zoneId);
+                        p.sendMessage(ChatColor.GOLD + "Биллинг зон (сегодня: " + today + "):");
+
+                        zoneManager.zoneList.values().stream()
+                                .sorted(Comparator.comparing(ZoneInfo::getNextBillingDate))
+                                .forEach(z -> {
+                                    LocalDate nextDate = z.getNextBillingDate();
+                                    double due = z.getDueSinceLastBill(today);
+                                    int days = z.getDueDaysCount(today);
+                                    p.sendMessage(
+                                            ChatColor.YELLOW + z.getName() +
+                                                    ChatColor.GRAY + " | владелец: " + ChatColor.WHITE + z.getOwner() +
+                                                    ChatColor.GRAY + " | след. платеж: " + ChatColor.AQUA + nextDate +
+                                                    ChatColor.GRAY + " | долг: " + ChatColor.GOLD + String.format(Locale.US,"%.2f", due) +
+                                                    ChatColor.GRAY + " (" + days + " дн.)"
+                                    );
+                                });
                         return false;
                     case "rcode":
                         UnityCommands.getInstance().rCode(sender);
