@@ -8,9 +8,12 @@ import com.frammy.unitylauncher.signs.ItemData;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.BlueMapIntegration;
 import com.frammy.unitylauncher.signs.SignVariables;
+import de.bluecolored.bluemap.api.math.Color;
 import de.bluecolored.bluemap.api.math.Shape;
 import net.md_5.bungee.api.ChatMessageType;
 import net.md_5.bungee.api.chat.ClickEvent;
+import net.md_5.bungee.api.chat.ComponentBuilder;
+import net.md_5.bungee.api.chat.HoverEvent;
 import net.md_5.bungee.api.chat.TextComponent;
 import org.bukkit.*;
 import org.bukkit.block.Block;
@@ -148,7 +151,7 @@ public class ZoneManager {
                 );
 
                 // серия по часам (последние 24ч), если нужно — оставляем как есть
-                java.util.List<Double> hours = ul.zoneActivityCalculations.getZoneHourlySeries(
+                List<Double> hours = ul.zoneActivityCalculations.getZoneHourlySeries(
                         zoneInfo,
                         activityTracker.getChunkStatsMap(),
                         activityTracker.getWeights(),
@@ -166,19 +169,19 @@ public class ZoneManager {
                             .append("H-").append(hAgo < 10 ? "0" + hAgo : hAgo)
                             .append(ChatColor.GRAY).append(": ")
                             .append(ChatColor.WHITE)
-                            .append(String.format(java.util.Locale.US, "%.3f", hours.get(i)))
+                            .append(String.format(Locale.US, "%.3f", hours.get(i)))
                             .append("\n");
                 }
 
-                net.md_5.bungee.api.chat.TextComponent msg =
-                        new net.md_5.bungee.api.chat.TextComponent(
+                TextComponent msg =
+                        new TextComponent(
                                 ChatColor.GREEN + "Текущая дневная стоимость: "
-                                        + ChatColor.GOLD + String.format(java.util.Locale.US, "%.2f", cost) + "Ⓕ"
+                                        + ChatColor.GOLD + String.format(Locale.US, "%.2f", cost) + "Ⓕ"
                         );
 
-                msg.setHoverEvent(new net.md_5.bungee.api.chat.HoverEvent(
-                        net.md_5.bungee.api.chat.HoverEvent.Action.SHOW_TEXT,
-                        new net.md_5.bungee.api.chat.ComponentBuilder(hover.toString()).create()
+                msg.setHoverEvent(new HoverEvent(
+                        HoverEvent.Action.SHOW_TEXT,
+                        new ComponentBuilder(hover.toString()).create()
                 ));
 
                 player.spigot().sendMessage(msg);
@@ -264,7 +267,7 @@ public class ZoneManager {
         }
 
         points.remove(points.size() - 1);
-        player.sendMessage(ChatColor.GRAY + "Удалена последняя точка. Текущее количество точек: " + (points.size() - 2));
+        player.sendMessage(ChatColor.GRAY + "Удалена последняя точка. Текущее количество точек: " + (points.size()));
     }
 
     private void buildZone(Player player, ZoneType zoneType, String zoneName) {
@@ -308,8 +311,9 @@ public class ZoneManager {
         zonesConfig.set(zoneType + "." + playerName + "." + zoneID + ".marker_ID", markerID);
         zonesConfig.set(zoneType + "." + playerName + "." + zoneID + ".corners", serializedPoints);
 
+        org.bukkit.Color defaultColor = org.bukkit.Color.fromRGB(255, 0, 0);
        // saveZonesConfig();
-        zoneList.put(markerID, new ZoneInfo(zoneType, zoneID, zoneName, markerID, points, playerName));
+        zoneList.put(markerID, new ZoneInfo(zoneType, zoneID, zoneName, markerID, points, playerName, defaultColor));
         addBlueMapMarker(zoneType, markerID, points, zoneName);
         player.sendMessage(ChatColor.GREEN + "Зона " + zoneName + " успешно создана!");
         zonePoints.remove(playerId);
@@ -426,12 +430,12 @@ public class ZoneManager {
                 //        .collect(Collectors.toList());
                // zonesConfig.set(zoneInfo.zoneType + "." + playerName + "." + zoneInfo.zoneID + ".corners", serializedCorners);
 
-                updateBlueMapMarker(zoneInfo.zoneType, zoneInfo.markerID, zoneInfo.zoneCorners, zoneInfo.zoneName, player);
+                updateBlueMapMarker(zoneInfo.zoneType, zoneInfo.markerID, zoneInfo.zoneCorners, zoneInfo.zoneName, null);
                 break;
 
             case "name":
                // zonesConfig.set(zoneInfo.zoneType + "." + playerName + "." + zoneInfo.zoneID +
-                updateBlueMapMarker(zoneInfo.zoneType, zoneInfo.markerID, zoneInfo.zoneCorners, newValue, player);
+                updateBlueMapMarker(zoneInfo.zoneType, zoneInfo.markerID, zoneInfo.zoneCorners, newValue, null);
                 player.sendMessage(ChatColor.GREEN + "Название зоны обновлено!");
                 zoneInfo.zoneName = newValue;
                 for (Location loc : signManager.genericSignList.keySet()) {
@@ -456,6 +460,27 @@ public class ZoneManager {
                     }
                 }
 
+                break;
+            case "color":
+                List<String> rgb = List.of(newValue.split(","));
+                if (rgb.size() != 3) return;
+                Integer r,g,b;
+                org.bukkit.Color newFillColor = null;
+                try {
+                    r = Integer.parseInt(rgb.get(0));
+                    g = Integer.parseInt(rgb.get(1));
+                    b = Integer.parseInt(rgb.get(2));
+                    newFillColor = org.bukkit.Color.fromRGB(
+                            r,
+                            g,
+                            b
+                    );
+                } catch (NumberFormatException e) {
+                    player.sendMessage(ChatColor.RED + "Код цвета может содержать только целые числа.");
+                    return;
+                }
+
+                updateBlueMapMarker(zoneInfo.zoneType, zoneInfo.markerID, zoneInfo.zoneCorners, zoneInfo.zoneName, newFillColor);
                 break;
 
             default:
@@ -613,7 +638,7 @@ public class ZoneManager {
             // Выход из зоны
             player.spigot().sendMessage(
                     ChatMessageType.ACTION_BAR,
-                    new TextComponent(ChatColor.RED + "Вы покинули зону \"" + prevZone.zoneName + "\"")
+                    new TextComponent(ChatColor.RED + "Вы покинули зону")
             );
         } else {
             // Смена зоны A -> B
@@ -621,7 +646,7 @@ public class ZoneManager {
             if (ztd != null) {
                 player.spigot().sendMessage(
                         ChatMessageType.ACTION_BAR,
-                        new TextComponent(ChatColor.YELLOW + "Зона: " + prevZone.zoneName +
+                        new TextComponent(ChatColor.YELLOW + "\"" + prevZone.zoneName + "\"" +
                                 ChatColor.GRAY + " → " + ChatColor.GOLD + ztd.getDisplayName() +
                                 " \"" + newZone.zoneName + "\"")
                 );
@@ -645,6 +670,7 @@ public class ZoneManager {
             blueMapAPI.getMap(location.getWorld().getName()).ifPresent(map -> {
                 String markerSetID = "zones_" + zoneType.name().toLowerCase();
                 MarkerSet markerSet = map.getMarkerSets().computeIfAbsent(markerSetID, k -> new MarkerSet(markerSetID));
+                markerSet.setLabel(zoneLimits.get(zoneType).getDisplayName());
                 List<Vector2d> basePoints = locations.stream()
                         .map(loc -> new Vector2d(loc.getX(), loc.getZ()))
                         .collect(Collectors.toList());
@@ -659,29 +685,46 @@ public class ZoneManager {
         });
     }
 
-    private void updateBlueMapMarker(ZoneType zoneType, String markerID, List<Location> locations, String zoneName, Player p) {
+    private void updateBlueMapMarker(ZoneType zoneType, String markerID, List<Location> locations, String zoneName, org.bukkit.Color bukkitColor) {
         if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
 
         BlueMapAPI.getInstance().ifPresent(blueMapAPI -> {
+            if (locations == null || locations.isEmpty()) return;
             Location location = locations.get(0);
+
             blueMapAPI.getMap(location.getWorld().getName()).ifPresent(map -> {
                 String markerSetID = "zones_" + zoneType.name().toLowerCase();
-                System.out.println(map.getMarkerSets().get(markerSetID).getMarkers().size());
-                System.out.println(map.getMarkerSets().get(markerSetID));
                 MarkerSet markerSet = map.getMarkerSets().get(markerSetID);
+                if (markerSet == null) return;
 
+                Marker existing = markerSet.getMarkers().get(markerID);
+                if (!(existing instanceof ExtrudeMarker)) return;
 
-                if (markerSet != null && markerSet.getMarkers().containsKey(markerID)) {
-                    ExtrudeMarker marker = (ExtrudeMarker) markerSet.getMarkers().get(markerID);
-                    List<Vector2d> basePoints = locations.stream()
-                            .map(loc -> new Vector2d(loc.getX(), loc.getZ()))
-                            .collect(Collectors.toList());
+                ExtrudeMarker marker = (ExtrudeMarker) existing;
 
-                    marker.setShape(new Shape(basePoints), 42, 255);
-                    marker.setLabel(zoneName);
-                    marker.setDetail("<b>" + zoneLimits.get(zoneType).getDisplayName() + " \"" + zoneName + "\"</b><br><br><i> Владелец:</i> " + zoneList.get(markerID).getOwner() + "<br><i>Площадь:</i> " + calculateSurfaceArea(locations)); // 📌 Добавляем описание
-                    blueMapIntegration.saveBlueMapMarkers(markerSetID);
-                }
+                List<Vector2d> basePoints = locations.stream()
+                        .map(loc -> new Vector2d(loc.getX(), loc.getZ()))
+                        .collect(Collectors.toList());
+
+                // цвет: если прилетел null — возьмем  с альфой
+                org.bukkit.Color safe = (bukkitColor != null) ? bukkitColor : org.bukkit.Color.fromRGB(255, 0, 0);
+                // подбери альфу как хочешь (0..1)
+                Color bmColor = toBlueMapColor(safe, 0.35f);
+                Color bmLineColor = toBlueMapColor(safe, 1f);
+                marker.setFillColor(bmColor);
+                marker.setLineColor(bmLineColor);
+
+                marker.setShape(new Shape(basePoints), 42, 255);
+                marker.setLabel(zoneName);
+
+                // detail-текст — оставил твой, только подстраховка от NPE
+                ZoneInfo zi = zoneList.get(markerID);
+                String ownerName = (zi != null && zi.getOwner() != null) ? zi.getOwner() : "—";
+                marker.setDetail("<b>" + zoneLimits.get(zoneType).getDisplayName() + " \"" + zoneName + "\"</b>"
+                        + "<br><br><i>Владелец:</i> " + ownerName
+                        + "<br><i>Площадь:</i> " + calculateSurfaceArea(locations));
+
+                blueMapIntegration.saveBlueMapMarkers(markerSetID);
             });
         });
     }
@@ -716,6 +759,26 @@ public class ZoneManager {
         }
         return false; // Нет пересечений
     }
+    private static org.bukkit.Color hexToBukkit(String hex) {
+        if (hex == null || hex.isEmpty()) return org.bukkit.Color.fromRGB(255, 255, 255);
+        String s = hex.trim();
+        if (s.startsWith("#")) s = s.substring(1);
+        int rgb = (int) Long.parseLong(s, 16);
+        int r = (rgb >> 16) & 0xFF;
+        int g = (rgb >> 8) & 0xFF;
+        int b = rgb & 0xFF;
+        return org.bukkit.Color.fromRGB(r, g, b);
+    }
+
+    // Bukkit Color -> HEX "#RRGGBB"
+    private static String bukkitToHex(org.bukkit.Color c) {
+        return String.format("#%02X%02X%02X", c.getRed(), c.getGreen(), c.getBlue());
+    }
+
+    // Bukkit Color -> BlueMap Color (0..1) с альфой
+    private static Color toBlueMapColor(org.bukkit.Color c, float alpha) {
+        return new Color(c.getRed(), c.getGreen(), c.getBlue(), alpha);
+    }
 
      private void saveZonesConfig() {
         try {
@@ -745,6 +808,11 @@ public class ZoneManager {
                     if (zoneData == null) continue;
 
                     String name = zoneData.getString("name", "Без названия");
+
+                    // ---- ВАЖНО: цвет как HEX-строка
+                    String colorHex = zoneData.getString("color", "#FFFFFF");
+                    org.bukkit.Color bukkitColor = hexToBukkit(colorHex);
+
                     String markerID = zoneData.getString("marker_ID", "");
                     String worldNameSaved = zoneData.getString("world", null);
 
@@ -760,14 +828,25 @@ public class ZoneManager {
                         double x = ((Number) corner.get("x")).doubleValue();
                         double y = ((Number) corner.get("y")).doubleValue();
                         double z = ((Number) corner.get("z")).doubleValue();
-                        float pitch = ((Number) corner.get("pitch")).floatValue();
-                        float yaw = ((Number) corner.get("yaw")).floatValue();
+                        float pitch = ((corner.get("pitch") instanceof Number) ? ((Number) corner.get("pitch")).floatValue() : 0f);
+                        float yaw   = ((corner.get("yaw")   instanceof Number) ? ((Number) corner.get("yaw")).floatValue()   : 0f);
 
                         corners.add(new Location(w, x, y, z, yaw, pitch));
                     }
 
                     String key = typeKey + "_" + owner + "_" + zoneId;
-                    ZoneInfo zoneInfo = new ZoneInfo(zoneType, zoneId, name, markerID, corners, owner);
+
+                    // ==== тут меняем конструктор ZoneInfo, см. ниже
+                    ZoneInfo zoneInfo = new ZoneInfo(
+                            zoneType,
+                            zoneId,
+                            name,
+                            markerID,
+                            corners,
+                            owner,
+                            bukkitColor // <--- храним именно Bukkit Color
+                    );
+
                     zoneList.put(key, zoneInfo);
                 }
             }
@@ -778,15 +857,20 @@ public class ZoneManager {
         zonesConfig = new YamlConfiguration();
 
         for (ZoneInfo zone : zoneList.values()) {
-            String typeKey = zone.zoneType.name().toLowerCase();
-            String path = typeKey + "." + zone.zoneOwner + "." + zone.zoneID;
+            String typeKey = zone.getType().name().toLowerCase();
+            String path = typeKey + "." + zone.getOwner() + "." + zone.getID();
 
-            zonesConfig.set(path + ".name", zone.zoneName);
-            zonesConfig.set(path + ".marker_ID", zone.markerID);
-            zonesConfig.set(path + ".world", zone.zoneCorners.get(0).getWorld().getName());
+            zonesConfig.set(path + ".name", zone.getName());
+
+            // ---- ВАЖНО: сохраняем как строку "#RRGGBB"
+            org.bukkit.Color c = zone.getFillColor();
+            zonesConfig.set(path + ".color", (c != null ? bukkitToHex(c) : "#FFFFFF"));
+
+            zonesConfig.set(path + ".marker_ID", zone.getMarkerID());
+            zonesConfig.set(path + ".world", zone.getCorners().isEmpty() ? "world" : zone.getCorners().get(0).getWorld().getName());
 
             List<Map<String, Object>> serializedCorners = new ArrayList<>();
-            for (Location loc : zone.zoneCorners) {
+            for (Location loc : zone.getCorners()) {
                 Map<String, Object> map = new HashMap<>();
                 map.put("world", loc.getWorld().getName());
                 map.put("x", loc.getX());
@@ -798,8 +882,10 @@ public class ZoneManager {
             }
             zonesConfig.set(path + ".corners", serializedCorners);
         }
-        saveZonesConfig();
+
+        saveZonesConfig(); // как у тебя
     }
+
 
     public void loadZoneData() {
         File zoneFile = new File(ul.getDataFolder(), "zones.yml");

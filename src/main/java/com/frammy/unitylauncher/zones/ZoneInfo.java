@@ -1,5 +1,6 @@
 package com.frammy.unitylauncher.zones;
 
+import de.bluecolored.bluemap.api.math.Color;
 import org.bukkit.Location;
 
 import java.time.LocalDate;
@@ -17,6 +18,7 @@ public class ZoneInfo {
     public String zoneOwner;
     public String markerID;
     public List<Location> zoneCorners;
+    public org.bukkit.Color fillColor;
 
     // === История и биллинг ===
     public static class DailyEntry {
@@ -35,13 +37,14 @@ public class ZoneInfo {
     private LocalDate lastBilledDate = null; // последний оплаченный день (включительно)
     private LocalDate nextBillingDate = null; // когда планируем следующий платёж
 
-    public ZoneInfo(ZoneType zoneType, String zoneID, String zoneName, String markerID, List<Location> zoneCorners, String zoneOwner) {
+    public ZoneInfo(ZoneType zoneType, String zoneID, String zoneName, String markerID, List<Location> zoneCorners, String zoneOwner, org.bukkit.Color fillColor) {
         this.zoneType = zoneType;
         this.zoneID = zoneID;
         this.zoneName = zoneName;
         this.markerID = markerID;
         this.zoneCorners = zoneCorners;
         this.zoneOwner = zoneOwner;
+        this.fillColor = fillColor;
     }
 
     // === Геттеры/сеттеры ===
@@ -67,6 +70,14 @@ public class ZoneInfo {
 
     public String getOwner() {
         return zoneOwner;
+    }
+
+    public org.bukkit.Color getFillColor() {
+        return fillColor;
+    }
+
+    public void setFillColor() {
+        this.fillColor = fillColor;
     }
 
     public void setType(ZoneType type) {
