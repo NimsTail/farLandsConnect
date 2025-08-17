@@ -73,7 +73,7 @@ public class BlueMapIntegration {
                                         if (existingMarker instanceof ExtrudeMarker) {
                                             ExtrudeMarker extrudeMarker = (ExtrudeMarker) existingMarker;
                                             if (shapesIntersect(newShape, extrudeMarker.getShape())) {
-                                                p.sendMessage(ChatColor.RED + "На этой территории уже создан другой магазин.");
+                                                p.sendMessage(ChatColor.RED + "Маркер пересекается с существующим: " + extrudeMarker.getLabel());
                                                 Bukkit.getLogger().warning("Маркер пересекается с существующим: " + extrudeMarker.getLabel());
                                                 return; // Прекращаем добавление нового маркера
                                             } else {

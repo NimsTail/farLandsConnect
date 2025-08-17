@@ -32,6 +32,7 @@ public class CommandCompleter implements TabCompleter {
             completions.add("top");
             completions.add("country");
             completions.add("zone");
+            completions.add("relations");
 
         } else if (args.length == 2) {
             switch (args[0].toLowerCase()) {

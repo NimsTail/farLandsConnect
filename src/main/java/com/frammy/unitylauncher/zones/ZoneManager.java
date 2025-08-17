@@ -71,12 +71,12 @@ public class ZoneManager {
     }
 
     public final Map<ZoneType, ZoneTypeData> zoneLimits = new HashMap<>() {{
-        put(ZoneType.SHOP, new ZoneTypeData("Торговая точка", 500.0, 2, 3.0, false, 1));
-        put(ZoneType.BANK, new ZoneTypeData("Банк", 300.0,2, 20.0, false, 1));
-        put(ZoneType.HOSPITAL, new ZoneTypeData("Госпиталь", 700.0, 2, 15.0, false, 1));
-        put(ZoneType.INDUSTRIAL, new ZoneTypeData("Промышленная зона", 1000.0, 2, 30.0, false, 1));
-        put(ZoneType.REGION, new ZoneTypeData("Регион", 10000.0, 1, 300.0, true, 0.85));
-        put(ZoneType.COUNTRY, new ZoneTypeData("Государство", 30000.0, 0, 100.0, true, 0.7));
+        put(ZoneType.SHOP, new ZoneTypeData("Торговая точка", 500.0, 2, 3.0, false, 1, 10, "unityLauncher.createZone.shop"));
+        put(ZoneType.BANK, new ZoneTypeData("Банк", 300.0,2, 20.0, false, 1, 150, "unityLauncher.createZone.bank"));
+        put(ZoneType.HOSPITAL, new ZoneTypeData("Госпиталь", 700.0, 2, 15.0, false, 1, 200, "unityLauncher.createZone.hospital"));
+        put(ZoneType.INDUSTRIAL, new ZoneTypeData("Промышленная зона", 1000.0, 2, 30.0, false, 1.15, 50, "unityLauncher.createZone.industrial"));
+        put(ZoneType.REGION, new ZoneTypeData("Регион", 10000.0, 1, 300.0, true, 0.85, 0, "unityLauncher.createZone.region"));
+        put(ZoneType.COUNTRY, new ZoneTypeData("Государство", 30000.0, 0, 100.0, true, 0.7, 0, "unityLauncher.createZone.country"));
     }};
 
     // Карта для хранения последней посещённой зоны игрока

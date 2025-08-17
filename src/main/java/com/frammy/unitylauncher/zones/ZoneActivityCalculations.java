@@ -60,8 +60,8 @@ public class ZoneActivityCalculations {
         for (ZoneInfo zone : zm.zoneList.values()) {
             double baseDaily = calculateZoneDailyCostCached(zone, zm.activityTracker.getChunkStatsMap(), zm.activityTracker.getWeights());
             ZoneTypeData typeData = zm.zoneLimits.get(zone.getType());
-            double typeMult = (typeData != null) ? typeData.getPriceMultiplier() : 1.0;
-            double finalDailyCost = baseDaily * typeMult;
+            //double typeMult = (typeData != null) ? typeData.getPriceMultiplier() : 1.0;
+            double finalDailyCost = baseDaily;
 
             zone.addDailyCost(today, finalDailyCost);
         }

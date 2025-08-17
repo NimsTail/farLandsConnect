@@ -6,6 +6,9 @@ import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.signs.SignVariables;
 import com.frammy.unitylauncher.zones.ZoneActivityCalculations;
 import com.frammy.unitylauncher.zones.ZoneManager;
+import com.frammy.unitylauncher.zones.countryrelations.CountryRegistryJdbc;
+import com.frammy.unitylauncher.zones.countryrelations.CountryRelationshipDao;
+import com.frammy.unitylauncher.zones.countryrelations.DiplomacyService;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import net.md_5.bungee.api.chat.ClickEvent;
 import net.md_5.bungee.api.chat.HoverEvent;
@@ -24,6 +27,7 @@ import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.Nullable;
 
+import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -45,6 +49,8 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     private ActivityTracker tracker;
     private WebSocketManager webSocketManager;
     private BlueMapIntegration blueMapIntegration;
+    public DiplomacyService diplomacy;
+    public CountryRegistryJdbc countryRegistryJdbc;
     public Set<Player> getAwaitingCorrectCommand() {return awaitingCorrectCommand;}
 
     @Override
@@ -61,6 +67,11 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         this.zoneActivityCalculations = new ZoneActivityCalculations(zoneManager);
         zoneActivityCalculations.startZoneBillingScheduler();
 
+        CountryRelationshipDao dao = new CountryRelationshipDao();
+        diplomacy = new DiplomacyService(dao);
+        diplomacy.loadAll();
+        countryRegistryJdbc = new CountryRegistryJdbc();
+        Bukkit.getScheduler().runTaskAsynchronously(this, diplomacy::loadAll);
 
         getServer().getPluginManager().registerEvents(signManager, this);
         HelpCommandManager helpManager = new HelpCommandManager();
@@ -166,6 +177,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                 onError("NotInBase", ex, null);
             }
         }
+        diplomacy.snapshot().keySet().forEach(diplomacy::save);
 
         blueMapIntegration.saveBlueMapMarkers("services");
         blueMapIntegration.saveBlueMapMarkers("shops");

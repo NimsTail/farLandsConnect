@@ -7,4 +7,8 @@ public enum ZoneType {
     INDUSTRIAL,
     REGION,
     COUNTRY,
+    CHURCH,
+    COLONY,
+    LIBRARY,
+    PARK
 }
