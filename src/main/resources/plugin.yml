@@ -6,7 +6,7 @@ authors: [ frammy, NimsTail ]
 description: Connects with our Unity launcher
 prefix: Unity Launcher
 website: farlands.me
-depend: [BlueMap]
+depend: [BlueMap, UltimateAdvancementAPI]
 commands:
   unityLauncher:
     aliases: ul

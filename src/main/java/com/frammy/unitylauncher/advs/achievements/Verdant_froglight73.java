@@ -1,19 +1,40 @@
-package com.generatedadvancement.ultimateadvancementapi.advs.achievements;
+package com.frammy.unitylauncher.advs.achievements;
 
 import com.fren_gor.ultimateAdvancementAPI.util.AdvancementKey;
-import com.generatedadvancement.ultimateadvancementapi.advs.AdvancementTabNamespaces;
 import com.fren_gor.ultimateAdvancementAPI.advancement.display.FancyAdvancementDisplay;
 import com.fren_gor.ultimateAdvancementAPI.advancement.BaseAdvancement;
 import org.bukkit.Material;
 import com.fren_gor.ultimateAdvancementAPI.advancement.display.AdvancementFrameType;
 import com.fren_gor.ultimateAdvancementAPI.advancement.Advancement;
+import com.frammy.unitylauncher.advs.AdvancementTabNamespaces;
 
 public class Verdant_froglight73 extends BaseAdvancement  {
 
-  public static AdvancementKey KEY = new AdvancementKey(AdvancementTabNamespaces.achievements_NAMESPACE, "verdant_froglight73");
+    public static AdvancementKey KEY = new AdvancementKey(
+            AdvancementTabNamespaces.achievements_NAMESPACE,
+            "verdant_froglight73"
+    );
 
-
-  public Verdant_froglight73(Advancement parent) {
-    super(KEY.getKey(), new FancyAdvancementDisplay(Material.VERDANT_FROGLIGHT, "Минимализм", AdvancementFrameType.TASK, true, true, 20f, 0f ,"", "Держи зелёный жабосвет как ", "единственный предмет в инвентаре ", "в течение дня", "", "Награда: Рамка §4"Зелёный Жабосвет""), parent, 1);
-  }
+    public Verdant_froglight73(Advancement parent) {
+        super(
+                KEY.getKey(),
+                new FancyAdvancementDisplay(
+                        Material.VERDANT_FROGLIGHT,
+                        "Минимализм",
+                        AdvancementFrameType.TASK,
+                        true,
+                        true,
+                        20f,
+                        0f,
+                        "",
+                        "Держи зелёный жабосвет как ",
+                        "единственный предмет в инвентаре ",
+                        "в течение дня",
+                        "",
+                        "Награда: Рамка §4Зелёный Жабосвет"
+                ),
+                parent,
+                1
+        );
+    }
 }

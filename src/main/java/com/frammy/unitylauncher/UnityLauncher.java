@@ -44,9 +44,13 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     private WebSocketManager webSocketManager;
     private BlueMapIntegration blueMapIntegration;
     public Set<Player> getAwaitingCorrectCommand() {return awaitingCorrectCommand;}
+    private AdvancementsManager advManager;
 
     @Override
     public void onEnable() {
+        advManager = new AdvancementsManager(this);
+        advManager.init();
+
         Bukkit.getPluginManager().registerEvents(this, this);
         moneyManager = new MoneyManager(getDataFolder(), "unity_launcher");
         getServer().getPluginManager().registerEvents(moneyManager, this);
