@@ -4,7 +4,11 @@ import com.frammy.unitylauncher.chunkactivity.ChunkActivityHeatmapExporter;
 import com.frammy.unitylauncher.signs.SignCategory;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.signs.SignVariables;
+import com.frammy.unitylauncher.zones.ZoneActivityCalculations;
 import com.frammy.unitylauncher.zones.ZoneManager;
+import com.frammy.unitylauncher.zones.countryrelations.CountryRegistryJdbc;
+import com.frammy.unitylauncher.zones.countryrelations.CountryRelationshipDao;
+import com.frammy.unitylauncher.zones.countryrelations.DiplomacyService;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import net.md_5.bungee.api.chat.ClickEvent;
 import net.md_5.bungee.api.chat.HoverEvent;
@@ -23,6 +27,7 @@ import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.Nullable;
 
+import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -39,10 +44,13 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     public ArrayList<String> commandCategories= new ArrayList<String>();
     public MoneyManager moneyManager;
     private ZoneManager zoneManager;
+    public ZoneActivityCalculations zoneActivityCalculations;
     private SignManager signManager;
     private ActivityTracker tracker;
     private WebSocketManager webSocketManager;
     private BlueMapIntegration blueMapIntegration;
+    public DiplomacyService diplomacy;
+    public CountryRegistryJdbc countryRegistryJdbc;
     public Set<Player> getAwaitingCorrectCommand() {return awaitingCorrectCommand;}
     private AdvancementsManager advManager;
 
@@ -60,6 +68,14 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         this.zoneManager = new ZoneManager(this, null, blueMapIntegration, tracker); // пока передаём null, позже установим SignManager
         this.signManager = new SignManager(this, getDataFolder(), zoneManager, blueMapIntegration, UnityCommands.getInstance());
         this.zoneManager.setSignManager(signManager);
+        this.zoneActivityCalculations = new ZoneActivityCalculations(zoneManager);
+        zoneActivityCalculations.startZoneBillingScheduler();
+
+        CountryRelationshipDao dao = new CountryRelationshipDao();
+        diplomacy = new DiplomacyService(dao);
+        diplomacy.loadAll();
+        countryRegistryJdbc = new CountryRegistryJdbc();
+        Bukkit.getScheduler().runTaskAsynchronously(this, diplomacy::loadAll);
 
         getServer().getPluginManager().registerEvents(signManager, this);
         HelpCommandManager helpManager = new HelpCommandManager();
@@ -165,6 +181,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                 onError("NotInBase", ex, null);
             }
         }
+        diplomacy.snapshot().keySet().forEach(diplomacy::save);
 
         blueMapIntegration.saveBlueMapMarkers("services");
         blueMapIntegration.saveBlueMapMarkers("shops");
@@ -192,6 +209,12 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
     @EventHandler
     public void onPlayerMove(PlayerMoveEvent event) {
+        // вызываем только при смене блока (уменьшит нагрузку и дребезг)
+        if (event.getFrom().getBlockX() == event.getTo().getBlockX()
+                && event.getFrom().getBlockY() == event.getTo().getBlockY()
+                && event.getFrom().getBlockZ() == event.getTo().getBlockZ()) {
+            return;
+        }
         zoneManager.checkPlayerZone(event.getPlayer());
     }
 

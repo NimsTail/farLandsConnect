@@ -1,5 +1,7 @@
 package com.frammy.unitylauncher;
 
+import com.frammy.unitylauncher.zones.ZoneManager;
+import com.frammy.unitylauncher.zones.ZoneType;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
@@ -15,6 +17,7 @@ public class CommandCompleter implements TabCompleter {
     @Override
     public List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command command, @NotNull String alias, @NotNull String[] args) {
         List<String> completions = new ArrayList<>();
+        ZoneManager zoneManager = UnityLauncher.getInstance().getZoneManager();
 
         // Проверяем количество аргументов
         if (args.length == 1) {
@@ -29,6 +32,7 @@ public class CommandCompleter implements TabCompleter {
             completions.add("top");
             completions.add("country");
             completions.add("zone");
+            completions.add("relations");
 
         } else if (args.length == 2) {
             switch (args[0].toLowerCase()) {
@@ -37,6 +41,7 @@ public class CommandCompleter implements TabCompleter {
                     completions.add("addcorner");
                     completions.add("removecorner");
                     completions.add("update");
+                    completions.add("price");
                     break;
                 case "top":
                     completions.add("Playtime");
@@ -65,8 +70,17 @@ public class CommandCompleter implements TabCompleter {
                 case "update":
                     completions.add("corners");
                     completions.add("name");
+                    completions.add("color");
                     break;
                 case "build":
+                    for (ZoneType zoneType : zoneManager.zoneLimits.keySet()) {
+                        completions.add(zoneType.toString().toUpperCase());
+                    }
+                    break;
+                case "addcorner":
+                    for (ZoneType zoneType : zoneManager.zoneLimits.keySet()) {
+                        completions.add(zoneType.toString().toUpperCase());
+                    }
                     break;
             }
         }

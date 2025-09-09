@@ -7,6 +7,9 @@ import com.frammy.unitylauncher.chunkactivity.ChunkActivityHeatmapExporter;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.zones.ZoneInfo;
 import com.frammy.unitylauncher.zones.ZoneManager;
+import com.frammy.unitylauncher.zones.countryrelations.CountryRegistryJdbc;
+import com.frammy.unitylauncher.zones.countryrelations.DiplomacyService;
+import com.frammy.unitylauncher.zones.countryrelations.RelationStatus;
 import com.mysql.cj.util.StringUtils;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
@@ -22,9 +25,8 @@ import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
+import java.time.LocalDate;
+import java.util.*;
 import java.util.stream.Collectors;
 
 import static com.frammy.unitylauncher.UnityCommands.calculateSurfaceArea;
@@ -33,6 +35,8 @@ public class Unity implements CommandExecutor {
     //UnityLauncher unityLauncher = UnityLauncher.getInstance();
     UnityLauncher unityLauncher = JavaPlugin.getPlugin(UnityLauncher.class);
     public String shopID;
+    private DiplomacyService diplomacy;
+
     public static List<Vector3d> convertLocationListToVector3dList(List<Location> locations) {
         return locations.stream()
                 .map(loc -> new Vector3d(loc.getX(), loc.getY(), loc.getZ())) // Преобразуем каждую Location в Vector3d
@@ -56,6 +60,7 @@ public class Unity implements CommandExecutor {
     @Override
     public boolean onCommand(@NotNull CommandSender sender, @NotNull Command command, @NotNull String label, @NotNull String[] args) {
 
+        diplomacy = UnityLauncher.getInstance().diplomacy;
         if (sender instanceof Player) {
             Player p = (Player) sender;
             if (args.length == 0) {
@@ -97,7 +102,26 @@ public class Unity implements CommandExecutor {
 
                         return false;
                     case "fsnap":
-                        zoneManager.snapshotAndMaybeBillAllZones();
+                        unityLauncher.zoneActivityCalculations.snapshotAndMaybeBillAllZones();
+                        return false;
+                    case "blist":
+                        LocalDate today = LocalDate.now(zoneManager.zoneId);
+                        p.sendMessage(ChatColor.GOLD + "Биллинг зон (сегодня: " + today + "):");
+
+                        zoneManager.zoneList.values().stream()
+                                .sorted(Comparator.comparing(ZoneInfo::getNextBillingDate))
+                                .forEach(z -> {
+                                    LocalDate nextDate = z.getNextBillingDate();
+                                    double due = z.getDueSinceLastBill(today);
+                                    int days = z.getDueDaysCount(today);
+                                    p.sendMessage(
+                                            ChatColor.YELLOW + z.getName() +
+                                                    ChatColor.GRAY + " | владелец: " + ChatColor.WHITE + z.getOwner() +
+                                                    ChatColor.GRAY + " | след. платеж: " + ChatColor.AQUA + nextDate +
+                                                    ChatColor.GRAY + " | долг: " + ChatColor.GOLD + String.format(Locale.US,"%.2f", due) +
+                                                    ChatColor.GRAY + " (" + days + " дн.)"
+                                    );
+                                });
                         return false;
                     case "rcode":
                         UnityCommands.getInstance().rCode(sender);
@@ -346,7 +370,93 @@ public class Unity implements CommandExecutor {
                         break;
                 }
             }
+            if (args[0].equalsIgnoreCase("relations")) {
+
+                if (args.length == 2) {
+                    sender.sendMessage(ChatColor.YELLOW + "/ul relations get \"<ДругаяСтрана>\"");
+                    sender.sendMessage(ChatColor.YELLOW + "/ul relations set \"<ДругаяСтрана>\" <HOSTILE|NEUTRAL|FRIENDLY>");
+                    return true;
+                }
+
+                String sub = args[1].toLowerCase();
+                // Парсим <ДругаяСтрана> с поддержкой кавычек
+                ParsedArg parsed = parseQuotedArg(args, 2);
+                if (parsed.value == null) {
+                    sender.sendMessage(ChatColor.RED + "Укажи страну." + ChatColor.GRAY + "Если название содержит пробел, используй кавычки. Пример: \"Моя Страна\"");
+                    return true;
+                }
+                String otherCountry = parsed.value;
+                UnityLauncher.getInstance().countryRegistryJdbc.getCountryOfAsync(p.getUniqueId(), myCountry -> {
+                            if (myCountry == null || myCountry.isEmpty()) {
+                                sender.sendMessage(ChatColor.RED + "Ты не состоишь ни в одном государстве.");
+                                return;
+                            }
+
+                            // Здесь уже основной поток, можно вызывать дипломатию
+                            if (sub.equals("get")) {
+                                RelationStatus s = diplomacy.getRelation(myCountry, otherCountry);
+                                sender.sendMessage(ChatColor.GOLD + myCountry + ChatColor.GRAY + " ↔ " +
+                                        ChatColor.GOLD + otherCountry + ChatColor.GRAY + " = " + ChatColor.AQUA + s);
+                                return;
+                            }
+
+                            if (sub.equals("set")) {
+                                RelationStatus s = RelationStatus.from(args[parsed.nextIndex]);
+                                diplomacy.setRelation(myCountry, otherCountry, s);
+                                sender.sendMessage(ChatColor.GREEN + "Установлено: " +
+                                        myCountry + " ↔ " + otherCountry + " = " + s);
+                            }
+                        });
+                return true;
+            }
         }
         return false;
+    }
+    private static final class ParsedArg {
+        final String value;    // распарсенное значение
+        final int nextIndex;   // индекс следующего аргумента после распарсенного блока
+        ParsedArg(String value, int nextIndex) { this.value = value; this.nextIndex = nextIndex; }
+    }
+
+    /** Парсит один аргумент начиная с позиции fromIdx, поддерживая кавычки.
+     * Примеры:
+     *  args = [rel, set, "New, Republic", FRIENDLY] -> value="New, Republic", nextIndex=4
+     *  args = [rel, get, Spain] -> value="Spain", nextIndex=3
+     */
+    private static ParsedArg parseQuotedArg(String[] args, int fromIdx) {
+        if (fromIdx >= args.length) return new ParsedArg(null, fromIdx);
+        String first = args[fromIdx];
+        if (first.startsWith("\"")) {
+            StringBuilder sb = new StringBuilder();
+            String cur = first;
+            boolean closed = false;
+            // если закрывающая кавычка в том же аргументе
+            if (first.endsWith("\"") && first.length() > 1) {
+                sb.append(first, 1, first.length() - 1);
+                closed = true;
+                return new ParsedArg(sb.toString(), fromIdx + 1);
+            }
+            // иначе — собираем до ближайшей кавычки
+            sb.append(first.substring(1));
+            int i = fromIdx + 1;
+            while (i < args.length) {
+                cur = args[i];
+                if (cur.endsWith("\"")) {
+                    if (sb.length() > 0) sb.append(' ');
+                    sb.append(cur, 0, cur.length() - 1);
+                    closed = true;
+                    i++;
+                    break;
+                } else {
+                    if (sb.length() > 0) sb.append(' ');
+                    sb.append(cur);
+                    i++;
+                }
+            }
+            if (!closed) return new ParsedArg(null, i);
+            return new ParsedArg(sb.toString(), i);
+        } else {
+            return new ParsedArg(first, fromIdx + 1);
+        }
     }
 }
