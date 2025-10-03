@@ -6,8 +6,11 @@ authors: [ frammy, NimsTail ]
 description: Connects with our Unity launcher
 prefix: Unity Launcher
 website: farlands.me
-depend: [BlueMap]
+depend: [BlueMap, LuckPerms]
 commands:
+  checkupgrades:
+    description: Проверка апгрейдов
+    usage: /checkupgrades
   unityLauncher:
     aliases: ul
     description: Для связи с нашим лаунчером

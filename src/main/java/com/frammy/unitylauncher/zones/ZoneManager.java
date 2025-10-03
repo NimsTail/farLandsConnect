@@ -211,13 +211,23 @@ public class ZoneManager {
         UUID playerId = player.getUniqueId();
         zonePoints.putIfAbsent(playerId, new ArrayList<>());
         List<Location> points = zonePoints.get(playerId);
+
         ZoneTypeData zoneData = zoneLimits.get(zoneType);
         double maxArea = zoneData.getAreaLimit();
 
-        // Проверка на пересечение точки с существующим и зонами
-        if (isPointInOtherZone(player.getLocation(), player.getName(), zoneType, null)) {
-            if (!zoneData.getAllowOverlap()) {
-                player.sendMessage(ChatColor.RED + "Нельзя добавить точку, она пересекается с уже существующей зоной!");
+        // Проверка на пересечение с другими зонами
+        ZoneInfo overlapping = findOverlappingZone(player.getLocation(), player.getName(), zoneType, null);
+        if (overlapping != null) {
+            // Данные другой зоны по её типу
+            ZoneTypeData otherZoneData = zoneLimits.get(overlapping.zoneType);
+
+            boolean currentAllows = (zoneData != null && zoneData.getAllowOverlap());
+            boolean otherAllows = (otherZoneData != null && otherZoneData.getAllowOverlap());
+
+            // Если хотя бы одна зона разрешает overlap — пропускаем, иначе блокируем
+            if (!(currentAllows || otherAllows)) {
+                player.sendMessage(ChatColor.RED + "Нельзя добавить точку: пересекается с зоной "
+                        + overlapping.zoneType + " (ID: " + overlapping.zoneID + "), overlap запрещён!");
                 return;
             }
         }
@@ -548,22 +558,29 @@ public class ZoneManager {
     }
     // Метод для проверки, находится ли точка (не обновляемой зоны) внутри какой-либо другой зоны
     // currentZoneID может быть null, если проверка проводится для новой зоны
-    private boolean isPointInOtherZone(Location loc, String ownerName, ZoneType currentZoneType, String currentZoneID) {
+    // 1) Хелпер: вернуть зону, в которую попадает точка (или null)
+    private ZoneInfo findOverlappingZone(Location loc, String ownerName, ZoneType currentZoneType, String currentZoneID) {
         for (ZoneInfo zone : zoneList.values()) {
             // Пропускаем текущую зону (по типу и ID)
-            if (zone.zoneType == currentZoneType && zone.zoneID.equals(currentZoneID)) continue;
+            if (zone.zoneType == currentZoneType && Objects.equals(zone.zoneID, currentZoneID)) continue;
 
-            // Пропускаем зону, если она принадлежит текущему игроку и уже была проверена ранее
-            if (zone.zoneOwner.equals(ownerName) && zone.zoneType == currentZoneType) continue;
+            // Пропускаем зону, если она принадлежит текущему игроку и уже проверена ранее
+            if (Objects.equals(zone.zoneOwner, ownerName) && zone.zoneType == currentZoneType) continue;
 
             if (zone.zoneCorners == null || zone.zoneCorners.size() < 3) continue;
+            if (!Objects.equals(zone.zoneCorners.get(0).getWorld(), loc.getWorld())) continue;
 
-            if (!zone.zoneCorners.get(0).getWorld().equals(loc.getWorld())) continue;
-
-            // проверка попадания в зону
-            if (isPlayerInZone(loc, zone.zoneCorners)) return true;
+            // Проверка попадания в зону
+            if (isPlayerInZone(loc, zone.zoneCorners)) {
+                return zone; // нашли пересекаемую зону
+            }
         }
-        return false;
+        return null;
+    }
+
+    // 2) Сохранение старого API: теперь строится на хелпере
+    private boolean isPointInOtherZone(Location loc, String ownerName, ZoneType currentZoneType, String currentZoneID) {
+        return findOverlappingZone(loc, ownerName, currentZoneType, currentZoneID) != null;
     }
 
     private boolean isPlayerInZone(Location loc, List<Location> zoneCorners) {
@@ -655,6 +672,33 @@ public class ZoneManager {
 
         playerLastZone.put(playerId, newZone);
         playerZoneStatus.put(playerId, newZone != null);
+    }
+
+    // ADD to ZoneManager
+    public ZoneInfo getZoneAt(Location loc) {
+        World world = loc.getWorld();
+        if (world == null) return null;
+
+        Map<Integer, ZoneInfo> zonesByIndex = new TreeMap<>(Collections.reverseOrder());
+        for (ZoneInfo zone : zoneList.values()) {
+            if (zone.getCorners() == null || zone.getCorners().size() < 3) continue;
+            if (!zone.getCorners().get(0).getWorld().equals(world)) continue;
+
+            if (isPlayerInZone(loc, zone.getCorners())) {
+                ZoneTypeData ztd = zoneLimits.get(zone.getType());
+                if (ztd != null) zonesByIndex.put(ztd.getIndex(), zone);
+            }
+        }
+        return zonesByIndex.isEmpty() ? null : zonesByIndex.values().iterator().next();
+    }
+
+    public boolean isInsideAnyZone(Player p) {
+        return getZoneAt(p.getLocation()) != null;
+    }
+
+    public boolean isInsideZoneType(Player p, ZoneType type) {
+        ZoneInfo zi = getZoneAt(p.getLocation());
+        return zi != null && zi.getType() == type;
     }
 
     // Утилита для читаемого отображения локации

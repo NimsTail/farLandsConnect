@@ -19,6 +19,10 @@ public class ZoneInfo {
     public String markerID;
     public List<Location> zoneCorners;
     public org.bukkit.Color fillColor;
+    private String ownerCountry;
+
+    public String getOwnerCountry() { return ownerCountry; }
+    public void setOwnerCountry(String ownerCountry) { this.ownerCountry = ownerCountry; }
 
     // === История и биллинг ===
     public static class DailyEntry {

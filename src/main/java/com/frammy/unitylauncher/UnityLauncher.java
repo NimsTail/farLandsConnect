@@ -4,11 +4,14 @@ import com.frammy.unitylauncher.chunkactivity.ChunkActivityHeatmapExporter;
 import com.frammy.unitylauncher.signs.SignCategory;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.signs.SignVariables;
+import com.frammy.unitylauncher.upgrades.UpgradeCondition;
+import com.frammy.unitylauncher.upgrades.industry.TntQuarryUpgrade;
 import com.frammy.unitylauncher.zones.ZoneActivityCalculations;
 import com.frammy.unitylauncher.zones.ZoneManager;
 import com.frammy.unitylauncher.zones.countryrelations.CountryRegistryJdbc;
 import com.frammy.unitylauncher.zones.countryrelations.CountryRelationshipDao;
 import com.frammy.unitylauncher.zones.countryrelations.DiplomacyService;
+import com.frammy.unitylauncher.upgrades.MainUpgrades;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import net.md_5.bungee.api.chat.ClickEvent;
 import net.md_5.bungee.api.chat.HoverEvent;
@@ -27,7 +30,6 @@ import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.Nullable;
 
-import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -41,7 +43,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     private static UnityLauncher instance;
     private final Set<Player> awaitingCorrectCommand = new HashSet<>();
     private FileConfiguration shopConfig;
-    public ArrayList<String> commandCategories= new ArrayList<String>();
+    public ArrayList<String> commandCategories= new ArrayList<>();
     public MoneyManager moneyManager;
     private ZoneManager zoneManager;
     public ZoneActivityCalculations zoneActivityCalculations;
@@ -52,6 +54,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     public DiplomacyService diplomacy;
     public CountryRegistryJdbc countryRegistryJdbc;
     public Set<Player> getAwaitingCorrectCommand() {return awaitingCorrectCommand;}
+    private MainUpgrades mainUpgrades;
 
     @Override
     public void onEnable() {
@@ -76,7 +79,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         getServer().getPluginManager().registerEvents(signManager, this);
         HelpCommandManager helpManager = new HelpCommandManager();
         Objects.requireNonNull(getCommand("unityLauncher")).setExecutor(new Unity(helpManager, webSocketManager, tracker, zoneManager));
-        this.getCommand("unityLauncher").setTabCompleter(new CommandCompleter());
+        Objects.requireNonNull(this.getCommand("unityLauncher")).setTabCompleter(new CommandCompleter());
 
 
         commandCategories.add("Авторизация");
@@ -124,13 +127,45 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         }
         instance = this;
 
-        Bukkit.getScheduler().runTaskLater(this, () -> {
-            ChunkActivityHeatmapExporter.exportHeatmapToBlueMapLayer(
-                    tracker.getChunkStatsMap(),
-                    "world",
-                    tracker.getWeights()
-            );
-        }, 40L);
+        Bukkit.getScheduler().runTaskLater(this, () -> ChunkActivityHeatmapExporter.exportHeatmapToBlueMapLayer(
+                tracker.getChunkStatsMap(),
+                "world",
+                tracker.getWeights()
+        ), 40L);
+
+        // Upgrades
+        this.mainUpgrades = new MainUpgrades();
+        getServer().getPluginManager().registerEvents(new TntQuarryUpgrade(), this);
+        getServer().getPluginManager().registerEvents(
+                new com.frammy.unitylauncher.upgrades.redstone.RedstoneProtectionListener(), this);
+        getServer().getPluginManager().registerEvents(
+                new com.frammy.unitylauncher.upgrades.redstone.RedstoneProtectionListener(),
+                this
+        );
+        getServer().getPluginManager().registerEvents(
+                new com.frammy.unitylauncher.upgrades.industry.SmartHopperListener(), this
+        );
+        getServer().getPluginManager().registerEvents(
+                new com.frammy.unitylauncher.upgrades.industry.FastMinecartIOListener(), this
+        );
+        getServer().getPluginManager().registerEvents(
+                new com.frammy.unitylauncher.upgrades.industry.ItemBrandingListener(), this
+        );
+        getServer().getPluginManager().registerEvents(
+                new com.frammy.unitylauncher.upgrades.industry.FurnaceOreBoostListener(),
+                this
+        );
+        Bukkit.getScheduler().runTaskTimer(
+                this,
+                () -> Bukkit.getOnlinePlayers().forEach(UpgradeCondition::applyZoneEffects),
+                20L * 5,
+                20L * 5
+        );
+        UpgradeCondition.initTestScheduler();
+        Objects.requireNonNull(getCommand("checkupgrades")).setExecutor(new UpgradeCondition());
+
+
+
     }
     public ZoneManager getZoneManager() {
         return zoneManager;
@@ -239,6 +274,8 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     @EventHandler
     public void onJoin(PlayerJoinEvent e){
         webSocketManager.connectPlayer(e.getPlayer().getName());
+        mainUpgrades.applyUpgradesFor(e.getPlayer());
+
       //  UnityCommands.getInstance().getAllData(e.getPlayer());
     }
 
