@@ -1,4 +1,5 @@
 package com.frammy.unitylauncher;
+
 import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
 import com.frammy.unitylauncher.chunkactivity.ChunkActivityHeatmapExporter;
 import com.frammy.unitylauncher.signs.SignCategory;
@@ -27,9 +28,12 @@ import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.Nullable;
 
-import java.sql.Connection;
-import java.sql.DriverManager;
+import java.io.InputStream;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.sql.*;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class UnityLauncher extends JavaPlugin implements Listener {
     private static UnityLauncher instance;
@@ -45,6 +49,10 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     public DiplomacyService diplomacy;
     public CountryRegistryJdbc countryRegistryJdbc;
     public Set<Player> getAwaitingCorrectCommand() {return awaitingCorrectCommand;}
+
+    // ★ добавлено: кэш для db.properties и разовая инициализация драйвера
+    private static volatile Properties DB_PROPS;                 // кэш пропертей
+    private static final AtomicBoolean DRIVER_LOADED = new AtomicBoolean(false);
 
     @Override
     public void onEnable() {
@@ -73,7 +81,6 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         HelpCommandManager helpManager = new HelpCommandManager();
         Objects.requireNonNull(getCommand("unityLauncher")).setExecutor(new Unity(helpManager, webSocketManager, tracker, zoneManager));
         Objects.requireNonNull(this.getCommand("unityLauncher")).setTabCompleter(new CommandCompleter());
-
 
         commandCategories.add("Авторизация");
         commandCategories.add("Финансы");
@@ -133,7 +140,27 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         UpgradesListener.registerAll(this);
         Objects.requireNonNull(getCommand("brand")).setExecutor(new com.frammy.unitylauncher.upgrades.BrandCommand());
 
+        // ★ добавлено: асинхронный пинг БД после старта (чтобы поймать проблемы сразу)
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            try (Connection c = DBConnect()) {
+                if (c == null) {
+                    Bukkit.getLogger().severe("[UnityLauncher] DB ping: нет подключения (DBConnect() вернул null)");
+                } else {
+                    try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery("SELECT 1")) {
+                        if (rs.next()) {
+                            Bukkit.getLogger().info("[UnityLauncher] DB ping: OK");
+                        } else {
+                            Bukkit.getLogger().warning("[UnityLauncher] DB ping: нет результата SELECT 1");
+                        }
+                    }
+                }
+            } catch (Throwable t) {
+                Bukkit.getLogger().severe("[UnityLauncher] DB ping: ошибка — " + t.getMessage());
+                logDbException(t);
+            }
+        });
     }
+
     public ZoneManager getZoneManager() {
         return zoneManager;
     }
@@ -244,80 +271,178 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             event.setCancelled(true); // Блокируем сообщение
         }
     }
+
     public int getMaxBaseLength(Collection<String> values) {
         return values.stream().mapToInt(String::length).max().orElse(1);
     }
+
     @EventHandler
     public void onJoin(PlayerJoinEvent e){
         webSocketManager.connectPlayer(e.getPlayer().getName());
     }
 
+    /* ===================== БАЗА ДАННЫХ ===================== */
+
+    // ★ изменено: DBConnect с кэшем пропертей и разовой загрузкой драйвера
     @Nullable
     public static Connection DBConnect() {
         try {
-            Class.forName("com.mysql.cj.jdbc.Driver");
-            String url = "jdbc:mysql://mysql.apexhosting.gdn:3306/apexMC1473088";
-            String username = "apexMC1473088";
-            String password = "H#pXkkgG8SbaexeB6azGXMlm";
-            return DriverManager.getConnection(url, username, password);
-        } catch (Exception e) {
+            Properties props = loadDbProps(); // может бросить исключение, логируем ниже
+            String url = props.getProperty("db.url");
+            String user = props.getProperty("db.user");
+            String pass = props.getProperty("db.password");
+
+            if (url == null || user == null || pass == null) {
+                Bukkit.getLogger().severe("[UnityLauncher] db.properties: отсутствуют ключи db.url/db.user/db.password");
+                onError("DBError", null);
+                return null;
+            }
+
+            if (DRIVER_LOADED.compareAndSet(false, true)) {
+                Class.forName("com.mysql.cj.jdbc.Driver");
+            }
+
+            return DriverManager.getConnection(url, user, pass);
+
+        } catch (Throwable t) {
+            logDbException(t);
             onError("DBError", null);
             return null;
         }
     }
 
-//    public static void resetDayDealCode() {
-//        Connection con = DBConnect();
-//        if (con != null) {
-//            try {
-//                String query = "UPDATE Users SET DayDealCode=0 WHERE 1;";
-//                Statement st = con.createStatement();
-//                st.executeUpdate(query);
-//            } catch (Exception ex) {
-//                onError("NotInBase", ex, null);
+    // ★ добавлено: кэш загрузки db.properties из ресурсов
+    private static Properties loadDbProps() throws Exception {
+        Properties cached = DB_PROPS;
+        if (cached != null) return cached;
+
+        Properties props = new Properties();
+        try (InputStream input = UnityLauncher.class.getClassLoader().getResourceAsStream("db.properties")) {
+            if (input == null) {
+                Bukkit.getLogger().severe("[UnityLauncher] db.properties not found in resources!");
+                throw new IllegalStateException("db.properties not found");
+            }
+            props.load(input);
+        }
+        DB_PROPS = props;
+        return props;
+    }
+
+    private static void logDbException(Throwable t) {
+        Bukkit.getLogger().severe("[UnityLauncher] Ошибка при подключении к БД: " + t);
+        if (t instanceof SQLException) {
+            SQLException se = (SQLException) t;
+            while (se != null) {
+                Bukkit.getLogger().severe("  SQLState=" + se.getSQLState() + " ErrorCode=" + se.getErrorCode()
+                        + " Message=" + se.getMessage());
+                se = se.getNextException();
+            }
+        }
+        StringWriter sw = new StringWriter();
+        t.printStackTrace(new PrintWriter(sw));
+        Bukkit.getLogger().severe(sw.toString());
+    }
+
+    // ★ добавлено: безопасные асинхронные версии ранее закомментированных методов
+
+//    /** Асинхронно сбрасывает DayDealCode всем пользователям. */
+//    public static void resetDayDealCodeAsync() {
+//        Bukkit.getScheduler().runTaskAsynchronously(getInstance(), () -> {
+//            String sql = "UPDATE Users SET DayDealCode = 0";
+//            try (Connection con = DBConnect()) {
+//                if (con == null) {
+//                    Bukkit.getLogger().warning("[UnityLauncher] resetDayDealCodeAsync: DBConnect() == null");
+//                    return;
+//                }
+//                try (PreparedStatement ps = con.prepareStatement(sql)) {
+//                    int updated = ps.executeUpdate();
+//                    Bukkit.getLogger().info("[UnityLauncher] resetDayDealCodeAsync: updated rows = " + updated);
+//                }
+//            } catch (Throwable t) {
+//                Bukkit.getLogger().severe("[UnityLauncher] resetDayDealCodeAsync failed: " + t.getMessage());
+//                logDbException(t);
 //            }
-//        }
+//        });
 //    }
 //
-//    public static void updatePlaytime(Map<String, Long> playTime) {
-//        Connection con = DBConnect();
-//        if (con != null) {
-//            playTime.forEach((key, value) -> {
-//                try {
-//                    String query2 = "SELECT Playtime FROM Users WHERE Name='" + key + "';";
-//                    Statement st2 = con.createStatement();
-//                    ResultSet rs2 = st2.executeQuery(query2);
-//                    long sqlTime = 0;
-//                    if (rs2.next()) {
-//                        sqlTime = rs2.getInt("Playtime");
-//                    } else {
-//                        Bukkit.getConsoleSender().sendMessage("No player " + key + " in database");
-//                    }
-//                    sqlTime += value;
-//                    String query3 = "UPDATE Users SET Playtime=" + sqlTime + " WHERE Name='" + key + "';";
-//                    Statement st3 = con.createStatement();
-//                    st3.executeUpdate(query3);
-//                } catch (Exception e) {
-//                    onError("", e, null);
+//    /**
+//     * Асинхронно обновляет Playtime накопительно.
+//     * playTime: имя игрока -> добавляемые секунды/тиков (в твоих единицах).
+//     */
+//    public static void updatePlaytimeAsync(Map<String, Long> playTime) {
+//        if (playTime == null || playTime.isEmpty()) return;
+//
+//        Bukkit.getScheduler().runTaskAsynchronously(getInstance(), () -> {
+//            String selectSql = "SELECT Playtime FROM Users WHERE Name = ? LIMIT 1";
+//            String updateSql = "UPDATE Users SET Playtime = ? WHERE Name = ?";
+//
+//            try (Connection con = DBConnect()) {
+//                if (con == null) {
+//                    Bukkit.getLogger().warning("[UnityLauncher] updatePlaytimeAsync: DBConnect() == null");
+//                    return;
 //                }
-//            });
-//        }
+//                con.setAutoCommit(false);
+//
+//                try (PreparedStatement psSel = con.prepareStatement(selectSql);
+//                     PreparedStatement psUpd = con.prepareStatement(updateSql)) {
+//
+//                    for (Map.Entry<String, Long> e : playTime.entrySet()) {
+//                        String name = e.getKey();
+//                        long delta = e.getValue() == null ? 0L : e.getValue();
+//
+//                        long current = 0L;
+//                        psSel.clearParameters();
+//                        psSel.setString(1, name);
+//                        try (ResultSet rs = psSel.executeQuery()) {
+//                            if (rs.next()) current = rs.getLong("Playtime");
+//                        }
+//
+//                        long newValue = current + Math.max(0L, delta);
+//                        psUpd.clearParameters();
+//                        psUpd.setLong(1, newValue);
+//                        psUpd.setString(2, name);
+//                        psUpd.addBatch();
+//                    }
+//
+//                    psUpd.executeBatch();
+//                    con.commit();
+//                } catch (Throwable t) {
+//                    try { con.rollback(); } catch (Throwable ignore) {}
+//                    throw t;
+//                } finally {
+//                    try { con.setAutoCommit(true); } catch (Throwable ignore) {}
+//                }
+//            } catch (Throwable t) {
+//                Bukkit.getLogger().severe("[UnityLauncher] updatePlaytimeAsync failed: " + t.getMessage());
+//                logDbException(t);
+//            }
+//        });
 //    }
 
-    public static void onError(String reason, Player p) {
+    /* ===================== Ошибки/уведомления ===================== */
+
+    public static void onError(String reason, @Nullable Player p) {
+        String prefix = ChatColor.RED + "[UnityLauncher] ";
+
         switch (reason) {
             case "NotInBase":
-                if (p != null) p.sendMessage(ChatColor.RED + "Вас не существует в базе!");
+                if (p != null) p.sendMessage(prefix + "Вас не существует в базе!");
+                else Bukkit.getLogger().warning("[UnityLauncher] Игрок не найден в базе!");
                 break;
+
             case "SignErr":
-                if (p != null) p.sendMessage(ChatColor.RED + "Ошибка при оплате по табличке!");
+                if (p != null) p.sendMessage(prefix + "Ошибка при оплате по табличке!");
+                else Bukkit.getLogger().warning("[UnityLauncher] Ошибка при оплате по табличке!");
                 break;
+
             case "DBError":
-                if (p != null) p.sendMessage(ChatColor.RED + "Ошибка при соединении с базой!");
+                if (p != null) p.sendMessage(prefix + "Ошибка при соединении с базой!");
+                Bukkit.getLogger().severe("[UnityLauncher] Ошибка соединения с базой данных!");
                 break;
+
             default:
+                Bukkit.getLogger().warning("[UnityLauncher] Неизвестная ошибка: " + reason);
                 break;
         }
     }
-
 }

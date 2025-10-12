@@ -81,11 +81,10 @@
             <version>1.19.0</version>
         </dependency>
 
-        <!-- Paper API 1.21.x (нужен для AdvancementFrameType) -->
         <dependency>
             <groupId>io.papermc.paper</groupId>
             <artifactId>paper-api</artifactId>
-            <version>1.21.1-R0.1-SNAPSHOT</version>
+            <version>1.21.10-R0.1-SNAPSHOT</version>
             <scope>provided</scope>
         </dependency>
 
@@ -99,7 +98,7 @@
         <dependency>
             <groupId>com.mysql</groupId>
             <artifactId>mysql-connector-j</artifactId>
-            <version>8.0.33</version>
+            <version>9.4.0</version>
         </dependency>
 
         <dependency>
@@ -118,7 +117,7 @@
         <dependency>
             <groupId>com.github.MilkBowl</groupId>
             <artifactId>VaultAPI</artifactId>
-            <version>1.7</version>
+            <version>1.7.1</version>
             <scope>provided</scope>
         </dependency>
 
@@ -145,7 +144,23 @@
                     <release>21</release>
                 </configuration>
             </plugin>
-
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>properties-maven-plugin</artifactId>
+                <version>1.2.1</version>
+                <executions>
+                    <execution>
+                        <id>load-local-secrets</id>
+                        <phase>initialize</phase>
+                        <goals><goal>read-project-properties</goal></goals>
+                        <configuration>
+                            <files>
+                                <file>secrets.properties</file>
+                            </files>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
@@ -169,4 +184,13 @@
             </resource>
         </resources>
     </build>
+
+    <profiles>
+        <profile>
+            <id>local-secrets</id>
+            <activation>
+                <file><exists>secrets.properties</exists></file>
+            </activation>
+        </profile>
+    </profiles>
 </project>
