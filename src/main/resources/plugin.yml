@@ -5,12 +5,17 @@ api-version: 1.20
 authors: [ frammy, NimsTail ]
 description: Connects with our Unity launcher
 prefix: Unity Launcher
-website: farlands.me
+website: farlands.in
 depend: [BlueMap, LuckPerms, UltimateAdvancementAPI]
 commands:
-  checkupgrades:
-    description: Проверка апгрейдов
-    usage: /checkupgrades
+  brand:
+    usage: "/brand [set <текст> | clear | info]"
+    description: "Брендинг своих вещей"
+    permission: "unity.brand"
   unityLauncher:
     aliases: ul
     description: Для связи с нашим лаунчером
+
+permissions:
+  unity.brand:
+    default: op

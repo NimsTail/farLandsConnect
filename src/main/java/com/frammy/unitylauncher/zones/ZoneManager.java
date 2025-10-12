@@ -1,9 +1,6 @@
 package com.frammy.unitylauncher.zones;
-import com.frammy.unitylauncher.MoneyManager;
 import com.frammy.unitylauncher.UnityLauncher;
 import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
-import com.frammy.unitylauncher.chunkactivity.ActivityWeights;
-import com.frammy.unitylauncher.chunkactivity.ChunkStats;
 import com.frammy.unitylauncher.signs.ItemData;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.BlueMapIntegration;
@@ -22,7 +19,6 @@ import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.block.Sign;
-import org.bukkit.block.Block;
 
 import java.io.File;
 import java.io.IOException;
@@ -37,6 +33,7 @@ import de.bluecolored.bluemap.api.markers.*;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
+import org.jetbrains.annotations.NotNull;
 
 import static com.frammy.unitylauncher.UnityCommands.calculateSurfaceArea;
 
@@ -45,7 +42,6 @@ public class ZoneManager {
     public SignManager signManager;
     public BlueMapIntegration blueMapIntegration;
     public ActivityTracker activityTracker;
-    //private MoneyManager moneyManager;
     private final File zonesFile;
     private YamlConfiguration zonesConfig;
     public final Map<UUID, List<Location>> zonePoints = new HashMap<>();
@@ -78,6 +74,31 @@ public class ZoneManager {
         put(ZoneType.REGION, new ZoneTypeData("Регион", 10000.0, 1, 300.0, true, 0.85, 0, "unityLauncher.createZone.region"));
         put(ZoneType.COUNTRY, new ZoneTypeData("Государство", 30000.0, 0, 100.0, true, 0.7, 0, "unityLauncher.createZone.country"));
     }};
+
+    public int getZoneCount() { return zoneList.size(); }
+    public Collection<ZoneInfo> getZones() { return zoneList.values(); }
+    public Map<ZoneType, Long> getZoneTypeCounts() {
+        return zoneList.values().stream().collect(Collectors.groupingBy(ZoneInfo::getType, Collectors.counting()));
+    }
+    public String getZonesPreview() {
+        final int N = 5;
+        StringBuilder sb = new StringBuilder("Zones[");
+        int i = 0;
+        for (ZoneInfo z : zoneList.values()) {
+            if (i++ >= N) { sb.append("..."); break; }
+            String world = (z.getCorners().isEmpty() || z.getCorners().getFirst().getWorld() == null)
+                    ? "?" : z.getCorners().getFirst().getWorld().getName();
+            sb.append("id=").append(z.getID())
+                    .append(",type=").append(z.getType())
+                    .append(",name=").append(z.getName())
+                    .append(",owner=").append(z.getOwner())
+                    .append(",world=").append(world)
+                    .append("|");
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+
 
     // Карта для хранения последней посещённой зоны игрока
     private final Map<UUID, ZoneInfo> playerLastZone = new HashMap<>();
@@ -221,7 +242,7 @@ public class ZoneManager {
             // Данные другой зоны по её типу
             ZoneTypeData otherZoneData = zoneLimits.get(overlapping.zoneType);
 
-            boolean currentAllows = (zoneData != null && zoneData.getAllowOverlap());
+            boolean currentAllows = zoneData.getAllowOverlap();
             boolean otherAllows = (otherZoneData != null && otherZoneData.getAllowOverlap());
 
             // Если хотя бы одна зона разрешает overlap — пропускаем, иначе блокируем
@@ -238,11 +259,12 @@ public class ZoneManager {
         }
 
         // Запрет смешивать миры в одной зоне
-        if (points != null && !points.isEmpty() && !points.get(0).getWorld().equals(player.getWorld())) {
+        if (points != null && !points.isEmpty() && !points.getFirst().getWorld().equals(player.getWorld())) {
             player.sendMessage(ChatColor.RED + "Нельзя добавлять точки зоны из разных миров.");
             return;
         }
         // Временное добавление точки для проверки площади
+        assert points != null;
         List<Location> tempPoints = new ArrayList<>(points);
         tempPoints.add(player.getLocation().clone());
         double newArea = calculateSurfaceArea(tempPoints);
@@ -276,7 +298,7 @@ public class ZoneManager {
             return;
         }
 
-        points.remove(points.size() - 1);
+        points.removeLast();
         player.sendMessage(ChatColor.GRAY + "Удалена последняя точка. Текущее количество точек: " + (points.size()));
     }
 
@@ -291,12 +313,12 @@ public class ZoneManager {
         // Проверяем каждую точку новой зоны на пересечение с уже существующими
         for (Location loc : points) {
             if (isPointInOtherZone(loc, player.getName(), zoneType, null)) {
-                player.sendMessage(ChatColor.RED + "Нельзя создать зону, точка " + loc.toVector().toString() + " пересекается с существующей зоной!");
+                player.sendMessage(ChatColor.RED + "Нельзя создать зону, точка " + loc.toVector() + " пересекается с существующей зоной!");
                 return;
             }
         }
 
-        World world0 = points.get(0).getWorld();
+        World world0 = points.getFirst().getWorld();
         boolean sameWorld = points.stream().allMatch(l -> l.getWorld().equals(world0));
         if (!sameWorld) {
             player.sendMessage(ChatColor.RED + "Все точки зоны должны быть в одном мире.");
@@ -423,7 +445,7 @@ public class ZoneManager {
 
                 } else if (newValue.equals("-")) {
                     if (zoneInfo.zoneCorners.size() > 3) {
-                        zoneInfo.zoneCorners.remove(zoneInfo.zoneCorners.size() - 1);
+                        zoneInfo.zoneCorners.removeLast();
                         player.sendMessage(ChatColor.GRAY + "Удалена последняя точка.");
                     } else {
                         player.sendMessage(ChatColor.RED + "В зоне должно быть минимум 3 точки!");
@@ -474,8 +496,8 @@ public class ZoneManager {
             case "color":
                 List<String> rgb = List.of(newValue.split(","));
                 if (rgb.size() != 3) return;
-                Integer r,g,b;
-                org.bukkit.Color newFillColor = null;
+                int r,g,b;
+                org.bukkit.Color newFillColor;
                 try {
                     r = Integer.parseInt(rgb.get(0));
                     g = Integer.parseInt(rgb.get(1));
@@ -495,7 +517,6 @@ public class ZoneManager {
 
             default:
                 player.sendMessage(ChatColor.RED + "Некорректный параметр обновления!");
-                return;
         }
 
         //saveZonesConfig();
@@ -544,7 +565,7 @@ public class ZoneManager {
         zoneList.remove(zoneInfo.markerID);
         blueMapIntegration.removeBlueMapMarker(
                 zoneInfo.markerID,
-                zoneInfo.zoneCorners.get(0).getWorld().getName(),
+                zoneInfo.zoneCorners.getFirst().getWorld().getName(),
                 "zones_" + zoneInfo.zoneType
         );
 
@@ -568,7 +589,7 @@ public class ZoneManager {
             if (Objects.equals(zone.zoneOwner, ownerName) && zone.zoneType == currentZoneType) continue;
 
             if (zone.zoneCorners == null || zone.zoneCorners.size() < 3) continue;
-            if (!Objects.equals(zone.zoneCorners.get(0).getWorld(), loc.getWorld())) continue;
+            if (!Objects.equals(zone.zoneCorners.getFirst().getWorld(), loc.getWorld())) continue;
 
             // Проверка попадания в зону
             if (isPlayerInZone(loc, zone.zoneCorners)) {
@@ -585,7 +606,7 @@ public class ZoneManager {
 
     private boolean isPlayerInZone(Location loc, List<Location> zoneCorners) {
         if (zoneCorners == null || zoneCorners.size() < 3) return false;
-        if (!zoneCorners.get(0).getWorld().equals(loc.getWorld())) return false;
+        if (!zoneCorners.getFirst().getWorld().equals(loc.getWorld())) return false;
 
         double minY = -64;
         double maxY = 255;
@@ -595,6 +616,11 @@ public class ZoneManager {
         }
 
         // Алгоритм "Ray-Casting" для проверки попадания в многоугольник (по XZ)
+
+        return isInside(loc, zoneCorners);
+    }
+
+    private static boolean isInside(Location loc, List<Location> zoneCorners) {
         boolean inside = false;
         int j = zoneCorners.size() - 1;
 
@@ -607,7 +633,6 @@ public class ZoneManager {
             if (intersect) inside = !inside;
             j = i;
         }
-
         return inside;
     }
 
@@ -622,7 +647,7 @@ public class ZoneManager {
 
         for (ZoneInfo zone : zoneList.values()) {
             if (zone.getCorners() == null || zone.getCorners().size() < 3) continue;
-            if (!zone.getCorners().get(0).getWorld().equals(playerWorld)) continue;
+            if (!zone.getCorners().getFirst().getWorld().equals(playerWorld)) continue;
 
             if (isPlayerInZone(playerLoc, zone.getCorners())) {
                 ZoneTypeData ztd = zoneLimits.get(zone.getType());
@@ -641,7 +666,7 @@ public class ZoneManager {
         }
 
         // Переходы
-        if (prevZone == null && newZone != null) {
+        if (prevZone == null) {
             // Вход в зону
             ZoneTypeData ztd = zoneLimits.get(newZone.zoneType);
             if (ztd != null) {
@@ -651,7 +676,7 @@ public class ZoneManager {
                                 ztd.getDisplayName() + " \"" + newZone.zoneName + "\"")
                 );
             }
-        } else if (prevZone != null && newZone == null) {
+        } else if (newZone == null) {
             // Выход из зоны
             player.spigot().sendMessage(
                     ChatMessageType.ACTION_BAR,
@@ -682,7 +707,7 @@ public class ZoneManager {
         Map<Integer, ZoneInfo> zonesByIndex = new TreeMap<>(Collections.reverseOrder());
         for (ZoneInfo zone : zoneList.values()) {
             if (zone.getCorners() == null || zone.getCorners().size() < 3) continue;
-            if (!zone.getCorners().get(0).getWorld().equals(world)) continue;
+            if (!zone.getCorners().getFirst().getWorld().equals(world)) continue;
 
             if (isPlayerInZone(loc, zone.getCorners())) {
                 ZoneTypeData ztd = zoneLimits.get(zone.getType());
@@ -710,7 +735,7 @@ public class ZoneManager {
         if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
 
         BlueMapAPI.getInstance().ifPresent(blueMapAPI -> {
-            Location location = locations.get(0);
+            Location location = locations.getFirst();
             blueMapAPI.getMap(location.getWorld().getName()).ifPresent(map -> {
                 String markerSetID = "zones_" + zoneType.name().toLowerCase();
                 MarkerSet markerSet = map.getMarkerSets().computeIfAbsent(markerSetID, k -> new MarkerSet(markerSetID));
@@ -734,7 +759,7 @@ public class ZoneManager {
 
         BlueMapAPI.getInstance().ifPresent(blueMapAPI -> {
             if (locations == null || locations.isEmpty()) return;
-            Location location = locations.get(0);
+            Location location = locations.getFirst();
 
             blueMapAPI.getMap(location.getWorld().getName()).ifPresent(map -> {
                 String markerSetID = "zones_" + zoneType.name().toLowerCase();
@@ -742,9 +767,7 @@ public class ZoneManager {
                 if (markerSet == null) return;
 
                 Marker existing = markerSet.getMarkers().get(markerID);
-                if (!(existing instanceof ExtrudeMarker)) return;
-
-                ExtrudeMarker marker = (ExtrudeMarker) existing;
+                if (!(existing instanceof ExtrudeMarker marker)) return;
 
                 List<Vector2d> basePoints = locations.stream()
                         .map(loc -> new Vector2d(loc.getX(), loc.getZ()))
@@ -911,23 +934,28 @@ public class ZoneManager {
             zonesConfig.set(path + ".color", (c != null ? bukkitToHex(c) : "#FFFFFF"));
 
             zonesConfig.set(path + ".marker_ID", zone.getMarkerID());
-            zonesConfig.set(path + ".world", zone.getCorners().isEmpty() ? "world" : zone.getCorners().get(0).getWorld().getName());
+            zonesConfig.set(path + ".world", zone.getCorners().isEmpty() ? "world" : zone.getCorners().getFirst().getWorld().getName());
 
-            List<Map<String, Object>> serializedCorners = new ArrayList<>();
-            for (Location loc : zone.getCorners()) {
-                Map<String, Object> map = new HashMap<>();
-                map.put("world", loc.getWorld().getName());
-                map.put("x", loc.getX());
-                map.put("y", loc.getY());
-                map.put("z", loc.getZ());
-                map.put("pitch", loc.getPitch());
-                map.put("yaw", loc.getYaw());
-                serializedCorners.add(map);
-            }
+            List<Map<String, Object>> serializedCorners = getMaps(zone);
             zonesConfig.set(path + ".corners", serializedCorners);
         }
 
         saveZonesConfig(); // как у тебя
+    }
+
+    private static @NotNull List<Map<String, Object>> getMaps(ZoneInfo zone) {
+        List<Map<String, Object>> serializedCorners = new ArrayList<>();
+        for (Location loc : zone.getCorners()) {
+            Map<String, Object> map = new HashMap<>();
+            map.put("world", loc.getWorld().getName());
+            map.put("x", loc.getX());
+            map.put("y", loc.getY());
+            map.put("z", loc.getZ());
+            map.put("pitch", loc.getPitch());
+            map.put("yaw", loc.getYaw());
+            serializedCorners.add(map);
+        }
+        return serializedCorners;
     }
 
 
@@ -971,8 +999,8 @@ public class ZoneManager {
                                 Bukkit.getLogger().warning("Ошибка при загрузке угла зоны: " + e.getMessage());
                             }
                         }
-                        String zoneWorld = (corners.isEmpty() || corners.get(0).getWorld() == null)
-                                ? null : corners.get(0).getWorld().getName();
+                        String zoneWorld = (corners.isEmpty() || corners.getFirst().getWorld() == null)
+                                ? null : corners.getFirst().getWorld().getName();
 
                         List<Vector2d> corners2D = corners.stream()
                                 .map(cornerLoc -> new Vector2d(cornerLoc.getX(), cornerLoc.getZ()))

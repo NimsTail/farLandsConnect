@@ -146,12 +146,16 @@ public final class AdvancementsManager implements Listener {
                 oak_sapling93, oak_sapling94, oak_sapling95
         );
 
-        // показать таб всем уже online
-        for (Player p : Bukkit.getOnlinePlayers()) {
-            achievements.showTab(p);
-        }
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            for (Player p : Bukkit.getOnlinePlayers()) {
+                try {
+                    achievements.showTab(p);
+                } catch (Throwable ex) {
+                    plugin.getLogger().warning("[Advancements] showTab failed for " + p.getName() + ": " + ex.getMessage());
+                }
+            }
+        });
 
-        // на будущие заходы
         Bukkit.getPluginManager().registerEvents(this, plugin);
 
         plugin.getLogger().info("[Advancements] Таб '" +
@@ -160,6 +164,10 @@ public final class AdvancementsManager implements Listener {
 
     @EventHandler
     public void onJoin(PlayerJoinEvent e) {
-        if (achievements != null) achievements.showTab(e.getPlayer());
+        try {
+            achievements.showTab(e.getPlayer());
+        } catch (Throwable ex) {
+            plugin.getLogger().warning("[Advancements] showTab on join failed for " + e.getPlayer().getName() + ": " + ex.getMessage());
+        }
     }
 }

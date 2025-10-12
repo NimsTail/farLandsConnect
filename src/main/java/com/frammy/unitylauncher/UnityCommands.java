@@ -169,7 +169,7 @@ public class UnityCommands {
                 }
                 rs.close();
             } catch (Exception e) {
-                onError("getGroup", e, (Player) sender);
+                onError("getGroup", (Player) sender);
             }
         }
     }
@@ -208,7 +208,7 @@ public class UnityCommands {
                 Statement st2 = con.createStatement();
                 st2.executeUpdate(query2);
             } catch (Exception e) {
-                onError("setGroup", e, (Player) sender);
+                onError("setGroup", (Player) sender);
             }
         }
     }
@@ -251,7 +251,7 @@ public class UnityCommands {
                 }
                 rs.close();
             } catch (Exception e) {
-                onError("setPrefix", e, (Player) sender);
+                onError("setPrefix", (Player) sender);
             }
         }
     }
@@ -295,7 +295,7 @@ public class UnityCommands {
                 }
                 rs.close();
             } catch (Exception e) {
-                onError("dayDeal", e, (Player) sender);
+                onError("dayDeal", (Player) sender);
             }
         }
     }
@@ -361,7 +361,7 @@ public class UnityCommands {
                 else
                     sender.sendMessage("Деньги были выведены");
             } catch (Exception e) {
-                onError("money", e, (Player) sender);
+                onError("money", (Player) sender);
             }
         }
     }
@@ -389,7 +389,7 @@ public class UnityCommands {
                 st.executeUpdate(queryUpdate);
                 sender.sendMessage("Пароль успешно изменен");
             } catch (Exception e) {
-                onError("passCh", e, (Player) sender);
+                onError("passCh", (Player) sender);
             }
         }
     }
@@ -421,7 +421,7 @@ public class UnityCommands {
 
                 return result;
             } catch (Exception e) {
-                onError("getMoney", e, (Player) sender);
+                onError("getMoney", (Player) sender);
             }
         }
         return null;
@@ -436,7 +436,7 @@ public class UnityCommands {
                 st.executeUpdate(query);
 
             } catch (Exception e) {
-                onError("getShops", e, (Player) sender);
+                onError("getShops", (Player) sender);
             }
         }
     }
@@ -462,7 +462,7 @@ public class UnityCommands {
                     return 0;
                 }
             } catch (Exception e) {
-                onError("getShops", e, (Player) sender);
+                onError("getShops", (Player) sender);
             }
         }
         return 0;
@@ -508,7 +508,7 @@ public class UnityCommands {
                 for (String line : tg.generate(TableGenerator.Receiver.CLIENT, true, true))
                     sender.sendMessage(line);
             } catch (Exception e) {
-                onError("getTop", e, (Player) sender);
+                onError("getTop", (Player) sender);
             }
         }
     }
@@ -537,7 +537,7 @@ public class UnityCommands {
                 }
                 rs.close();
             } catch (Exception e) {
-                onError("getCountry", e, (Player) sender);
+                onError("getCountry", (Player) sender);
             }
         }
     }
@@ -562,7 +562,7 @@ public class UnityCommands {
                 if (isEmpty) sender.sendMessage(ChatColor.RED + "Сначала зарегистрируйся в лаунчере!");
                 rs.close();
             } catch (Exception e) {
-                onError("rCode", e, (Player) sender);
+                onError("rCode", (Player) sender);
             }
         }
     }
@@ -594,7 +594,7 @@ public class UnityCommands {
                         st.close();
                         con.close();
                     } catch (Exception e) {
-                        onError("getPlayerInfo", e, Bukkit.getPlayer(sender));
+                        onError("getPlayerInfo", Bukkit.getPlayer(sender));
                     }
                 }
 
@@ -648,7 +648,7 @@ public class UnityCommands {
                 if (isEmpty) sender.sendMessage("★ У вас нет уведомлений! ★");
                 rs.close();
             } catch (Exception e) {
-                onError("notifications", e, (Player) sender);
+                onError("notifications", (Player) sender);
             }
         }
     }
@@ -665,7 +665,7 @@ public class UnityCommands {
                 if (n == 1) sender.sendMessage("Уведомления при входе включены!");
                 else sender.sendMessage("Уведомления при входе отключены!");
             } catch (Exception e) {
-                onError("notificationsToggle", e, (Player) sender);
+                onError("notificationsToggle", (Player) sender);
             }
         }
     }
@@ -759,7 +759,7 @@ public class UnityCommands {
                 }
                 sender.sendMessage("Вы отправили " + money + "F игроку " +  receiver + ".");
             } catch (Exception e) {
-                onError("pay", e, (Player) sender);
+                onError("pay", (Player) sender);
             }
         }
     }
@@ -781,7 +781,7 @@ public class UnityCommands {
                 Statement st2 = con.createStatement();
                 st2.executeUpdate(query2);
             } catch (Exception e) {
-                onError("setGroup", e, (Player) sender);
+                onError("setGroup", (Player) sender);
             }
         }
     }

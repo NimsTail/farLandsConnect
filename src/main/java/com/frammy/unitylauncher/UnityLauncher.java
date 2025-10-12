@@ -4,14 +4,12 @@ import com.frammy.unitylauncher.chunkactivity.ChunkActivityHeatmapExporter;
 import com.frammy.unitylauncher.signs.SignCategory;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.signs.SignVariables;
-import com.frammy.unitylauncher.upgrades.UpgradeCondition;
-import com.frammy.unitylauncher.upgrades.industry.TntQuarryUpgrade;
 import com.frammy.unitylauncher.zones.ZoneActivityCalculations;
 import com.frammy.unitylauncher.zones.ZoneManager;
+import com.frammy.unitylauncher.upgrades.UpgradesListener;
 import com.frammy.unitylauncher.zones.countryrelations.CountryRegistryJdbc;
 import com.frammy.unitylauncher.zones.countryrelations.CountryRelationshipDao;
 import com.frammy.unitylauncher.zones.countryrelations.DiplomacyService;
-import com.frammy.unitylauncher.upgrades.MainUpgrades;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import net.md_5.bungee.api.chat.ClickEvent;
 import net.md_5.bungee.api.chat.HoverEvent;
@@ -20,7 +18,6 @@ import net.md_5.bungee.api.chat.hover.content.Text;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
-import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -32,17 +29,11 @@ import org.jetbrains.annotations.Nullable;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.ResultSet;
-import java.sql.Statement;
 import java.util.*;
 
 public final class UnityLauncher extends JavaPlugin implements Listener {
-    HashMap<String, Date> sessions = new HashMap<>();
-    HashMap<String, Long> playTime = new HashMap<>();
-    HashMap<String, PlayerVariables> playerData = new HashMap<>();
     private static UnityLauncher instance;
     private final Set<Player> awaitingCorrectCommand = new HashSet<>();
-    private FileConfiguration shopConfig;
     public ArrayList<String> commandCategories= new ArrayList<>();
     public MoneyManager moneyManager;
     private ZoneManager zoneManager;
@@ -54,12 +45,10 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     public DiplomacyService diplomacy;
     public CountryRegistryJdbc countryRegistryJdbc;
     public Set<Player> getAwaitingCorrectCommand() {return awaitingCorrectCommand;}
-    private MainUpgrades mainUpgrades;
-    private AdvancementsManager advManager;
 
     @Override
     public void onEnable() {
-        advManager = new AdvancementsManager(this);
+        AdvancementsManager advManager = new AdvancementsManager(this);
         advManager.init();
 
         Bukkit.getPluginManager().registerEvents(this, this);
@@ -137,38 +126,12 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                 tracker.getWeights()
         ), 40L);
 
-        // Upgrades
-        this.mainUpgrades = new MainUpgrades();
-        getServer().getPluginManager().registerEvents(new TntQuarryUpgrade(), this);
-        getServer().getPluginManager().registerEvents(
-                new com.frammy.unitylauncher.upgrades.redstone.RedstoneProtectionListener(), this);
-        getServer().getPluginManager().registerEvents(
-                new com.frammy.unitylauncher.upgrades.redstone.RedstoneProtectionListener(),
-                this
-        );
-        getServer().getPluginManager().registerEvents(
-                new com.frammy.unitylauncher.upgrades.industry.SmartHopperListener(), this
-        );
-        getServer().getPluginManager().registerEvents(
-                new com.frammy.unitylauncher.upgrades.industry.FastMinecartIOListener(), this
-        );
-        getServer().getPluginManager().registerEvents(
-                new com.frammy.unitylauncher.upgrades.industry.ItemBrandingListener(), this
-        );
-        getServer().getPluginManager().registerEvents(
-                new com.frammy.unitylauncher.upgrades.industry.FurnaceOreBoostListener(),
-                this
-        );
-        Bukkit.getScheduler().runTaskTimer(
-                this,
-                () -> Bukkit.getOnlinePlayers().forEach(UpgradeCondition::applyZoneEffects),
-                20L * 5,
-                20L * 5
-        );
-        UpgradeCondition.initTestScheduler();
-        Objects.requireNonNull(getCommand("checkupgrades")).setExecutor(new UpgradeCondition());
-
-
+        // Регистрация всех апгрейдов (редстоун, крафт, печи)
+        Bukkit.getPluginManager().registerEvents(new UpgradesListener(), this);
+        Bukkit.getPluginManager().registerEvents(new UpgradesListener.SmartHopperListener(this), this);
+        // слушатели апгрейдов
+        UpgradesListener.registerAll(this);
+        Objects.requireNonNull(getCommand("brand")).setExecutor(new com.frammy.unitylauncher.upgrades.BrandCommand());
 
     }
     public ZoneManager getZoneManager() {
@@ -177,53 +140,62 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
-        signManager.saveSignData();
-        zoneManager.saveZonesToConfig();
-        if (tracker != null) {
-            tracker.forceSampleNow();   // зафиксируем текущий час
-            tracker.saveAllToDisk();    // сохраним на диск
-        }
-        if (webSocketManager != null) {
-            webSocketManager.disconnectAll();
-        }
-
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                String query = "UPDATE Users SET DayDealCode=0 WHERE 1;";
-                Statement st = con.createStatement();
-                st.executeUpdate(query);
-
-                playTime.forEach((key, value) -> {
-                    try {
-                        String query2 = "SELECT Playtime FROM Users WHERE Name='" + key + "';";
-                        Statement st2 = con.createStatement();
-                        ResultSet rs2 = st2.executeQuery(query2);
-                        long sqlTime = 0;
-                        if (rs2.next())
-                            sqlTime = rs2.getInt("Playtime");
-                        else
-                            Bukkit.getConsoleSender().sendMessage("No player " + key + " in database");
-                        sqlTime += value;
-                        String query3 = "UPDATE Users SET Playtime=" + sqlTime + " WHERE Name='" + key + "';";
-                        Statement st3 = con.createStatement();
-                        st3.executeUpdate(query3);
-                    } catch (Exception e) {
-                        onError("", e, null);
-                    }
-                });
-            } catch (Exception ex) {
-                onError("NotInBase", ex, null);
+        try {
+            if (this.signManager != null) {
+                this.signManager.saveSignData();
+            } else {
+                getLogger().warning("[UnityLauncher] signManager is null on disable — skipping saveSignData()");
             }
+        } catch (Throwable t) {
+            getLogger().warning("[UnityLauncher] saveSignData() failed: " + t.getMessage());
         }
-        diplomacy.snapshot().keySet().forEach(diplomacy::save);
 
-        blueMapIntegration.saveBlueMapMarkers("services");
-        blueMapIntegration.saveBlueMapMarkers("shops");
-        blueMapIntegration.saveBlueMapMarkers("chunk-activity");
+        try {
+            if (this.zoneManager != null) {
+                this.zoneManager.saveZonesToConfig();
+            } else {
+                getLogger().warning("[UnityLauncher] zoneManager is null on disable — skipping saveZonesToConfig()");
+            }
+        } catch (Throwable t) {
+            getLogger().warning("[UnityLauncher] saveZonesToConfig() failed: " + t.getMessage());
+        }
+
+        try {
+            if (tracker != null) {
+                tracker.forceSampleNow();
+                tracker.saveAllToDisk();
+            }
+        } catch (Throwable t) {
+            getLogger().warning("[UnityLauncher] tracker save failed: " + t.getMessage());
+        }
+
+        try {
+            if (webSocketManager != null) {
+                webSocketManager.disconnectAll();
+            }
+        } catch (Throwable t) {
+            getLogger().warning("[UnityLauncher] webSocketManager disconnect failed: " + t.getMessage());
+        }
+
+        try {
+            diplomacy.snapshot().keySet().forEach(diplomacy::save);
+        } catch (Throwable t) {
+            getLogger().warning("[UnityLauncher] diplomacy save failed: " + t.getMessage());
+        }
+
+        try {
+            if (blueMapIntegration != null) {
+                blueMapIntegration.saveBlueMapMarkers("services");
+                blueMapIntegration.saveBlueMapMarkers("shops");
+                blueMapIntegration.saveBlueMapMarkers("chunk-activity");
+            }
+        } catch (Throwable t) {
+            getLogger().warning("[UnityLauncher] blueMapIntegration save failed: " + t.getMessage());
+        }
 
         instance = null;
     }
+
     public static UnityLauncher getInstance() {
         return instance;
     }
@@ -278,65 +250,61 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     @EventHandler
     public void onJoin(PlayerJoinEvent e){
         webSocketManager.connectPlayer(e.getPlayer().getName());
-        mainUpgrades.applyUpgradesFor(e.getPlayer());
-
-      //  UnityCommands.getInstance().getAllData(e.getPlayer());
     }
 
     @Nullable
     public static Connection DBConnect() {
         try {
-            Class.forName("com.mysql.jdbc.Driver");
+            Class.forName("com.mysql.cj.jdbc.Driver");
             String url = "jdbc:mysql://mysql.apexhosting.gdn:3306/apexMC1473088";
             String username = "apexMC1473088";
             String password = "H#pXkkgG8SbaexeB6azGXMlm";
             return DriverManager.getConnection(url, username, password);
         } catch (Exception e) {
-            onError("DBError", e, null);
+            onError("DBError", null);
             return null;
         }
     }
 
-    public static void resetDayDealCode() {
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                String query = "UPDATE Users SET DayDealCode=0 WHERE 1;";
-                Statement st = con.createStatement();
-                st.executeUpdate(query);
-            } catch (Exception ex) {
-                onError("NotInBase", ex, null);
-            }
-        }
-    }
+//    public static void resetDayDealCode() {
+//        Connection con = DBConnect();
+//        if (con != null) {
+//            try {
+//                String query = "UPDATE Users SET DayDealCode=0 WHERE 1;";
+//                Statement st = con.createStatement();
+//                st.executeUpdate(query);
+//            } catch (Exception ex) {
+//                onError("NotInBase", ex, null);
+//            }
+//        }
+//    }
+//
+//    public static void updatePlaytime(Map<String, Long> playTime) {
+//        Connection con = DBConnect();
+//        if (con != null) {
+//            playTime.forEach((key, value) -> {
+//                try {
+//                    String query2 = "SELECT Playtime FROM Users WHERE Name='" + key + "';";
+//                    Statement st2 = con.createStatement();
+//                    ResultSet rs2 = st2.executeQuery(query2);
+//                    long sqlTime = 0;
+//                    if (rs2.next()) {
+//                        sqlTime = rs2.getInt("Playtime");
+//                    } else {
+//                        Bukkit.getConsoleSender().sendMessage("No player " + key + " in database");
+//                    }
+//                    sqlTime += value;
+//                    String query3 = "UPDATE Users SET Playtime=" + sqlTime + " WHERE Name='" + key + "';";
+//                    Statement st3 = con.createStatement();
+//                    st3.executeUpdate(query3);
+//                } catch (Exception e) {
+//                    onError("", e, null);
+//                }
+//            });
+//        }
+//    }
 
-    public static void updatePlaytime(Map<String, Long> playTime) {
-        Connection con = DBConnect();
-        if (con != null) {
-            playTime.forEach((key, value) -> {
-                try {
-                    String query2 = "SELECT Playtime FROM Users WHERE Name='" + key + "';";
-                    Statement st2 = con.createStatement();
-                    ResultSet rs2 = st2.executeQuery(query2);
-                    long sqlTime = 0;
-                    if (rs2.next()) {
-                        sqlTime = rs2.getInt("Playtime");
-                    } else {
-                        Bukkit.getConsoleSender().sendMessage("No player " + key + " in database");
-                    }
-                    sqlTime += value;
-                    String query3 = "UPDATE Users SET Playtime=" + sqlTime + " WHERE Name='" + key + "';";
-                    Statement st3 = con.createStatement();
-                    st3.executeUpdate(query3);
-                } catch (Exception e) {
-                    onError("", e, null);
-                }
-            });
-        }
-    }
-
-    public static void onError(String reason, Exception e, Player p) {
-        e.printStackTrace();
+    public static void onError(String reason, Player p) {
         switch (reason) {
             case "NotInBase":
                 if (p != null) p.sendMessage(ChatColor.RED + "Вас не существует в базе!");
