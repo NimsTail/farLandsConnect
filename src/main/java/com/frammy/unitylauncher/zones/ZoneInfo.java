@@ -1,179 +1,164 @@
 package com.frammy.unitylauncher.zones;
 
-import de.bluecolored.bluemap.api.math.Color;
+import org.bukkit.Color;
 import org.bukkit.Location;
+import org.bukkit.World;
 
 import java.time.LocalDate;
-import java.time.temporal.WeekFields;
-import java.util.ArrayDeque;
-import java.util.Deque;
-import java.util.List;
-import java.util.function.Supplier;
+import java.util.*;
 
+/** Минимальная и удобная модель зоны. */
 public class ZoneInfo {
 
-    public ZoneType zoneType;
-    public String zoneID;
-    public String zoneName;
-    public String zoneOwner;
-    public String markerID;
-    public List<Location> zoneCorners;
-    public org.bukkit.Color fillColor;
+    // ===== Core =====
+    private final ZoneType type;
+    private final String id;
+    private String name;
+    private final String markerID;
+    private String owner;                 // текстовый владелец (игрок/страна по старой логике)
+    private final List<Location> corners; // ЖИВОЙ список (можно изменять)
+    private Color fillColor;
+
+    /** Нормализованное имя страны-владельца (LuckPerms-группа). */
     private String ownerCountry;
 
-    public String getOwnerCountry() { return ownerCountry; }
-    public void setOwnerCountry(String ownerCountry) { this.ownerCountry = ownerCountry; }
+    // ===== Billing (последние 14 дней) =====
+    public record DailyEntry(LocalDate date, double cost) {}
+    private final Deque<DailyEntry> dailyHistory = new ArrayDeque<>(14);
+    private LocalDate lastBilledDate;   // последний оплаченный день (включительно)
+    private LocalDate nextBillingDate;  // плановая дата следующего биллинга
 
-    // === История и биллинг ===
-    public static class DailyEntry {
-        public final LocalDate date;
-        public final double cost;
+    // ===== Ctor =====
+    public ZoneInfo(ZoneType type, String id, String name, String markerID,
+                    List<Location> corners, String owner, Color fillColor) {
+        this.type = Objects.requireNonNull(type, "type");
+        this.id = Objects.requireNonNull(id, "id");
+        this.name = name != null ? name : "";
+        this.markerID = Objects.requireNonNull(markerID, "markerID");
+        this.corners = (corners != null) ? new ArrayList<>(corners) : new ArrayList<>();
+        this.owner = owner;
+        this.fillColor = fillColor;
+    }
 
-        public DailyEntry(LocalDate date, double cost) {
-            this.date = date;
-            this.cost = cost;
+    // ===== Getters / setters (только нужные) =====
+    public ZoneType getType()           { return type; }
+    public String getID()               { return id; }
+    public String getName()             { return name; }
+    public void setName(String name)    { this.name = name != null ? name : ""; }
+
+    public String getMarkerID()         { return markerID; }
+
+    /** Возвращает ЖИВОЙ список углов (можно add/remove). */
+    public List<Location> getCorners()  { return corners; }
+    public void setCorners(List<Location> pts) {
+        this.corners.clear();
+        if (pts != null) this.corners.addAll(pts);
+    }
+
+    public String getOwner()            { return owner; }
+    public void setOwner(String owner)  { this.owner = owner; }
+
+    public Color getFillColor()         { return fillColor; }
+    public void setFillColor(Color c)   { this.fillColor = c; }
+
+    // ===== Country / LuckPerms =====
+    public void setOwnerCountry(String country) { this.ownerCountry = country; }
+
+    /** Нормализованное имя страны; если пусто — запасной вариант owner. */
+    public String getCountryName() {
+        return notBlank(ownerCountry) ? ownerCountry : (notBlank(owner) ? owner : null);
+    }
+
+    public boolean hasCountry() { return notBlank(getCountryName()); }
+
+    /** Имя LP-группы страны: "group.<normalized>". */
+    public String getLuckPermsGroupName() {
+        String c = getCountryName();
+        if (!notBlank(c)) return null;
+        String norm = c.trim().toLowerCase(Locale.ROOT)
+                .replace(' ', '_')
+                .replaceAll("[^a-z0-9_\\-.]", "");
+        return "group." + norm;
+    }
+
+    // ===== Convenience =====
+    public boolean isType(ZoneType t) { return t != null && t == this.type; }
+
+    /** Мир зоны по первому углу (или null). */
+    public World getWorld() {
+        return corners.isEmpty() ? null : corners.getFirst().getWorld();
+    }
+
+    /** Проверка попадания точки внутрь полигона зоны (XZ), с проверкой мира. */
+    public boolean contains2D(Location loc) {
+        if (loc == null || corners.size() < 3) return false;
+        World w = getWorld();
+        if (w == null || loc.getWorld() == null || !w.getUID().equals(loc.getWorld().getUID())) return false;
+
+        double x = loc.getX(), z = loc.getZ();
+        boolean inside = false;
+        for (int i = 0, j = corners.size() - 1; i < corners.size(); j = i++) {
+            Location a = corners.get(i), b = corners.get(j);
+            double xi = a.getX(), zi = a.getZ();
+            double xj = b.getX(), zj = b.getZ();
+            boolean inter = ((zi > z) != (zj > z)) &&
+                    (x < (xj - xi) * (z - zi) / (zj - zi + 0.0) + xi);
+            if (inter) inside = !inside;
         }
+        return inside;
     }
 
-    // Храним последние 14 дней (можно увеличить, если нужно)
-    public final Deque<DailyEntry> dailyHistory = new ArrayDeque<>(14);
-
-    private LocalDate lastBilledDate = null; // последний оплаченный день (включительно)
-    private LocalDate nextBillingDate = null; // когда планируем следующий платёж
-
-    public ZoneInfo(ZoneType zoneType, String zoneID, String zoneName, String markerID, List<Location> zoneCorners, String zoneOwner, org.bukkit.Color fillColor) {
-        this.zoneType = zoneType;
-        this.zoneID = zoneID;
-        this.zoneName = zoneName;
-        this.markerID = markerID;
-        this.zoneCorners = zoneCorners;
-        this.zoneOwner = zoneOwner;
-        this.fillColor = fillColor;
-    }
-
-    // === Геттеры/сеттеры ===
-    public ZoneType getType() {
-        return zoneType;
-    }
-
-    public String getID() {
-        return zoneID;
-    }
-
-    public String getName() {
-        return zoneName;
-    }
-
-    public String getMarkerID() {
-        return markerID;
-    }
-
-    public List<Location> getCorners() {
-        return zoneCorners;
-    }
-
-    public String getOwner() {
-        return zoneOwner;
-    }
-
-    public org.bukkit.Color getFillColor() {
-        return fillColor;
-    }
-
-    public void setFillColor() {
-        this.fillColor = fillColor;
-    }
-
-    public void setType(ZoneType type) {
-        this.zoneType = type;
-    }
-
-    public void setID(String id) {
-        this.zoneID = id;
-    }
-
-    public void setName(String name) {
-        this.zoneName = name;
-    }
-
-    public void setMarkerID(String markerID) {
-        this.markerID = markerID;
-    }
-
-    public void setCorners(List<Location> corners) {
-        this.zoneCorners = corners;
-    }
-
-    public void setOwner(String owner) {
-        this.zoneOwner = owner;
-    }
-    public double getCachedCost() {
-        if (dailyHistory.isEmpty()) return 0.0;
-        return dailyHistory.getLast().cost;
-    }
-
-    // === Логика биллинга ===
-
-    /**
-     * Добавляет дневную стоимость в историю.
-     * Если за этот день уже была запись — заменяем.
-     */
+    // ===== Billing =====
+    /** Добавляет/заменяет стоимость за день, хранит максимум 14 последних записей. */
     public void addDailyCost(LocalDate date, double cost) {
-        if (!dailyHistory.isEmpty() && dailyHistory.getLast().date.equals(date)) {
+        if (date == null) return;
+        if (!dailyHistory.isEmpty() && Objects.equals(dailyHistory.getLast().date(), date)) {
             dailyHistory.removeLast();
         }
         dailyHistory.addLast(new DailyEntry(date, cost));
-        while (dailyHistory.size() > 14) {
-            dailyHistory.removeFirst();
-        }
+        while (dailyHistory.size() > 14) dailyHistory.removeFirst();
     }
 
-    /**
-     * Сумма к оплате за дни после последнего биллинга, до указанной даты включительно.
-     */
+    /** Сумма к оплате за дни после последнего биллинга до upToDate включительно. */
     public double getDueSinceLastBill(LocalDate upToDate) {
+        if (upToDate == null) upToDate = LocalDate.now();
         double sum = 0.0;
         for (DailyEntry e : dailyHistory) {
-            boolean afterLastBill = (lastBilledDate == null) || e.date.isAfter(lastBilledDate);
-            boolean notAfterUpTo = !e.date.isAfter(upToDate);
-            if (afterLastBill && notAfterUpTo) {
-                sum += e.cost;
-            }
+            boolean afterLast = (lastBilledDate == null) || e.date().isAfter(lastBilledDate);
+            if (afterLast && !e.date().isAfter(upToDate)) sum += e.cost();
         }
         return sum;
     }
 
-    /**
-     * Сколько дней неоплачено с момента последнего биллинга.
-     */
+    /** Кол-во неоплаченных дней (как выше). */
     public int getDueDaysCount(LocalDate upToDate) {
+        if (upToDate == null) upToDate = LocalDate.now();
         int n = 0;
         for (DailyEntry e : dailyHistory) {
-            boolean afterLastBill = (lastBilledDate == null) || e.date.isAfter(lastBilledDate);
-            boolean notAfterUpTo = !e.date.isAfter(upToDate);
-            if (afterLastBill && notAfterUpTo) {
-                n++;
-            }
+            boolean afterLast = (lastBilledDate == null) || e.date().isAfter(lastBilledDate);
+            if (afterLast && !e.date().isAfter(upToDate)) n++;
         }
         return n;
     }
 
-    /**
-     * Отметить, что зона оплачена на текущий день (сдвинуть дату следующего биллинга на +7).
-     */
+    /** Отмечаем оплату на today и планируем следующий биллинг через 7 дней. */
     public void markBilled(LocalDate today) {
+        if (today == null) today = LocalDate.now();
         this.lastBilledDate = today;
         this.nextBillingDate = today.plusDays(7);
     }
 
-    /**
-     * Получить дату следующего планового биллинга.
-     */
     public LocalDate getNextBillingDate() {
-        if (nextBillingDate == null) {
-            // если ни разу не было оплаты, назначаем через 7 дней от текущей даты
-            return LocalDate.now().plusDays(7);
-        }
-        return nextBillingDate;
+        return nextBillingDate != null ? nextBillingDate : LocalDate.now().plusDays(7);
+    }
+    public LocalDate getLastBilledDate() { return lastBilledDate; }
+
+    // ===== Utils =====
+    private static boolean notBlank(String s) { return s != null && !s.isBlank(); }
+
+    @Override public String toString() {
+        return "ZoneInfo{type=" + type + ", id='" + id + "', name='" + name +
+                "', owner='" + owner + "', country='" + ownerCountry +
+                "', corners=" + corners.size() + '}';
     }
 }

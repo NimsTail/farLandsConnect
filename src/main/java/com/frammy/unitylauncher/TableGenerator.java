@@ -14,7 +14,7 @@ public class TableGenerator {
     private static final List<Character> char4 = Arrays.asList('I', 't', ' ', '[', ']', '€');
     private static final List<Character> char3 = Arrays.asList('l', '`', '³', '\'');
     private static final List<Character> char2 = Arrays.asList(',', '.', '!', 'i', '´', ':', ';', '|');
-    private static final char char1 = '\u17f2';
+    private static final char char1 = '៲';
     private static final Pattern regex = Pattern.compile(char1+"(?:§r)?(\\s*)"
             + "(?:§r§8)?"+char1+"(?:§r)?(\\s*)"
             + "(?:§r§8)?"+char1+"(?:§r)?(\\s*)"
@@ -184,8 +184,7 @@ public class TableGenerator {
         StringBuilder s = new StringBuilder();
         if (length < 1) return s.toString();
 
-        for (int i = 0; i < length; i++)
-            s.append(c);
+        s.append(String.valueOf(c).repeat(length));
         return s.toString();
     }
 

@@ -3,12 +3,10 @@ package com.frammy.unitylauncher;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.logging.Logger;
 
 import org.bukkit.entity.Player;
-import org.bukkit.entity.PolarBear;
 import org.java_websocket.client.WebSocketClient;
 import org.java_websocket.handshake.ServerHandshake;
 
@@ -19,9 +17,7 @@ public class WebSocketManager {
     public WebSocketManager(Logger logger) {
         this.logger = logger;
     }
-    public Set<String> getConnectedPlayers() {
-        return clients.keySet();
-    }
+
     public void tryForceConnect(Player player) {
         connectPlayer(player.getName());
         player.sendMessage("§7Попытка повторного подключения..");
@@ -83,17 +79,6 @@ public class WebSocketManager {
             logger.info("📤 [" + playerName + "] Отправлено сообщение: " + message);
         } else {
             logger.warning("⚠️ Игрок " + playerName + " не подключен.");
-        }
-    }
-
-    // 🔹 Отправка сообщения всем игрокам
-    public void broadcastMessage(String message) {
-        for (Map.Entry<String, WebSocketClient> entry : clients.entrySet()) {
-            WebSocketClient client = entry.getValue();
-            if (client.isOpen()) {
-                client.send(message);
-                logger.info("📤 [" + entry.getKey() + "] Получил сообщение: " + message);
-            }
         }
     }
 

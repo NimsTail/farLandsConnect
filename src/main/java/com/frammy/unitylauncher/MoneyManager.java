@@ -1,22 +1,15 @@
 package com.frammy.unitylauncher;
 
 import org.bukkit.*;
-import org.bukkit.block.Block;
-import org.bukkit.block.Chest;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.HumanEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.*;
-import org.bukkit.event.player.PlayerDropItemEvent;
-import org.bukkit.event.player.PlayerPickupItemEvent;
 import org.bukkit.inventory.AnvilInventory;
-import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
-import org.bukkit.persistence.PersistentDataContainer;
-import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.scheduler.BukkitRunnable;
 
 import java.io.File;
@@ -24,15 +17,12 @@ import java.io.IOException;
 import java.util.*;
 
 public class MoneyManager implements Listener {
-    private final File issuedMoneyFile;
-    private final YamlConfiguration issuedMoneyConfig;
     private final List<Integer> dollarDenominations = Arrays.asList(1000, 500, 200, 100, 50, 20, 10, 5, 2, 1);
     private final List<Integer> centDenominations = Arrays.asList(50, 20, 10, 5, 2, 1); // В центах
-    private final NamespacedKey idKey;
     private final HashMap<String, List<String>> chestMoneyMap = new HashMap<>();
 
     public MoneyManager(File pluginDataFolder, String pluginName) {
-        issuedMoneyFile = new File(pluginDataFolder, "issued_money.yml");
+        File issuedMoneyFile = new File(pluginDataFolder, "issued_money.yml");
         if (!issuedMoneyFile.exists()) {
             try {
                 issuedMoneyFile.createNewFile();
@@ -40,8 +30,8 @@ public class MoneyManager implements Listener {
                 e.printStackTrace();
             }
         }
-        issuedMoneyConfig = YamlConfiguration.loadConfiguration(issuedMoneyFile);
-        idKey = new NamespacedKey(pluginName, "money_id");
+        YamlConfiguration issuedMoneyConfig = YamlConfiguration.loadConfiguration(issuedMoneyFile);
+        NamespacedKey idKey = new NamespacedKey(pluginName, "money_id");
     }
 
     public void giveMoney(Player player, double amount) {
@@ -52,6 +42,7 @@ public class MoneyManager implements Listener {
             new BukkitRunnable() {
                 @Override
                 public void run() {
+                    assert data != null;
                     if (data.money >= amount) {
                         int totalCents = (int) Math.round(amount * 100);
                         int dollars = totalCents / 100;
@@ -97,7 +88,7 @@ public class MoneyManager implements Listener {
        // player.sendMessage("Вы получили " + totalCents / 100 + " долларов и " + totalCents % 100 + " центов.");
     }
 
-    public boolean takeMoney(Player player, double amount, boolean isCountry) {
+    public void takeMoney(Player player, double amount, boolean isCountry) {
 
         int totalCents = (int) Math.round(amount * 100); // Сумма в центах
         int remainingCents = totalCents;
@@ -121,7 +112,7 @@ public class MoneyManager implements Listener {
         // Проверяем, достаточно ли средств
         if (totalInventoryCents < totalCents) {
             player.sendMessage(ChatColor.GRAY + "Недостаточно средств для выполнения операции.");
-            return false;
+            return;
         }
 
         List<ItemStack> itemsToRemove = new ArrayList<>();
@@ -167,7 +158,7 @@ public class MoneyManager implements Listener {
                         // Если сдачу невозможно выдать, отменяем операцию
                         if (changeCents > 0) {
                             player.sendMessage("Ошибка: сдачу невозможно выдать. Обратитесь к администратору.");
-                            return false;
+                            return;
                         }
                     }
                 }
@@ -194,23 +185,21 @@ public class MoneyManager implements Listener {
         // Проверяем, остались ли неоплаченные средства
         if (remainingCents > 0) {
             player.sendMessage("Ошибка: не удалось снять полную сумму. Обратитесь к администратору.");
-            return false;
+            return;
         }
         if (isCountry) {
 
         } else {
-            UnityCommands.getInstance().getPlayerInfo(player.getName(), data -> {
-                new BukkitRunnable() {
-                    @Override
-                    public void run() {
-                        Map<String, Object> updates = new HashMap<>();
-                        updates.put("money", data.money + amount);
-                        UnityCommands.getInstance().mergeAndUpdatePlayerData(player.getName(),"GeneralData", updates);
+            UnityCommands.getInstance().getPlayerInfo(player.getName(), data -> new BukkitRunnable() {
+                @Override
+                public void run() {
+                    Map<String, Object> updates = new HashMap<>();
+                    updates.put("money", data.money + amount);
+                    UnityCommands.getInstance().mergeAndUpdatePlayerData(player.getName(),"GeneralData", updates);
 
-                    }
+                }
 
-                }.runTask(UnityLauncher.getInstance());
-            });
+            }.runTask(UnityLauncher.getInstance()));
             player.sendMessage(ChatColor.GRAY + "На твой счёт было взнесено " + ChatColor.YELLOW + amount + ChatColor.GRAY +"F.");
 
         }
@@ -218,7 +207,6 @@ public class MoneyManager implements Listener {
 
 
        // player.sendMessage("С вашего счета снято " + amount + " долларов.");
-        return true;
     }
 
 
@@ -274,7 +262,7 @@ public class MoneyManager implements Listener {
         if (item.getType() == Material.PRISMARINE_SHARD || item.getType() == Material.PRISMARINE_CRYSTALS) {
             ItemMeta meta = item.getItemMeta();
             String displayName = meta.getDisplayName();
-            if (meta == null || !meta.hasDisplayName()) {
+            if (!meta.hasDisplayName()) {
                 Bukkit.getLogger().info("NO META FOR " + item);
                 return false;
             }
@@ -286,7 +274,7 @@ public class MoneyManager implements Listener {
         ItemMeta meta = item.getItemMeta();
         String displayName = meta.getDisplayName();
         try {
-            String[] parts = ChatColor.stripColor(displayName).split("   ");
+            String[] parts = ChatColor.stripColor(displayName).split(" {3}");
             if (parts.length < 2) return 0.0;
             double value = Double.parseDouble(parts[1]);
             return parts[0].contains("Ⓕ") ? value : value / 100;
@@ -306,7 +294,7 @@ public class MoneyManager implements Listener {
     @EventHandler
     public void onAnvilRename(PrepareAnvilEvent event) {
         AnvilInventory inventory = event.getInventory();
-        String renameText = inventory.getRenameText();
+        String renameText = event.getView().getRenameText();
 
         if (renameText == null) return;
 
@@ -326,11 +314,15 @@ public class MoneyManager implements Listener {
                 event.setResult(null); // Убираем результат
                 HumanEntity player = event.getView().getPlayer();
                 if (player instanceof Player) {
-                    ((Player) player).sendMessage(ChatColor.RED + "Этот символ запрещён в названии призмариновых предметов!");
+                    player.sendMessage(ChatColor.RED + "Этот символ запрещён в названии призмариновых предметов!");
                 }
                 break;
             }
         }
+    }
+
+    public HashMap<String, List<String>> getChestMoneyMap() {
+        return chestMoneyMap;
     }
     /*@EventHandler
     public void onItemDrop(PlayerDropItemEvent event) {

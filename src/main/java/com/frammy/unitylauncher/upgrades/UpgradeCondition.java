@@ -4,119 +4,149 @@ import com.frammy.unitylauncher.UnityLauncher;
 import com.frammy.unitylauncher.zones.ZoneInfo;
 import com.frammy.unitylauncher.zones.ZoneManager;
 import com.frammy.unitylauncher.zones.ZoneType;
-import com.frammy.unitylauncher.zones.countryrelations.CountryRegistryJdbc;
 import net.luckperms.api.LuckPermsProvider;
 import net.luckperms.api.model.group.Group;
+import net.luckperms.api.query.QueryOptions;
 import org.bukkit.Bukkit;
-import org.bukkit.Location;
 import org.bukkit.entity.Player;
-import java.util.Locale;
 
+/**
+ * Единая точка проверок апгрейдов / пермишенов.
+ * Теперь страна игрока берётся из кэша CountryRegistryJdbc,
+ * который обновляется фоново (без SQL в горячем треде).
+ */
 public class UpgradeCondition {
 
-    /** Проверка апгрейда по стране, определённой на локации. */
-    public static boolean hasGlobalUpgradeAt(Location loc, String permissionKey) {
-        String country = getCountryAt(loc);
-        return hasGlobalUpgrade(country, permissionKey);
+    public static boolean DEBUG = false;
+
+    private static void dbg(String msg) {
+        if (DEBUG) Bukkit.getLogger().info("[UpgradeCondition] " + msg);
     }
 
-    /** Проверка апгрейда по игроку (использует его пермишены напрямую). */
+    private static ZoneManager zones() {
+        return UnityLauncher.getInstance().getZoneManager();
+    }
+
+    /* ============================================================
+       ОСНОВНЫЕ ПРОВЕРКИ
+       ============================================================ */
+
+    /**
+     * Проверка глобального апгрейда у страны, в которой состоит игрок.
+     * Если страна не найдена — false.
+     */
     public static boolean hasGlobalUpgrade(Player player, String permissionKey) {
-        return player != null && player.isOnline() && player.hasPermission(permissionKey);
+        if (player == null || permissionKey == null) return false;
+
+        UnityLauncher ul = UnityLauncher.getInstance();
+        String country = ul.countryRegistryJdbc.getCountryCached(player.getName());
+        if (country == null || country.isBlank()) {
+            ul.countryRegistryJdbc.ensureScheduledRefresh(player.getName());
+            dbg("Игрок " + player.getName() + " без страны — нет доступа к " + permissionKey);
+            return false;
+        }
+
+        boolean result = countryHasPermission(country, permissionKey);
+        dbg("hasGlobalUpgrade: player=" + player.getName() + ", country=" + country + ", key=" + permissionKey + " => " + result);
+        return result;
     }
 
-    /** Проверка апгрейда по стране (LP-группа). */
-    public static boolean hasGlobalUpgrade(String country, String permissionKey) {
-        if (country == null || country.isBlank() || permissionKey == null || permissionKey.isBlank()) return false;
+    /**
+     * Проверка апгрейда в зоне — если зона принадлежит игроку,
+     * используется страна создателя (из кэша CountryRegistryJdbc).
+     * Если зона — государственная, берётся её собственная страна.
+     */
+    public static boolean hasUpgradeInZone(Player player, ZoneInfo zone, String permissionKey) {
+        if (player == null || zone == null || permissionKey == null) return false;
 
-        String groupName = country.startsWith("group.") ? country : country.trim().toLowerCase(Locale.ROOT).replace(' ', '_');
+        String country = resolveCountryForZone(zone);
+        if (country == null) {
+            // fallback: попробуем по игроку
+            country = UnityLauncher.getInstance().countryRegistryJdbc.getCountryCached(player.getName());
+        }
+        if (country == null) {
+            dbg("hasUpgradeInZone: нет страны ни у зоны, ни у игрока.");
+            return false;
+        }
+
+        boolean result = countryHasPermission(country, permissionKey);
+        dbg("hasUpgradeInZone: player=" + player.getName() + ", zone=" + zone.getName()
+                + ", country=" + country + ", key=" + permissionKey + " => " + result);
+        return result;
+    }
+
+    /**
+     * Проверка апгрейда по типу зоны, где находится игрок (например, INDUSTRIAL).
+     * Автоматически определяет зону по координатам игрока.
+     */
+    public static boolean hasUpgradeInZoneType(Player player, ZoneType type, String permissionKey) {
+        if (player == null || type == null || permissionKey == null) return false;
+
+        ZoneInfo zi = zones().getZoneAt(player.getLocation());
+        if (zi == null || zi.getType() != type) return false;
+
+        return hasUpgradeInZone(player, zi, permissionKey);
+    }
+
+    /* ============================================================
+       НИЗКОУРОВНЕВАЯ ПРОВЕРКА ПРАВ У ГРУППЫ СТРАНЫ
+       ============================================================ */
+
+    /**
+     * Проверка через LuckPerms у группы страны (group.<country>).
+     * Возвращает true, если пермишен есть у группы страны.
+     */
+    public static boolean countryHasPermission(String country, String permissionKey) {
+        if (country == null || permissionKey == null) return false;
 
         try {
-            var lp = LuckPermsProvider.get();
-            var gm = lp.getGroupManager();
-            Group group = gm.getGroup(groupName);
+            String groupName = normalizeGroupName(country);
+            Group group = LuckPermsProvider.get().getGroupManager().getGroup(groupName);
             if (group == null) {
-                var opt = gm.loadGroup(groupName).join();
-                group = opt.orElse(null);
-                if (group == null) return false;
+                dbg("countryHasPermission: группа " + groupName + " не найдена.");
+                return false;
             }
-            var opts = lp.getContextManager().getStaticQueryOptions();
-            return group.getCachedData().getPermissionData(opts).checkPermission(permissionKey).asBoolean();
+
+            boolean result = group.getCachedData()
+                    .getPermissionData((QueryOptions) LuckPermsProvider.get().getContextManager().getStaticContext())
+                    .checkPermission(permissionKey)
+                    .asBoolean();
+
+            dbg("countryHasPermission: " + groupName + " -> " + permissionKey + " = " + result);
+            return result;
         } catch (Throwable t) {
-            Bukkit.getLogger().warning("[UpgradeCondition] LuckPerms check failed for " + groupName + ": " + t.getMessage());
+            Bukkit.getLogger().severe("[UpgradeCondition] Ошибка проверки пермишена: " + t.getMessage());
             return false;
         }
     }
 
-    /** Глобальный апгрейд действует либо по стране на локации, либо по владельцу INDUSTRIAL-зоны. */
-    public static boolean hasGlobalOrIndustrialUpgradeAt(Location loc, String permissionKey) {
-        if (loc == null || permissionKey == null || permissionKey.isBlank()) return false;
+    /* ============================================================
+       УТИЛИТЫ
+       ============================================================ */
 
-        String countryAtLoc = getCountryAt(loc);
-        if (countryAtLoc != null && !countryAtLoc.isBlank() && hasGlobalUpgrade(countryAtLoc, permissionKey)) return true;
+    /** Определяет страну, которой принадлежит зона (государство или через создателя). */
+    private static String resolveCountryForZone(ZoneInfo zi) {
+        if (zi == null) return null;
 
-        try {
-            ZoneInfo zi = safeGetZoneAt(loc);
-            if (zi != null && zi.getType() == ZoneType.INDUSTRIAL) {
-                String lpCountryGroup = resolveZoneCountryGroup(zi, loc);
-                return hasGlobalUpgrade(lpCountryGroup, permissionKey);
-            }
-        } catch (Throwable t) {
-            Bukkit.getLogger().warning("[UpgradeCondition] zone lookup failed: " + t.getMessage());
+        if (zi.getType() == ZoneType.COUNTRY && zi.hasCountry()) {
+            return zi.getCountryName();
         }
-        return false;
+
+        String owner = zi.getOwner();
+        if (owner == null || owner.isBlank()) return null;
+
+        UnityLauncher ul = UnityLauncher.getInstance();
+        String country = ul.countryRegistryJdbc.getCountryCached(owner);
+        if (country == null) ul.countryRegistryJdbc.ensureScheduledRefresh(owner);
+
+        return country;
     }
 
-    private static ZoneManager zoneManager() {
-        try { return UnityLauncher.getInstance().getZoneManager(); }
-        catch (Throwable ignored) { return null; }
-    }
-
-    private static ZoneInfo safeGetZoneAt(Location loc) {
-        ZoneManager zm = zoneManager();
-        return (zm != null && loc != null) ? zm.getZoneAt(loc) : null;
-    }
-
-    /** Определяет страну, которой принадлежит указанная локация. */
-    public static String getCountryAt(Location loc) {
-        if (loc == null) return null;
-        ZoneManager z = zoneManager();
-        if (z == null) return null;
-        ZoneInfo zone = z.getZoneAt(loc);
-        if (zone == null) return null;
-
-        try {
-            if (zone.getType() == ZoneType.COUNTRY && zone.getName() != null && !zone.getName().isBlank()) return zone.getName();
-            if (zone.getOwnerCountry() != null && !zone.getOwnerCountry().isBlank()) return zone.getOwnerCountry();
-        } catch (Throwable ignored) {}
-        return null;
-    }
-
-    /**
-     * Возвращает имя LP-группы страны, владеющей зоной.
-     * 1) Берёт сохранённое ownerCountry, если оно задано.
-     * 2) Если пусто — ищет через владельца зоны (ownerName → страна из БД).
-     * 3) Если не найдено — fallback на страну по локации.
-     */
-    private static String resolveZoneCountryGroup(ZoneInfo zi, Location loc) {
-        try {
-            String oc = zi.getOwnerCountry();
-            if (oc != null && !oc.isBlank()) return oc;
-
-            String ownerName = zi.zoneOwner;
-            if (ownerName != null && !ownerName.isBlank()) {
-                CountryRegistryJdbc reg = new CountryRegistryJdbc();
-                String country = reg.getCountryByPlayerName(ownerName);
-                if (country != null && !country.isBlank()) {
-                    zi.setOwnerCountry(country);
-                    return country;
-                }
-            }
-
-            return getCountryAt(loc);
-        } catch (Throwable t) {
-            Bukkit.getLogger().warning("[UpgradeCondition] resolveZoneCountryGroup failed: " + t.getMessage());
-            return null;
-        }
+    /** Нормализует имя страны в формат group.<normalized> */
+    private static String normalizeGroupName(String country) {
+        String norm = country.trim().toLowerCase()
+                .replace(' ', '_')
+                .replaceAll("[^a-z0-9_\\-.]", "");
+        return "group." + norm;
     }
 }

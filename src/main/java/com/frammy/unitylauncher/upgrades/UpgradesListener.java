@@ -1,16 +1,25 @@
 package com.frammy.unitylauncher.upgrades;
 
+import com.frammy.unitylauncher.UnityLauncher;
+import com.frammy.unitylauncher.zones.ZoneInfo;
+import com.frammy.unitylauncher.zones.ZoneManager;
+import com.frammy.unitylauncher.zones.ZoneType;
 import net.md_5.bungee.api.ChatMessageType;
 import net.md_5.bungee.api.chat.TextComponent;
 import org.bukkit.*;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
+import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.minecart.HopperMinecart;
 import org.bukkit.entity.Player;
-import org.bukkit.event.*;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.inventory.FurnaceSmeltEvent;
 import org.bukkit.event.inventory.InventoryMoveItemEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerMoveEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
 import org.bukkit.inventory.*;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -19,25 +28,30 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
-/**
- * Единый слушатель апгрейдов.
- * Поддерживает:
- * - Redstone (basic/advanced)
- * - Item Branding при крафте
- * - Furnace Ore Boost
- * - Smart Hopper (уровни 0/1/2)
- */
+import org.bukkit.Location;
+import org.bukkit.Material;
+import org.bukkit.Sound;
+import org.bukkit.World;
+import org.bukkit.entity.Entity;
+import org.bukkit.entity.Item;
+import org.bukkit.entity.TNTPrimed;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.Listener;
+import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.inventory.ItemStack;
+
 public class UpgradesListener implements Listener {
 
-    public UpgradesListener() {
-    }
+    public UpgradesListener() { }
+
     public static void registerAll(JavaPlugin plugin) {
         if (plugin == null) return;
         Bukkit.getPluginManager().registerEvents(new UpgradesListener(), plugin);
     }
 
     /* ==============================
-       1) Redstone
+       Redstone
        ============================== */
 
     private static final EnumSet<Material> BASIC_REDS = EnumSet.of(
@@ -93,7 +107,7 @@ public class UpgradesListener implements Listener {
     }
 
     /* ==============================
-       3) Furnace Ore Boost (+15% к выходу)
+       Furnace Ore Boost (+15% к выходу)
        ============================== */
 
     private static final Set<Material> ORE_SMELT_OUTPUTS = EnumSet.of(
@@ -106,7 +120,9 @@ public class UpgradesListener implements Listener {
         Block b = e.getBlock();
         ItemStack result = e.getResult();
         if (result.getType() == Material.AIR) return;
-        if (!UpgradeCondition.hasGlobalUpgradeAt(b.getLocation(), "unity.furnace.ore_boost")) return;
+
+        // было: UpgradeCondition.hasGlobalUpgradeAt(...)
+        if (!hasCountryUpgradeAt(b.getLocation(), "unity.furnace.ore_boost")) return;
 
         if (ORE_SMELT_OUTPUTS.contains(result.getType())) {
             if (ThreadLocalRandom.current().nextDouble() < ORE_BOOST_CHANCE) {
@@ -123,7 +139,7 @@ public class UpgradesListener implements Listener {
     }
 
     /* ==============================
-       4) Smart Hoppers
+       Smart Hoppers
        ============================== */
 
     public static final class SmartHopperListener implements Listener {
@@ -167,8 +183,9 @@ public class UpgradesListener implements Listener {
 
         private int getUpgradeLevel(Location loc) {
             try {
-                if (UpgradeCondition.hasGlobalOrIndustrialUpgradeAt(loc, "unity.hopper.smart.2")) return 2;
-                if (UpgradeCondition.hasGlobalOrIndustrialUpgradeAt(loc, "unity.hopper.smart.1")) return 1;
+                // было: hasGlobalOrIndustrialUpgradeAt(...)
+                if (hasCountryUpgradeAt(loc, "unity.hopper.smart.2")) return 2;
+                if (hasCountryUpgradeAt(loc, "unity.hopper.smart.1")) return 1;
             } catch (Throwable ignored) {}
             return 0;
         }
@@ -191,8 +208,6 @@ public class UpgradesListener implements Listener {
             if (bestSlot < 0) return;
 
             ItemStack toMove = best.clone();
-            toMove.getAmount();
-
             hopperInv.setItem(bestSlot, null);
 
             Map<Integer, ItemStack> leftover = dst.addItem(toMove);
@@ -250,203 +265,193 @@ public class UpgradesListener implements Listener {
         }
     }
 
-
-
-
-
-
-
-
-
-
-
     /* ==============================
-       3) Fast Minecart IO (ускорение)
+       TNT dupe
        ============================== */
 
-//    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGH)
-//    public void onMinecartIO(InventoryMoveItemEvent e, @SuppressWarnings("unused") PlayerInteractEvent dummy) {
-//        // тот же евент, но проверим конкретно хоппер-вагонетку с локацией её инвентаря
-//        Inventory src = e.getSource();
-//        Inventory dst = e.getDestination();
-//
-//        Location anchor = inventoryAnchor(src);
-//        if (anchor == null) anchor = inventoryAnchor(dst);
-//        if (anchor == null) return;
-//
-//        if (!UpgradeCondition.hasGlobalUpgradeAt(anchor, "unity.minecart.fastio")) return;
-//
-//        // добавочный перенос ещё одного стека с задержкой (не ломаем ванильный)
-//        ItemStack moving = e.getItem();
-//        if (moving.getType() == Material.AIR) return;
-//
-//        final ItemStack extra = moving.clone();
-//        new BukkitRunnable() {
-//            @Override
-//            public void run() {
-//                try {
-//                    e.getDestination().addItem(extra);
-//                } catch (Throwable ignored) {
-//                }
-//            }
-//        }.runTaskLater(plugin, 2L);
-//    }
+    private static final Map<Material, Double> DUP_WHITELIST = Map.of(
+            Material.DIAMOND, 0.10,
+            Material.RAW_IRON, 0.12,
+            Material.RAW_GOLD, 0.12,
+            Material.RAW_COPPER, 0.12,
+            Material.ANCIENT_DEBRIS, 0.05
+    );
 
-//
-//
-//    /* ==============================
-//       6) TNT Quarry — «правильный» дроп и дубли
-//       ============================== */
-//
-//    // Белый список предметов для возможного дублирования и шанс
-//    private static final Map<Material, Double> DUP_WHITELIST = new HashMap<>();
-//
-//    static {
-//        DUP_WHITELIST.put(Material.DIAMOND, 0.10); // 10% шанс удвоить
-//        DUP_WHITELIST.put(Material.RAW_IRON, 0.12);
-//        DUP_WHITELIST.put(Material.RAW_GOLD, 0.12);
-//        DUP_WHITELIST.put(Material.RAW_COPPER, 0.12);
-//        DUP_WHITELIST.put(Material.ANCIENT_DEBRIS, 0.05);
-//    }
-//
-//    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
-//    public void onTntExplode(EntityExplodeEvent e) {
-//        Entity ent = e.getEntity();
-//        Location loc = ent.getLocation();
-//
-//        // включаем механику только если у страны в этой локации есть апгрейд
-//        if (!UpgradeCondition.hasGlobalUpgradeAt(loc, "unity.tnt.quarry")) return;
-//
-//        List<Block> blocks = new ArrayList<>(e.blockList());
-//        if (blocks.isEmpty()) return;
-//
-//        World w = loc.getWorld();
-//        if (w == null) return;
-//
-//        // 1) Собираем весь дроп со взрываемых блоков
-//        List<ItemStack> toDrop = new ArrayList<>();
-//        for (Block b : blocks) {
-//            if (b.getType() == Material.AIR) continue;
-//            try {
-//                // используем ванильный getDrops (без инструмента)
-//                Collection<ItemStack> drops = b.getDrops();
-//                toDrop.addAll(drops);
-//            } catch (Throwable ignored) {
-//            }
-//        }
-//
-//        // 2) Применяем логику дублирования по whitelist
-//        List<ItemStack> extra = new ArrayList<>();
-//        ThreadLocalRandom rnd = ThreadLocalRandom.current();
-//        for (ItemStack is : toDrop) {
-//            Double chance = DUP_WHITELIST.get(is.getType());
-//            if (chance != null && rnd.nextDouble() < chance) {
-//                ItemStack dup = is.clone();
-//                extra.add(dup);
-//            }
-//        }
-//        toDrop.addAll(extra);
-//
-//        // 3) Отменяем слом блоков от ванили и сами «выкидываем» дроп
-//        e.setYield(0f); // ванильный дроп от взрыва — отключаем
-//        for (Block b : blocks) {
-//            try {
-//                b.setType(Material.AIR, false);
-//            } catch (Throwable ignored) {
-//            }
-//        }
-//        final Location dropCenter = averageLocation(blocks, w, loc);
-//
-//        // 4) Спаун предметов
-//        for (ItemStack stack : toDrop) {
-//            if (stack == null || stack.getType() == Material.AIR || stack.getAmount() <= 0) continue;
-//            Item item = w.dropItemNaturally(dropCenter, stack);
-//            item.setPickupDelay(10);
-//        }
-//
-//        // эффект
-//        w.playSound(dropCenter, Sound.ENTITY_ITEM_PICKUP, 0.5f, 0.9f);
-//    }
-//
-//    private Location averageLocation(List<Block> blocks, World w, Location fallback) {
-//        if (blocks == null || blocks.isEmpty()) return fallback;
-//        double x = 0, y = 0, z = 0;
-//        int n = 0;
-//        for (Block b : blocks) {
-//            if (b == null) continue;
-//            x += b.getX() + 0.5;
-//            y += b.getY() + 0.5;
-//            z += b.getZ() + 0.5;
-//            n++;
-//        }
-//        if (n == 0) return fallback;
-//        return new Location(w, x / n, y / n, z / n);
-//    }
-//
-//    /* ==============================
-//       Дополнительно: эффект в индустриальной зоне
-//       ============================== */
-//
-//    // Пример: в INDUSTRIAL зоне — лёгкий HASTE, если есть апгрейд unity.zone.haste.[basic|advanced]
-//    // (переместил сюда, чтобы эффекты тоже жили в одном месте)
-//    @EventHandler
-//    public void onPlayerInteractApplyZoneEffects(PlayerInteractEvent e) {
-//        Player p = e.getPlayer();
-//        if (!p.isOnline()) return;
-//
-//        // Используем существующую модель: апгрейды — через permission у игрока (или группы страны)
-//        boolean adv = UpgradeCondition.hasGlobalUpgrade(p, "unity.zone.haste.advanced");
-//        boolean basic = adv || UpgradeCondition.hasGlobalUpgrade(p, "unity.zone.haste.basic");
-//
-//        boolean inIndustrial = isInZoneType(p, ZoneType.INDUSTRIAL);
-//
-//        if (inIndustrial && (adv || basic)) {
-//            int amp = adv ? 1 : 0;
-//            p.addPotionEffect(new PotionEffect(PotionEffectType.HASTE, 20 * 12, amp, true, false));
-//        }
-//    }
-//
-//    private static ZoneManager zoneManager() {
-//        try { return UnityLauncher.getInstance().getZoneManager(); }
-//        catch (Throwable ignored) {
-//            try { return UnityLauncher.getInstance().getZoneManager(); }
-//            catch (Throwable ignored2) { return null; }
-//        }
-//    }
-//
-//    private static ZoneInfo safeGetZoneAt(Location loc) {
-//        ZoneManager zm = zoneManager();
-//        return (zm != null && loc != null) ? zm.getZoneAt(loc) : null;
-//    }
-//
-//// ====== Новые методы ======
-//
-//    /** Проверка: находится ли ЛОКАЦИЯ в зоне указанного типа. */
-//    public static boolean isInZoneType(Location loc, ZoneType type) {
-//        if (loc == null || type == null) return false;
-//        try {
-//            ZoneInfo zi = safeGetZoneAt(loc);
-//            boolean result = zi != null && zi.getType() == type;
-//            // отладка в стиле твоих логов
-//            String w = (loc.getWorld() != null) ? loc.getWorld().getName() : "null";
-//            dbg("inZone|" + w + ":" + loc.getBlockX() + "," + loc.getBlockY() + "," + loc.getBlockZ()
-//                    + " -> " + (zi != null ? zi.getType() : "none") + " [need " + type + "] = " + result);
-//            return result;
-//        } catch (Throwable t) {
-//            Bukkit.getLogger().warning("[UpgradeCondition] isInZoneType failed at " + loc + " : " + t.getMessage());
-//            return false;
-//        }
-//    }
+    private static final ItemStack FORTUNE2_PICK;
+    static {
+        ItemStack p = new ItemStack(Material.DIAMOND_PICKAXE);
+        p.addUnsafeEnchantment(Enchantment.FORTUNE, 2);
+        FORTUNE2_PICK = p;
+    }
 
-//    /** Проверка по игроку: где стоит игрок — та локация в зоне указанного типа? */
-//    public static boolean isInZoneType(Player player, ZoneType type) {
-//        if (player == null || !player.isOnline()) return false;
-//        return isInZoneType(player.getLocation(), type);
-//    }
-//
-//    /** Удобный синоним именно для индустриальных зон по локации. */
-//    public static boolean isInIndustrialZoneAt(Location loc) {
-//        return isInZoneType(loc, ZoneType.INDUSTRIAL);
-//    }
+    private static final Set<Material> ORES = EnumSet.of(
+            Material.COAL_ORE, Material.DEEPSLATE_COAL_ORE,
+            Material.IRON_ORE, Material.DEEPSLATE_IRON_ORE,
+            Material.GOLD_ORE, Material.DEEPSLATE_GOLD_ORE,
+            Material.COPPER_ORE, Material.DEEPSLATE_COPPER_ORE,
+            Material.LAPIS_ORE, Material.DEEPSLATE_LAPIS_ORE,
+            Material.REDSTONE_ORE, Material.DEEPSLATE_REDSTONE_ORE,
+            Material.EMERALD_ORE, Material.DEEPSLATE_EMERALD_ORE,
+            Material.DIAMOND_ORE, Material.DEEPSLATE_DIAMOND_ORE,
+            Material.NETHER_GOLD_ORE, Material.NETHER_QUARTZ_ORE,
+            Material.ANCIENT_DEBRIS
+    );
 
+    private static boolean isOre(Material m) { return ORES.contains(m); }
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
+    public void onTntQuarryExplode(EntityExplodeEvent e) {
+        Entity ent = e.getEntity();
+        if (!(ent instanceof TNTPrimed)) return;
+
+        Location loc = ent.getLocation();
+        World w = loc.getWorld();
+
+        // было: UpgradeCondition.hasGlobalUpgradeAt(loc, "unity.tnt.quarry")
+        if (w == null || !hasCountryUpgradeAt(loc, "unity.tnt.quarry")) return;
+
+        List<Block> blocks = e.blockList();
+        if (blocks.isEmpty()) return;
+
+        List<ItemStack> toDrop = new ArrayList<>(blocks.size() * 2);
+        for (Block b : blocks) {
+            Material t = b.getType();
+            if (t == Material.AIR) continue;
+            try {
+                Collection<ItemStack> drops = isOre(t) ? b.getDrops(FORTUNE2_PICK) : b.getDrops();
+                if (!drops.isEmpty()) toDrop.addAll(drops);
+            } catch (Throwable ignored) {}
+        }
+
+        if (!toDrop.isEmpty()) {
+            ThreadLocalRandom rnd = ThreadLocalRandom.current();
+            List<ItemStack> extra = new ArrayList<>();
+            for (ItemStack is : toDrop) {
+                Double ch = DUP_WHITELIST.get(is.getType());
+                if (ch != null && rnd.nextDouble() < ch) extra.add(is.clone());
+            }
+            if (!extra.isEmpty()) toDrop.addAll(extra);
+        }
+
+        e.setYield(0f);
+        for (Block b : blocks) {
+            try { if (b.getType() != Material.AIR) b.setType(Material.AIR, false); } catch (Throwable ignored) {}
+        }
+
+        Location dropCenter = averageLocation(blocks, w, loc);
+        for (ItemStack s : toDrop) {
+            if (s == null || s.getType() == Material.AIR || s.getAmount() <= 0) continue;
+            Item item = w.dropItemNaturally(dropCenter, s);
+            item.setPickupDelay(10);
+        }
+        if (!toDrop.isEmpty()) w.playSound(dropCenter, Sound.ENTITY_ITEM_PICKUP, 0.5f, 0.9f);
+    }
+
+    private static Location averageLocation(List<Block> blocks, World w, Location fallback) {
+        if (blocks == null || blocks.isEmpty()) return fallback;
+        double x = 0, y = 0, z = 0; int n = 0;
+        for (Block b : blocks) { x += b.getX() + .5; y += b.getY() + .5; z += b.getZ() + .5; n++; }
+        return n == 0 ? fallback : new Location(w, x / n, y / n, z / n);
+    }
+
+    /* ==============================
+       Haste
+       ============================== */
+
+    private final ZoneManager zones = UnityLauncher.getInstance().getZoneManager();
+    private final Map<UUID, Long> lastApplied = new HashMap<>();
+
+    private static final int HASTE_TICKS = 20 * 12;
+    private static final long REAPPLY_COOLDOWN_MS = 4000;
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
+    public void onMove(PlayerMoveEvent e) {
+        if (e.getFrom().getBlockX() == e.getTo().getBlockX()
+                && e.getFrom().getBlockY() == e.getTo().getBlockY()
+                && e.getFrom().getBlockZ() == e.getTo().getBlockZ()) return;
+        checkAndApply(e.getPlayer());
+    }
+
+    @EventHandler
+    public void onJoin(PlayerJoinEvent e) {
+        Bukkit.getScheduler().runTaskLater(UnityLauncher.getInstance(),
+                () -> checkAndApply(e.getPlayer()), 20L);
+    }
+
+    @EventHandler
+    public void onRespawn(PlayerRespawnEvent e) {
+        Bukkit.getScheduler().runTaskLater(UnityLauncher.getInstance(),
+                () -> checkAndApply(e.getPlayer()), 20L);
+    }
+
+    private void checkAndApply(Player p) {
+        if (!p.isOnline()) return;
+
+        ZoneInfo zi = zones != null ? zones.getZoneAt(p.getLocation()) : null;
+        boolean inIndustrial = zi != null && zi.getType() == ZoneType.INDUSTRIAL;
+
+        // было: groupHas(zi, node)
+        boolean hasAdv = inIndustrial && UpgradeCondition.hasUpgradeInZone(p, zi, "unity.zone.haste.advanced");
+        boolean hasBasicOnly = inIndustrial && !hasAdv && UpgradeCondition.hasUpgradeInZone(p, zi, "unity.zone.haste.basic");
+
+        boolean shouldHave = inIndustrial && (hasAdv || hasBasicOnly);
+        int amp = hasAdv ? 1 : 0; // basic -> 0 (Haste I), advanced -> 1 (Haste II)
+
+        PotionEffect current = p.getPotionEffect(PotionEffectType.HASTE);
+        if (shouldHave) {
+            long now = System.currentTimeMillis();
+            Long last = lastApplied.get(p.getUniqueId());
+
+            boolean needReapply =
+                    current == null
+                            || current.getAmplifier() != amp
+                            || current.getDuration() < 20 * 4
+                            || last == null
+                            || (now - last) > REAPPLY_COOLDOWN_MS;
+
+            if (needReapply) {
+                p.addPotionEffect(new PotionEffect(
+                        PotionEffectType.HASTE,
+                        HASTE_TICKS,
+                        amp,
+                        true,   // ambient
+                        false,  // без частиц
+                        true    // с иконкой
+                ));
+                lastApplied.put(p.getUniqueId(), now);
+            }
+        } else {
+            if (current != null && current.getAmplifier() <= 1 && current.isAmbient() && !current.hasParticles()) {
+                p.removePotionEffect(PotionEffectType.HASTE);
+            }
+        }
+    }
+
+    /* ==============================
+       Общий хелпер для апгрейдов по локации
+       ============================== */
+
+    /**
+     * Проверка ноды пермишена у страны, «владеющей» зоной по данной локации.
+     * Логика соответствуют новой UpgradeCondition: если зона — COUNTRY,
+     * страна берётся из самой зоны, иначе — страна берётся из кэша по создателю зоны.
+     */
+    private static boolean hasCountryUpgradeAt(Location loc, String permissionKey) {
+        if (loc == null) return false;
+
+        ZoneManager zm = UnityLauncher.getInstance().getZoneManager();
+        ZoneInfo zi = (zm != null) ? zm.getZoneAt(loc) : null;
+        if (zi == null) return false;
+
+        String country;
+        if (zi.getType() == ZoneType.COUNTRY && zi.hasCountry()) {
+            country = zi.getCountryName();
+        } else {
+            // страна создателя зоны — из кэша (без SQL)
+            country = UnityLauncher.getInstance().countryRegistryJdbc.getCountryCached(zi.getOwner());
+        }
+        if (country == null || country.isBlank()) return false;
+
+        return UpgradeCondition.countryHasPermission(country, permissionKey);
+    }
 }

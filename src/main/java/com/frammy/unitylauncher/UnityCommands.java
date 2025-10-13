@@ -9,10 +9,11 @@ import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.Player;
 import org.bukkit.permissions.PermissionAttachmentInfo;
 import org.bukkit.scheduler.BukkitRunnable;
-import org.bukkit.util.Consumer;
 import org.jetbrains.annotations.NotNull;
-import org.json.simple.JSONObject;
-import org.json.simple.parser.JSONParser;
+import java.util.function.Consumer;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonParser;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -43,104 +44,91 @@ public class UnityCommands {
             List<String> jsonKeys
     ) {
         Map<String, Object> resultMap = new HashMap<>();
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                // Допустимые таблицы и их JSON-колонки
-                Map<String, List<String>> allowedJsonColumns = Map.of(
-                        "Users", List.of("CustomizationData", "SocialData", "GeneralData", "StatsData"),
-                        "Countries", List.of("GeneralData", "StatsData") // Добавь нужные колонки для Countries
-                );
+        try (Connection con = DBConnect()) {
+            if (con == null) return resultMap;
 
-                if (!allowedJsonColumns.containsKey(tableName)) {
-                    System.err.println("Недопустимая таблица: " + tableName);
-                    return resultMap;
-                }
+            Map<String, List<String>> allowedJsonColumns = Map.of(
+                    "Users", List.of("CustomizationData", "SocialData", "GeneralData", "StatsData"),
+                    "Countries", List.of("GeneralData", "StatsData")
+            );
 
-                if (!allowedJsonColumns.get(tableName).contains(jsonColumn)) {
-                    System.err.println("Недопустимая JSON-колонка '" + jsonColumn + "' для таблицы '" + tableName + "'");
-                    return resultMap;
-                }
+            if (!allowedJsonColumns.containsKey(tableName)) {
+                System.err.println("Недопустимая таблица: " + tableName);
+                return resultMap;
+            }
+            if (!allowedJsonColumns.get(tableName).contains(jsonColumn)) {
+                System.err.println("Недопустимая JSON-колонка '" + jsonColumn + "' для таблицы '" + tableName + "'");
+                return resultMap;
+            }
 
-                String query = "SELECT " + jsonColumn + " FROM " + tableName + " WHERE " + whereColumn + " = ?;";
-                PreparedStatement st = con.prepareStatement(query);
+            String query = "SELECT " + jsonColumn + " FROM " + tableName + " WHERE " + whereColumn + " = ?;";
+            try (PreparedStatement st = con.prepareStatement(query)) {
                 st.setString(1, whereValue);
-
-                ResultSet rs = st.executeQuery();
-                if (rs.next()) {
-                    String jsonStr = rs.getString(1);
-                    if (jsonStr != null && !jsonStr.isEmpty()) {
-                        JSONParser parser = new JSONParser();
-                        JSONObject json = (JSONObject) parser.parse(jsonStr);
-
-                        for (String key : jsonKeys) {
-                            resultMap.put(key, json.getOrDefault(key, null));
+                try (ResultSet rs = st.executeQuery()) {
+                    if (rs.next()) {
+                        String jsonStr = rs.getString(1);
+                        if (jsonStr != null && !jsonStr.isEmpty()) {
+                            JsonObject obj = JsonParser.parseString(jsonStr).getAsJsonObject();
+                            Gson gson = new Gson();
+                            for (String key : jsonKeys) {
+                                JsonElement el = obj.get(key);
+                                resultMap.put(key, el == null || el.isJsonNull() ? null : gson.fromJson(el, Object.class));
+                            }
                         }
                     }
                 }
-
-                rs.close();
-                st.close();
-                con.close();
-            } catch (Exception e) {
-                System.err.println("Ошибка чтения JSON: " + e.getMessage());
-                e.printStackTrace();
             }
+        } catch (Exception e) {
+            System.err.println("Ошибка чтения JSON: " + e.getMessage());
+            e.printStackTrace();
         }
         return resultMap;
     }
+
     public void mergeAndUpdatePlayerData(String playerName, String column, Map<String, Object> updates) {
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                // Проверка допустимых колонок
-                List<String> validColumns = List.of("CustomizationData", "SocialData", "GeneralData", "StatsData");
-                if (!validColumns.contains(column)) {
-                    System.err.println("Недопустимая колонка: " + column);
-                    return;
-                }
+        List<String> validColumns = List.of("CustomizationData", "SocialData", "GeneralData", "StatsData");
+        if (!validColumns.contains(column)) {
+            System.err.println("Недопустимая колонка: " + column);
+            return;
+        }
 
-                // Получаем текущие данные
-                String selectQuery = "SELECT " + column + " FROM Users WHERE Name = ?;";
-                PreparedStatement selectSt = con.prepareStatement(selectQuery);
+        try (Connection con = DBConnect()) {
+            if (con == null) return;
+
+            String selectQuery = "SELECT " + column + " FROM Users WHERE Name = ?;";
+            JsonObject currentJson = new JsonObject();
+
+            try (PreparedStatement selectSt = con.prepareStatement(selectQuery)) {
                 selectSt.setString(1, playerName);
-                ResultSet rs = selectSt.executeQuery();
-
-                JSONObject currentJson = new JSONObject();
-                if (rs.next()) {
-                    String jsonStr = rs.getString(column);
-                    if (jsonStr != null && !jsonStr.isEmpty()) {
-                        JSONParser parser = new JSONParser();
-                        currentJson = (JSONObject) parser.parse(jsonStr);
+                try (ResultSet rs = selectSt.executeQuery()) {
+                    if (rs.next()) {
+                        String jsonStr = rs.getString(column);
+                        if (jsonStr != null && !jsonStr.isEmpty()) {
+                            currentJson = JsonParser.parseString(jsonStr).getAsJsonObject();
+                        }
+                    } else {
+                        System.out.println("Игрок не найден: " + playerName);
+                        return;
                     }
-                } else {
-                    System.out.println("Игрок не найден: " + playerName);
-                    return;
                 }
+            }
 
-                rs.close();
-                selectSt.close();
+            Gson gson = new Gson();
+            for (Map.Entry<String, Object> e : updates.entrySet()) {
+                currentJson.add(e.getKey(), gson.toJsonTree(e.getValue()));
+            }
 
-                // Обновляем нужные поля
-                for (Map.Entry<String, Object> entry : updates.entrySet()) {
-                    currentJson.put(entry.getKey(), entry.getValue());
-                }
-
-                // Записываем обратно
-                String updateQuery = "UPDATE Users SET " + column + " = ? WHERE Name = ?;";
-                PreparedStatement updateSt = con.prepareStatement(updateQuery);
-                updateSt.setString(1, currentJson.toJSONString());
+            String updateQuery = "UPDATE Users SET " + column + " = ? WHERE Name = ?;";
+            try (PreparedStatement updateSt = con.prepareStatement(updateQuery)) {
+                updateSt.setString(1, currentJson.toString());
                 updateSt.setString(2, playerName);
                 updateSt.executeUpdate();
-
-                updateSt.close();
-                con.close();
-
-                System.out.println("Обновление успешно: " + playerName + " → " + column);
-            } catch (Exception e) {
-                System.err.println("Ошибка обновления JSON: " + e.getMessage());
-                e.printStackTrace();
             }
+
+            System.out.println("Обновление успешно: " + playerName + " → " + column);
+        } catch (Exception e) {
+            System.err.println("Ошибка обновления JSON: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 
@@ -228,7 +216,7 @@ public class UnityCommands {
                         sender.sendMessage(ChatColor.RED + "Недостаточно прав!");
                         return;
                     }
-                    if (rs.getString("PermissionGroups").length() == 0) return;
+                    if (rs.getString("PermissionGroups").isEmpty()) return;
                     String[] list = rs.getString("PermissionGroups").split("¦");
                     StringBuilder fin = new StringBuilder();
                     for (String row : list) {
@@ -368,10 +356,9 @@ public class UnityCommands {
 
     public void changePass(@NotNull CommandSender sender, String old, String password) {
         Connection con = DBConnect();
-        if (con != null || password != null) {
+        if (con != null && password != null) {
             try {
                 String querySelect = "SELECT Name, Password FROM Users WHERE Name='" + sender.getName() + "';";
-                assert con != null;
                 Statement stSelect = con.createStatement();
                 ResultSet rs = stSelect.executeQuery(querySelect);
                 if (rs.next()) {
@@ -570,36 +557,32 @@ public class UnityCommands {
     public void getNotifications(@NotNull CommandSender sender) {
         getNotified(sender);
     }
-    public void getPlayerInfo(String sender, Consumer<GeneralData> callback) {
+    public void getPlayerInfo(String sender, Consumer<GeneralData> callback) { // java.util.function.Consumer
         new BukkitRunnable() {
             @Override
             public void run() {
                 GeneralData result = null;
-                Connection con = DBConnect();
-                if (con != null) {
-                    try {
+                try (Connection con = DBConnect()) {
+                    if (con != null) {
                         String query = "SELECT GeneralData FROM Users WHERE Name = ?;";
-                        PreparedStatement st = con.prepareStatement(query);
-                        st.setString(1, sender);
-                        ResultSet rs = st.executeQuery();
-
-                        if (rs.next()) {
-                            String generalDataJson = rs.getString("GeneralData");
-                            if (generalDataJson != null && !generalDataJson.isEmpty()) {
-                                Gson gson = new Gson();
-                                result = gson.fromJson(generalDataJson, GeneralData.class);
+                        try (PreparedStatement st = con.prepareStatement(query)) {
+                            st.setString(1, sender);
+                            try (ResultSet rs = st.executeQuery()) {
+                                if (rs.next()) {
+                                    String generalDataJson = rs.getString("GeneralData");
+                                    if (generalDataJson != null && !generalDataJson.isEmpty()) {
+                                        Gson gson = new Gson();
+                                        result = gson.fromJson(generalDataJson, GeneralData.class);
+                                    }
+                                }
                             }
                         }
-                        rs.close();
-                        st.close();
-                        con.close();
-                    } catch (Exception e) {
-                        onError("getPlayerInfo", Bukkit.getPlayer(sender));
                     }
+                } catch (Exception e) {
+                    onError("getPlayerInfo", Bukkit.getPlayer(sender));
                 }
 
                 GeneralData finalResult = result;
-                // Вернуться в главный поток для вызова callback (например, sendMessage)
                 new BukkitRunnable() {
                     @Override
                     public void run() {
@@ -609,6 +592,7 @@ public class UnityCommands {
             }
         }.runTaskAsynchronously(UnityLauncher.getInstance());
     }
+
 
     public static void getNotified(@NotNull CommandSender sender) {
         Connection con = DBConnect();

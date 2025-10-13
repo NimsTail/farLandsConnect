@@ -33,9 +33,9 @@ public class ChunkStats {
         long delta = now - lastUpdated;
         double hours = delta / 3600000.0;
         double decay = getSigmoidDecay(hours);
-        timeSpent *= decay;
-        blocksPlaced *= decay;
-        blocksBroken *= decay;
+        timeSpent *= (long) decay;
+        blocksPlaced *= (int) decay;
+        blocksBroken *= (int) decay;
         // lastUpdated не трогаем
     }
 

@@ -1,17 +1,13 @@
 package com.frammy.unitylauncher.chunkactivity;
 
-import com.frammy.unitylauncher.UnityCommands;
 import com.frammy.unitylauncher.UnityLauncher;
 import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
-import org.bukkit.Location;
-import org.bukkit.World;
 import org.bukkit.entity.Player;
 import org.bukkit.event.*;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
-import org.bukkit.plugin.Plugin;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -87,8 +83,8 @@ public class ActivityTracker implements Listener {
         long now = System.currentTimeMillis();
         PlayerChunkSession session = playerChunks.get(uuid);
 
-        if (session != null && session.currentChunk.equals(getChunkKey(fromChunk))) {
-            long timeSpent = now - session.enterTime;
+        if (session != null && session.currentChunk().equals(getChunkKey(fromChunk))) {
+            long timeSpent = now - session.enterTime();
             getStats(fromChunk).addTime(timeSpent);
         }
 

@@ -11,7 +11,7 @@ import de.bluecolored.bluemap.api.markers.ExtrudeMarker;
 import de.bluecolored.bluemap.api.markers.Marker;
 import de.bluecolored.bluemap.api.markers.MarkerSet;
 import de.bluecolored.bluemap.api.math.Shape;
-import org.apache.commons.lang.WordUtils;
+import org.apache.commons.lang3.text.WordUtils;
 import org.bukkit.*;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
@@ -33,7 +33,6 @@ import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerItemHeldEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.Inventory;
-import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.scheduler.BukkitRunnable;
@@ -111,7 +110,7 @@ public class SignManager implements Listener {
                 }
             }
 
-            if (e.getLine(0).equalsIgnoreCase("shop") || e.getLine(0).equalsIgnoreCase("магазин")) {
+            if (Objects.requireNonNull(e.getLine(0)).equalsIgnoreCase("shop") || Objects.requireNonNull(e.getLine(0)).equalsIgnoreCase("магазин")) {
                 ExtrudeMarker marker = isSignWithinMarker(sign.getLocation(), "zones_shop");
                 String label = marker.getLabel();
                 if (label.isEmpty()) {
@@ -127,7 +126,7 @@ public class SignManager implements Listener {
                     switch (e.getLine(1)) {
                         case "source":
                         case "источник":
-                            Block nearestStorage = findNearestContainer(sign.getLocation(), 5, p);
+                            Block nearestStorage = findNearestContainer(sign.getLocation(), p);
                             makeSignScrollingLines(e.getBlock().getLocation(), linesToScroll, 6, 13);
                             if (nearestStorage != null) {
                                 Location loc = nearestStorage.getLocation();
@@ -154,39 +153,35 @@ public class SignManager implements Listener {
                             break;
                         case "list":
                         case "список":
-                            if (marker != null) {
-                                Map<Integer, String> linesToScroll1 = new HashMap<>();
-                                linesToScroll1.put(0, line0);
-                                makeSignScrollingLines(e.getBlock().getLocation(), linesToScroll1, 6, 13);
+                            Map<Integer, String> linesToScroll1 = new HashMap<>();
+                            linesToScroll1.put(0, line0);
+                            makeSignScrollingLines(e.getBlock().getLocation(), linesToScroll1, 6, 13);
 
-                                playerScrollIndex.put(p.getUniqueId(), 0);
+                            playerScrollIndex.put(p.getUniqueId(), 0);
 
-                                SignVariables listVars = new SignVariables(
-                                        p.getName(),
-                                        Arrays.asList(line0, "...", "Загрузка", "..."),
-                                        List.of(0),
-                                        false,
-                                        false,
-                                        SignCategory.SHOP_LIST,
-                                        SignState.SHOP_DEFINED,
-                                        null
-                                );
-                                genericSignList.put(sign.getLocation(), listVars);
+                            SignVariables listVars = new SignVariables(
+                                    p.getName(),
+                                    Arrays.asList(line0, "...", "Загрузка", "..."),
+                                    List.of(0),
+                                    false,
+                                    false,
+                                    SignCategory.SHOP_LIST,
+                                    SignState.SHOP_DEFINED,
+                                    null
+                            );
+                            genericSignList.put(sign.getLocation(), listVars);
 
-                                // ⏳ ОТЛОЖЕННО обновляем список товаров, чтобы успела сохраниться табличка
-                                Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
-                                    updateAllRelatedShopListSigns(sign.getLocation());
-                                });
+                            // ⏳ ОТЛОЖЕННО обновляем список товаров, чтобы успела сохраниться табличка
+                            Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> updateAllRelatedShopListSigns(sign.getLocation()));
 
-                                p.sendMessage(ChatColor.GREEN + "Список товаров обновлён. Используйте колёсико мыши для прокрутки.");
-                            } else {
-                                p.sendMessage(ChatColor.RED + "Вы должны находиться в зоне магазина.");
-                            }
+                            p.sendMessage(ChatColor.GREEN + "Список товаров обновлён. Используйте колёсико мыши для прокрутки.");
                             break;
 
                         case "help":
                         case "помощь":
                             p.sendMessage(ChatColor.GREEN + "Для показа помощи");
+                            break;
+                        case null:
                             break;
                         default:
                             p.sendMessage(ChatColor.RED + "Отсутствуют параметры на 2-ой строке таблички.");
@@ -194,7 +189,7 @@ public class SignManager implements Listener {
                     }
                 }
             }
-            if (e.getLine(0).equalsIgnoreCase("ATM")) {
+            if (Objects.requireNonNull(e.getLine(0)).equalsIgnoreCase("ATM")) {
                 if (unityCommands.hasPermissionContaining(p, "0")) {
                     UnityCommands.getInstance().getPlayerInfo(p.getName(), data -> {
                         if (data == null) {
@@ -203,6 +198,7 @@ public class SignManager implements Listener {
                         new BukkitRunnable() {
                             @Override
                             public void run() {
+                                assert data != null;
                                 String line0 = "ATM [" + data.countryName + "]";
                                 Map<Integer, String> linesToScroll = new HashMap<>();
                                 linesToScroll.put(0, line0);
@@ -235,7 +231,7 @@ public class SignManager implements Listener {
                 }
             }
         } else {
-            if (e.getLine(0).equalsIgnoreCase("ATM")) {
+            if (Objects.requireNonNull(e.getLine(0)).equalsIgnoreCase("ATM")) {
                 p.sendMessage(ChatColor.RED + "Свисающие таблички нельзя использовать в качестве банковского автомата!");
             }
         }
@@ -356,9 +352,8 @@ public class SignManager implements Listener {
         Block b = e.getClickedBlock();
         Player p = e.getPlayer();
 
-        if (b == null || !(b.getState() instanceof Sign)) return;
+        if (b == null || !(b.getState() instanceof Sign sign)) return;
 
-        Sign sign = (Sign) b.getState();
         Location loc = sign.getLocation();
 
         if (e.getAction() == Action.LEFT_CLICK_BLOCK && b.getState() instanceof Sign) {
@@ -417,8 +412,8 @@ public class SignManager implements Listener {
                             }
 
                             List<String> signTexts = genericSignList.get(sign.getLocation()).getSignText();
-                            String line3 = "Цена: " + ChatColor.GREEN + String.valueOf(price);
-                            String line2 = "Кол-во: " + ChatColor.YELLOW + String.valueOf(amount);
+                            String line3 = "Цена: " + ChatColor.GREEN + price;
+                            String line2 = "Кол-во: " + ChatColor.YELLOW + amount;
 
                             signVariables.setSignText(Arrays.asList(signTexts.get(0), signTexts.get(1), line2, line3));
                             sign.setLine(2, line2);
@@ -512,7 +507,7 @@ public class SignManager implements Listener {
                                             chestLocation = new Location(sign.getWorld(), x, y, z);
 
                                             Container container = (Container) chestLocation.getBlock().getState();
-                                            Integer slot = getFirstOccupiedSlot(container.getInventory());
+                                            int slot = getFirstOccupiedSlot(container.getInventory());
 
                                             if (slot == -1) {
                                                 p.sendMessage(ChatColor.RED + "Контейнер пуст, транзакция отменена.");
@@ -520,6 +515,7 @@ public class SignManager implements Listener {
                                             }
 
                                             ItemStack item = container.getInventory().getItem(slot);
+                                            assert item != null;
                                             ItemMeta itemMeta = item.getItemMeta();
                                             String itemName;
                                             itemName = WordUtils.capitalizeFully(item.getType().name().toLowerCase().replace("_", " "));
@@ -569,7 +565,8 @@ public class SignManager implements Listener {
 
         // Если табличка в режиме "Коснитесь, чтобы начать"
         if (sign.getLine(1).equals("Коснитесь,") && genericSignList.containsKey(loc)) {
-            if (p.getItemInHand() == null || p.getItemInHand().getType() == Material.AIR) {
+            p.getItemInHand();
+            if (p.getItemInHand().getType() == Material.AIR) {
                 e.setCancelled(true);
                 setupSign(loc, sign, p);
                 genericSignList.get(loc).setSignState(SignState.ATM_MENU);
@@ -587,7 +584,6 @@ public class SignManager implements Listener {
 
             if (p.isSneaking()) {
                 // ЛКМ + Shift → сброс
-                scrollIndex = 0;
                 playerScrollIndex.put(p.getUniqueId(), 0);
                 p.sendMessage(ChatColor.GRAY + "Возврат к списку.");
                 updateSignView(sign, items, 0);
@@ -642,7 +638,7 @@ public class SignManager implements Listener {
 
         if (signSelectionMap.containsKey(p)) {
             Block signBlock = signSelectionMap.get(p);
-            Location containerLoc = ((InventoryHolder) e.getInventory().getHolder()).getInventory().getLocation();
+            Location containerLoc = Objects.requireNonNull(e.getInventory().getHolder()).getInventory().getLocation();
             Sign sign = (Sign) signBlock.getState();
 
             if (containerLoc == null) {
@@ -675,8 +671,7 @@ public class SignManager implements Listener {
 
         // Проверка на случай, если сам блок является табличкой или hanging sign
         if (brokenBlock.getType().toString().contains("SIGN")) {
-            if (brokenBlock.getState() instanceof Sign) {
-                Sign sign = (Sign) brokenBlock.getState();
+            if (brokenBlock.getState() instanceof Sign sign) {
                 Location loc = sign.getLocation();
                 if (genericSignList.containsKey(loc)) {
                     if (!genericSignList.get(loc).getOwnerName().equals(player.getName())) {
@@ -774,10 +769,9 @@ public class SignManager implements Listener {
 
         // Проверим, смотрит ли игрок на табличку
         Block target = player.getTargetBlockExact(4); // до 6 блоков — можно увеличить
-        if (target == null || !(target.getState() instanceof Sign)) return;
+        if (target == null || !(target.getState() instanceof Sign sign)) return;
 
         Location loc = target.getLocation();
-        Sign sign = (Sign) target.getState();
 
         List<String> items = signPages.get(loc);
         if (items == null) return;
@@ -816,7 +810,7 @@ public class SignManager implements Listener {
         // Если выбранный текст длиннее 15, запускаем прокрутку
         if (selectedText != null && ChatColor.stripColor(selectedText).length() > 15) {
             pauseScrolling(loc);
-            startSignTextScroll(sign, 2, selectedText, ChatColor.GREEN, 15, 216, 6, () -> { resumeScrolling(loc);}); // строка 2 — третья строка
+            startSignTextScroll(sign, 2, selectedText, ChatColor.GREEN, 15, 216, 6, () -> resumeScrolling(loc)); // строка 2 — третья строка
         }
         scheduleSignReset(sign.getLocation());
         e.setCancelled(true);
@@ -917,15 +911,6 @@ public class SignManager implements Listener {
                     p.sendMessage(ChatColor.RED + "Введите корректную сумму.");
                     return; // прерываем выполнение, если ввод некорректный
                 }
-                String nickname = updatedSign.getLine(2).toLowerCase();
-                if (!nickname.isEmpty()) {
-
-
-                } else
-                {
-
-                }
-
 
                 genericSignList.get(loc).setSignState(SignState.ATM_ACTION_READY);
             });
@@ -936,12 +921,10 @@ public class SignManager implements Listener {
             sign.setLine(3, " ");
             sign.update();
         });
-        actions.put("Информация", () -> {
-            p.sendMessage(ChatColor.YELLOW + "=======[ ATM ]=======\n" +
-                    ChatColor.GREEN + "Принадлежит: " + ChatColor.RESET + genericSignList.get(loc).getSignText().get(0).replace("ATM [", "").replace("]", "") + "\n" +
-                    ChatColor.GREEN + "Установлен: " + ChatColor.RESET + genericSignList.get(loc).getOwnerName() + "\n" +
-                    ChatColor.GREEN + "Коммиссионная плата для других банков: " + ChatColor.RESET + " ");
-        });
+        actions.put("Информация", () -> p.sendMessage(ChatColor.YELLOW + "=======[ ATM ]=======\n" +
+                ChatColor.GREEN + "Принадлежит: " + ChatColor.RESET + genericSignList.get(loc).getSignText().getFirst().replace("ATM [", "").replace("]", "") + "\n" +
+                ChatColor.GREEN + "Установлен: " + ChatColor.RESET + genericSignList.get(loc).getOwnerName() + "\n" +
+                ChatColor.GREEN + "Коммиссионная плата для других банков: " + ChatColor.RESET + " "));
 
         playerScrollIndex.clear();
 
@@ -968,9 +951,9 @@ public class SignManager implements Listener {
         if (items.size() == 1) {
             // Одна строка — по центру
             sign.setLine(1, "");
-            sign.setLine(2, ChatColor.GREEN + truncateToVisible(items.get(0)));
+            sign.setLine(2, ChatColor.GREEN + truncateToVisible(items.getFirst()));
             sign.setLine(3, "");
-            highlighted = items.get(0);
+            highlighted = items.getFirst();
         } else if (items.size() == 2) {
             // Две строки — верх и центр, центральная скроллится, offset 0 или 1
             int upperIndex = offset % 2;
@@ -1114,6 +1097,7 @@ public class SignManager implements Listener {
             int y = section.getInt("location.y");
             int z = section.getInt("location.z");
 
+            assert worldName != null;
             World world = Bukkit.getWorld(worldName);
             if (world == null) continue;
 
@@ -1152,7 +1136,7 @@ public class SignManager implements Listener {
             SignVariables vars = new SignVariables(owner, text, scrollLines, isConfigurable, isPaused, category, state, markerID);
             genericSignList.put(loc, vars);
 
-            if (scrollLines != null && !scrollLines.isEmpty()) {
+            if (!scrollLines.isEmpty()) {
                 Map<Integer, String> scrollMap = new HashMap<>();
                 for (int index : scrollLines) {
                     if (index >= 0 && index < text.size()) {
@@ -1165,9 +1149,7 @@ public class SignManager implements Listener {
             }
 
             if (category == SignCategory.SHOP_LIST) {
-                Bukkit.getScheduler().runTaskLater(unityLauncher, () -> {
-                    updateAllRelatedShopListSigns(loc);
-                }, 20L * 5);
+                Bukkit.getScheduler().runTaskLater(unityLauncher, () -> updateAllRelatedShopListSigns(loc), 20L * 5);
             }
         }
     }
@@ -1182,9 +1164,8 @@ public class SignManager implements Listener {
 
     public void makeSignScrollingLines(Location signLocation, Map<Integer, String> originalLines, int intervalTicks, int maxLength) {
         Block block = signLocation.getBlock();
-        if (!(block.getState() instanceof Sign)) return;
+        if (!(block.getState() instanceof Sign sign)) return;
 
-        Sign sign = (Sign) block.getState();
         Map<Integer, String> scrollBuffers = new HashMap<>();
         for (Map.Entry<Integer, String> entry : originalLines.entrySet()) {
             int lineIndex = entry.getKey();
@@ -1210,7 +1191,7 @@ public class SignManager implements Listener {
         }
 
         BukkitTask task = Bukkit.getScheduler().runTaskTimer(unityLauncher, () -> {
-            if (!(signLocation.getBlock().getState() instanceof Sign)) {
+            if (!(signLocation.getBlock().getState() instanceof Sign currentSign)) {
                 scrollingTasks.remove(signLocation);
                 genericSignList.get(signLocation).setPaused(false);
                 return;
@@ -1227,7 +1208,6 @@ public class SignManager implements Listener {
                             && player.getLocation().distanceSquared(signLocation) <= 35 * 35);
             if (!anyNearby) return;
 
-            Sign currentSign = (Sign) signLocation.getBlock().getState();
             int baseLength = Math.max(1, unityLauncher.getMaxBaseLength(originalLines.values()));
             int pos = offset.getAndUpdate(i -> (i + 1) % baseLength);
 
@@ -1260,6 +1240,7 @@ public class SignManager implements Listener {
             int y = signSection.getInt("location.y");
             int z = signSection.getInt("location.z");
 
+            assert worldName != null;
             World world = Bukkit.getWorld(worldName);
             if (world == null) continue;
 
@@ -1334,12 +1315,11 @@ public class SignManager implements Listener {
             }
 
             Block block = loc.getBlock();
-            if (!(block.getState() instanceof Sign)) {
+            if (!(block.getState() instanceof Sign sign)) {
                 resetTasks.remove(loc);
                 return;
             }
 
-            Sign sign = (Sign) block.getState();
             String[] lines = originalSignTexts.get(loc);
             if (lines == null) {
                 resetTasks.remove(loc);
@@ -1357,14 +1337,14 @@ public class SignManager implements Listener {
         resetTasks.put(loc, task);
     }
 
-    private Block findNearestContainer(Location origin, int radius, Player p) {
+    private Block findNearestContainer(Location origin, Player p) {
         World world = origin.getWorld();
         Block nearest = null;
         double minDistanceSquared = Double.MAX_VALUE;
 
-        for (int x = -radius; x <= radius; x++) {
-            for (int y = -radius; y <= radius; y++) {
-                for (int z = -radius; z <= radius; z++) {
+        for (int x = -5; x <= 5; x++) {
+            for (int y = -5; y <= 5; y++) {
+                for (int z = -5; z <= 5; z++) {
                     Block block = world.getBlockAt(origin.clone().add(x, y, z));
                     if (block.getState() instanceof Container) {
                         double distanceSquared = origin.distanceSquared(block.getLocation());
@@ -1402,71 +1382,42 @@ public class SignManager implements Listener {
     }
 
     private boolean isAttachedToBlock(Block signBlock, Block possibleSupportingBlock) {
-        // Проверка, что блок является табличкой
-        if (!(signBlock.getState() instanceof Sign)) {
-            return false;
-        }
-
-        Sign signState = (Sign) signBlock.getState();
-
-        // Получаем направление, к которому прикреплена табличка
+        if (!(signBlock.getState() instanceof Sign signState)) return false;
         BlockFace face = signState.getBlock().getFace(possibleSupportingBlock);
-
-        // Проверяем, что face не равно null, иначе не выполняем дальнейшую логику
-        if (face == null) {
-            return false;
-        }
-
-        // Получаем блок, с которым табличка соединена
+        if (face == null) return false;
         Block attachedBlock = signBlock.getRelative(face);
-
-        // Проверка, что прикреплённый блок существует и не является пустым
-        if (attachedBlock == null || attachedBlock.getType() == Material.AIR) {
+        if (attachedBlock.getType() == Material.AIR) {
             return false;
         }
-
-        // Проверяем, что блок совпадает с предполагаемым
         return attachedBlock.equals(possibleSupportingBlock);
     }
 
     public ExtrudeMarker isSignWithinMarker(Location signLocation, String setName) {
-        // System.out.println("[DEBUG] Проверка таблички на маркеры: " + signLocation);
 
         Optional<BlueMapAPI> apiOptional = BlueMapAPI.getInstance();
         if (apiOptional.isPresent()) {
             BlueMapAPI api = apiOptional.get();
-            //  System.out.println("[DEBUG] BlueMapAPI получен");
 
             Optional<BlueMapMap> mapOptional = api.getMap(signLocation.getWorld().getName());
             if (mapOptional.isPresent()) {
                 BlueMapMap map = mapOptional.get();
-                // System.out.println("[DEBUG] Карта найдена: " + signLocation.getWorld().getName());
 
                 MarkerSet markerSet = map.getMarkerSets().get(setName);
                 if (markerSet != null) {
                     System.out.println("[DEBUG] Найден MarkerSet с ID" + setName + ". Кол-во маркеров: " + markerSet.getMarkers().size());
 
                     for (Marker marker : markerSet.getMarkers().values()) {
-                        if (marker instanceof ExtrudeMarker) {
-                            ExtrudeMarker extrudeMarker = (ExtrudeMarker) marker;
+                        if (marker instanceof ExtrudeMarker extrudeMarker) {
                             Shape baseShape = extrudeMarker.getShape();
                             double minHeight = extrudeMarker.getShapeMinY();
                             double maxHeight = extrudeMarker.getShapeMaxY();
                             String label = extrudeMarker.getLabel();
 
-                            // System.out.println("[DEBUG] Проверка ExtrudeMarker '" + label + "'");
-                            // System.out.println(" - Высота: " + minHeight + " до " + maxHeight);
-                            // System.out.println(" - Форма: " + baseShape.getPoints().length + " точек");
-
                             Vector2d signPos2D = new Vector2d(signLocation.getX(), signLocation.getZ());
                             double y = signLocation.getY();
 
-                            boolean insidePolygon = zoneManager.isPointInsidePolygon(signPos2D, Arrays.asList(baseShape.getPoints()));
+                            boolean insidePolygon = zoneManager.isPointInsidePolygon(signPos2D, Collections.singletonList(baseShape.getPoints()));
                             boolean insideHeight = y >= minHeight && y <= maxHeight;
-
-                            //System.out.println(" - Позиция таблички 2D: " + signPos2D + " (Y: " + y + ")");
-                            // System.out.println(" - Внутри полигона? " + insidePolygon);
-                            //System.out.println(" - В пределах высоты? " + insideHeight);
 
                             if (insidePolygon && insideHeight) {
                                 System.out.println("[DEBUG] Табличка попала внутрь маркера: " + label);

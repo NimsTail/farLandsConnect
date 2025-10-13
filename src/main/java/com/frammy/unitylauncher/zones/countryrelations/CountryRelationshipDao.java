@@ -66,18 +66,13 @@ public class CountryRelationshipDao {
         }
     }
 
-    /**
-     * Сохранить JSON отношений.
-     * Вариант А (предпочтительно, если name UNIQUE): one-statement upsert для MySQL.
-     * Если у вас нет UNIQUE(name), см. вариант Б ниже (он с SELECT/UPDATE/INSERT).
-     */
     public void saveRelationsFor(String countryName, Map<String, String> map) {
         if (countryName == null || countryName.isEmpty()) return;
         final String json = toJson(map);
 
-        // === Вариант А: UPSERT (нужен UNIQUE KEY на Countries(name)) ===
         final String upsert =
-                "INSERT INTO Countries(name, relationship) VALUES(?, ?) " +
+                "INSERT INTO Countries (name, relationship, Players) " +
+                        "VALUES (?, ?, JSON_ARRAY()) " +
                         "ON DUPLICATE KEY UPDATE relationship = VALUES(relationship)";
 
         try (Connection con = DBConnect()) {
@@ -90,17 +85,15 @@ public class CountryRelationshipDao {
                 ps.setString(2, json);
                 ps.executeUpdate();
             }
-            return; // успех
+            return;
         } catch (SQLException e) {
-            // Если ошибка 1062 и т.п. — всё равно логируем; при отсутствии UNIQUE можно включить Вариант Б ниже.
             logSql("saveRelationsFor(UPSERT " + countryName + ")", e);
         } catch (Throwable t) {
             logOther("saveRelationsFor(UPSERT " + countryName + ")", t);
         }
 
-        // === Вариант Б: fallback без UNIQUE(name) ===
         final String upd = "UPDATE Countries SET relationship = ? WHERE name = ?";
-        final String ins = "INSERT INTO Countries(name, relationship) VALUES(?, ?)";
+        final String ins = "INSERT INTO Countries (name, relationship, Players) VALUES (?, ?, JSON_ARRAY())";
 
         try (Connection con = DBConnect()) {
             if (con == null) {
@@ -129,10 +122,8 @@ public class CountryRelationshipDao {
         }
     }
 
-    // ---------- JSON helpers ----------
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
 
-    // Формат: {"version":1,"relations":{"France":"HOSTILE","Spain":"FRIENDLY"}}
     private Map<String, String> parseJson(String json) {
         Map<String, String> out = new HashMap<>();
         if (json == null || json.isEmpty()) return out;
@@ -158,8 +149,6 @@ public class CountryRelationshipDao {
         return GSON.toJson(root);
     }
 
-    /* ---------- логирование (единый стиль) ---------- */
-
     private static void logSql(String where, SQLException e) {
         Bukkit.getLogger().severe("[UnityLauncher] SQL error in " + where + ": " + e.getMessage());
         SQLException se = e;
@@ -175,7 +164,6 @@ public class CountryRelationshipDao {
     }
 
     private static void warnOnce(String msg) {
-        // можно усложнить антиспамом, но для DAO достаточно простого предупреждения
         Bukkit.getLogger().warning("[UnityLauncher] " + msg);
     }
 }

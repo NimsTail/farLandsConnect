@@ -75,6 +75,8 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         diplomacy = new DiplomacyService(dao);
         diplomacy.loadAll();
         countryRegistryJdbc = new CountryRegistryJdbc();
+        countryRegistryJdbc.start(this);
+        Bukkit.getOnlinePlayers().forEach(p -> countryRegistryJdbc.ensureScheduledRefresh(p.getName()));
         Bukkit.getScheduler().runTaskAsynchronously(this, diplomacy::loadAll);
 
         getServer().getPluginManager().registerEvents(signManager, this);
@@ -133,7 +135,8 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                 tracker.getWeights()
         ), 40L);
 
-        // Регистрация всех апгрейдов (редстоун, крафт, печи)
+        // Регистрация всех апгрейдов
+        getLogger().info("UnityLauncher enabled!");
         Bukkit.getPluginManager().registerEvents(new UpgradesListener(), this);
         Bukkit.getPluginManager().registerEvents(new UpgradesListener.SmartHopperListener(this), this);
         // слушатели апгрейдов
@@ -167,6 +170,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
+        try {
+            if (countryRegistryJdbc != null) countryRegistryJdbc.stop();
+        } catch (Throwable ignore) {}
         try {
             if (this.signManager != null) {
                 this.signManager.saveSignData();
@@ -221,6 +227,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         }
 
         instance = null;
+        getLogger().info("UnityLauncher disabled.");
     }
 
     public static UnityLauncher getInstance() {
@@ -279,6 +286,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     @EventHandler
     public void onJoin(PlayerJoinEvent e){
         webSocketManager.connectPlayer(e.getPlayer().getName());
+        countryRegistryJdbc.ensureScheduledRefresh(e.getPlayer().getName());
     }
 
     /* ===================== БАЗА ДАННЫХ ===================== */
@@ -330,8 +338,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
     private static void logDbException(Throwable t) {
         Bukkit.getLogger().severe("[UnityLauncher] Ошибка при подключении к БД: " + t);
-        if (t instanceof SQLException) {
-            SQLException se = (SQLException) t;
+        if (t instanceof SQLException se) {
             while (se != null) {
                 Bukkit.getLogger().severe("  SQLState=" + se.getSQLState() + " ErrorCode=" + se.getErrorCode()
                         + " Message=" + se.getMessage());

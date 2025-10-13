@@ -1,41 +1,23 @@
 package com.frammy.unitylauncher.zones;
 
-public class ZoneTypeData {
-    private final String displayName;
-    private final double areaLimit;
-    private final int index;
-    private final double minSize;
-    private final boolean allowOverlap;
-    private final double priceMultiplier;
-    private final double initialPrice;
-    private final String permission;
+/**
+ * Данные по типу зоны: лимиты, флаги и пр.
+ * Совместимо с вызовами из ZoneManager.
+ *
+ * @param displayName        "Торговая точка", "Банк", ...
+ * @param areaLimit          макс. площадь
+ * @param index              приоритет (для выбора "внутренней" зоны)
+ * @param minSize            мин. площадь, начиная с 3 точек
+ * @param allowOverlap       можно ли пересекаться с другими типами
+ * @param costMultiplier     множитель стоимости (1.0 / 1.15 / 0.85 / 0.7)
+ * @param quota              напр., 10 / 150 / 200 / 50 / 0
+ * @param requiredPermission "unityLauncher.createZone.shop" и т.п.
+ */
+public record ZoneTypeData(String displayName, double areaLimit, int index, double minSize, boolean allowOverlap,
+                           double costMultiplier, int quota, String requiredPermission) {
 
-
-    public ZoneTypeData(String displayName, double areaLimit, int index, double minSize, boolean allowOverlap, double priceMultiplier, double initialPrice, String permission) {
-        this.displayName = displayName;
-        this.areaLimit = areaLimit;
-        this.minSize = minSize;
-        this.allowOverlap = allowOverlap;
-        this.index = index;
-        this.priceMultiplier = priceMultiplier;
-        this.initialPrice = initialPrice;
-        this.permission = permission;
-    }
-
-    public String getDisplayName() {
-        return displayName;
-    }
-    public double getAreaLimit() {
-        return areaLimit;
-    }
-    public int getIndex() {
-        return index;
-    }
-    public double getMinSize(){return minSize;}
-    public boolean getAllowOverlap(){return allowOverlap;}
-    public double getPriceMultiplier(){return priceMultiplier;}
-    public double getInitialPrice(){return initialPrice;}
-    public String getPermission() {
-        return permission;
+    /** Возвращает множитель стоимости зоны (alias для costMultiplier). */
+    public double priceMultiplier() {
+        return costMultiplier;
     }
 }

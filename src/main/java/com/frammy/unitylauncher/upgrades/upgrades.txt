@@ -1,0 +1,8 @@
+Базовый редстоун - unity.redstone.basic
+Продвинутый редстоун - unity.redstone.advanced
+Буст к переплавке - unity.furnace.ore_boost
+Умные воронки - unity.hopper.smart.1
+Очень умные воронки - unity.hopper.smart.2
+Дюп ТНТ - unity.tnt.quarry
+Спешка I - unity.zone.haste.basic
+Спешка II - unity.zone.haste.advanced

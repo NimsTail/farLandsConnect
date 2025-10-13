@@ -72,12 +72,7 @@ public class CommandCompleter implements TabCompleter {
                     completions.add("name");
                     completions.add("color");
                     break;
-                case "build":
-                    for (ZoneType zoneType : zoneManager.zoneLimits.keySet()) {
-                        completions.add(zoneType.toString().toUpperCase());
-                    }
-                    break;
-                case "addcorner":
+                case "build", "addcorner":
                     for (ZoneType zoneType : zoneManager.zoneLimits.keySet()) {
                         completions.add(zoneType.toString().toUpperCase());
                     }
@@ -85,11 +80,9 @@ public class CommandCompleter implements TabCompleter {
             }
         }
         else if (args.length == 4) {
-            switch (args[2].toLowerCase()) {
-                case "corners":
-                    completions.add("+");
-                    completions.add("-");
-                    break;
+            if (args[2].equalsIgnoreCase("corners")) {
+                completions.add("+");
+                completions.add("-");
             }
         }
         return completions;

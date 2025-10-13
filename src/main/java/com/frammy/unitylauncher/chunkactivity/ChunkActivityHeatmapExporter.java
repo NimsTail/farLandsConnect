@@ -1,10 +1,6 @@
 package com.frammy.unitylauncher.chunkactivity;
 
 import com.flowpowered.math.vector.Vector2d;
-import com.google.gson.JsonArray;
-import com.google.gson.JsonObject;
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import de.bluecolored.bluemap.api.markers.MarkerSet;
 import de.bluecolored.bluemap.api.markers.ShapeMarker;
@@ -12,9 +8,6 @@ import de.bluecolored.bluemap.api.math.Color;
 import de.bluecolored.bluemap.api.math.Shape;
 import org.bukkit.Bukkit;
 
-import java.io.FileWriter;
-import java.io.File;
-import java.io.IOException;
 import java.util.*;
 
 public class ChunkActivityHeatmapExporter {
@@ -58,11 +51,11 @@ public class ChunkActivityHeatmapExporter {
         return smoothed;
     }
 
-    private static double getPercentile(Collection<Double> values, double percentile) {
+    private static double getPercentile(Collection<Double> values) {
         if (values == null || values.isEmpty()) return 0.0;
         List<Double> sorted = new ArrayList<>(values);
         Collections.sort(sorted);
-        int index = (int) Math.ceil((percentile / 100.0) * sorted.size()) - 1;
+        int index = (int) Math.ceil((ChunkActivityHeatmapExporter.PERCENTILE / 100.0) * sorted.size()) - 1;
         index = Math.max(index, 0);
         return sorted.get(index);
     }
@@ -70,7 +63,7 @@ public class ChunkActivityHeatmapExporter {
     public static void exportHeatmapToBlueMapLayer(Map<String, ChunkStats> statsMap, String worldName, ActivityWeights weights) {
         if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
 
-        BlueMapAPI.getInstance().ifPresent(api -> api.getMap(worldName).ifPresent(map -> {
+        BlueMapAPI.getInstance().flatMap(api -> api.getMap(worldName)).ifPresent(map -> {
             MarkerSet markerSet = new MarkerSet("chunk-activity");
             markerSet.setLabel("Ценность земли");
 
@@ -88,7 +81,7 @@ public class ChunkActivityHeatmapExporter {
                 ChunkStats stats = entry.getValue();
 
                 // snap — что набрано в текущем интервале; daily — сглаженное за 24 часа
-                double snap  = weights.calculateValue(stats);
+                double snap = weights.calculateValue(stats);
                 double daily = stats.getDailyAverage(weights);
                 double value = SNAP_ALPHA * snap + (1.0 - SNAP_ALPHA) * daily;
 
@@ -178,7 +171,7 @@ public class ChunkActivityHeatmapExporter {
             }
 
             // 5) Активные чанки с лог-нормализацией и cutoff по перцентилю
-            double cutoff = getPercentile(activityMap.values(), PERCENTILE);
+            double cutoff = getPercentile(activityMap.values());
             // защита от деления/логарифма на 0
             boolean useLog = cutoff > 0;
 
@@ -227,7 +220,7 @@ public class ChunkActivityHeatmapExporter {
 
             map.getMarkerSets().put("chunk-activity", markerSet);
             Bukkit.getLogger().info("[Heatmap] Heatmap успешно экспортирован на карту BlueMap.");
-        }));
+        });
     }
 
     private static final float[][] GRADIENT_STOPS = {

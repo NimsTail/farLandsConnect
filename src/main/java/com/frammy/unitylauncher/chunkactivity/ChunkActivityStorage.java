@@ -50,14 +50,12 @@ public class ChunkActivityStorage {
             s.lastUpdated   = config.getLong(key + ".lastUpdated", System.currentTimeMillis());
 
             List<Double> samples = config.getDoubleList(key + ".hourlySamples");
-            if (samples != null) {
-                for (Double d : samples) {
-                    // защитимся от null
-                    if (d != null) s.hourlySamples.addLast(d);
-                }
-                // ограничим размер до 24 (на всякий)
-                while (s.hourlySamples.size() > 24) s.hourlySamples.removeFirst();
+            for (Double d : samples) {
+                // защитимся от null
+                if (d != null) s.hourlySamples.addLast(d);
             }
+            // ограничим размер до 24 (на всякий)
+            while (s.hourlySamples.size() > 24) s.hourlySamples.removeFirst();
 
             map.put(key, s);
         }
