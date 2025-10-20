@@ -3,7 +3,6 @@ package com.frammy.unitylauncher.zones;
 import com.frammy.unitylauncher.chunkactivity.ActivityWeights;
 import com.frammy.unitylauncher.chunkactivity.ChunkStats;
 import org.bukkit.Bukkit;
-import org.bukkit.Chunk;
 import org.bukkit.Location;
 import org.bukkit.World;
 
@@ -12,10 +11,6 @@ import java.time.ZonedDateTime;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * Расчёт активности/стоимости зон + суточный биллинг.
- * Минимум аллокаций, без Stream API.
- */
 public class ZoneActivityCalculations {
 
     /* ===== Кэш дневной цены ===== */
@@ -28,11 +23,135 @@ public class ZoneActivityCalculations {
 
     public ZoneActivityCalculations(ZoneManager zoneManager) { this.zm = Objects.requireNonNull(zoneManager); }
 
-    /* ===== Планировщик: 00:05 раз в сутки ===== */
+    // === СНАПШОТ зоны без Bukkit-ссылок ===
+    private record ZoneSnapshot(
+            String id,
+            ZoneType type,
+            String worldName,
+            List<Point2> polygonXZ // только X/Z
+    ) {
+        static ZoneSnapshot from(ZoneInfo z) {
+            if (z == null) return null;
+            World w = z.getWorld();
+            if (w == null) return null;
+            List<Location> corners = z.getCorners();
+            if (corners == null || corners.size() < 3) return null;
+
+            List<Point2> pts = new ArrayList<>(corners.size());
+            for (Location L : corners) pts.add(new Point2(L.getX(), L.getZ()));
+            return new ZoneSnapshot(z.getID(), z.getType(), w.getName(), pts);
+        }
+    }
+    private record Point2(double x, double z) {}
+
+    // Подсчёт дневной цены по снапшоту зоны и снапшоту статистики
+    private double calculateDailyCostSnapshot(ZoneSnapshot snap,
+                                              Map<String, ChunkStats> statsMap,
+                                              ActivityWeights weights,
+                                              double typeMul) {
+        Map<String, Double> fractions = getChunkFractionsKeys(snap.worldName(), snap.polygonXZ());
+        if (fractions.isEmpty()) return 0.0;
+
+        double twv = 0, tw = 0;
+        for (Map.Entry<String, Double> e : fractions.entrySet()) {
+            ChunkStats st = statsMap.get(e.getKey());
+            if (st == null) continue;
+            double dailyAvg = st.getDailyAverage(weights);
+            double f = e.getValue();
+            twv += dailyAvg * f;
+            tw  += f;
+        }
+        double base = tw > 0 ? twv / tw : 0.0;
+        return base * typeMul;
+    }
+
+    // Оценка пересечений типов зон по чанковым ключам (без Bukkit)
+    private double overlapAwareTypeMultiplierSnapshot(ZoneSnapshot target, Collection<ZoneSnapshot> all) {
+        ZoneTypeData base = zm.zoneLimits.get(target.type());
+        double baseMul = base != null ? base.priceMultiplier() : 1.0;
+
+        Set<String> tKeys = chunkKeysForPolygon(target.worldName(), target.polygonXZ());
+        if (tKeys.isEmpty()) return baseMul;
+
+        double sum = baseMul; int cnt = 1;
+        for (ZoneSnapshot other : all) {
+            if (other == null || other == target) continue;
+            if (!Objects.equals(other.worldName(), target.worldName())) continue;
+
+            Set<String> oKeys = chunkKeysForPolygon(other.worldName(), other.polygonXZ());
+            if (intersectsByChunks(tKeys, oKeys)) {
+                ZoneTypeData ztd = zm.zoneLimits.get(other.type());
+                if (ztd != null) { sum += ztd.priceMultiplier(); cnt++; }
+            }
+        }
+        return sum / cnt;
+    }
+
+    // Возвращает доли покрытия чанков: ключ формата "world:x,z" -> fraction (0..1)
+    private Map<String, Double> getChunkFractionsKeys(String worldName, List<Point2> poly) {
+        Map<String, Double> res = new HashMap<>();
+        if (poly == null || poly.size() < 3 || worldName == null) return res;
+
+        int n = poly.size();
+        double[] xs = new double[n];
+        double[] zs = new double[n];
+        double minX=Double.POSITIVE_INFINITY, maxX=Double.NEGATIVE_INFINITY;
+        double minZ=Double.POSITIVE_INFINITY, maxZ=Double.NEGATIVE_INFINITY;
+        for (int i=0;i<n;i++){
+            double x = poly.get(i).x();
+            double z = poly.get(i).z();
+            xs[i]=x; zs[i]=z;
+            if (x<minX) minX=x; if (x>maxX) maxX=x;
+            if (z<minZ) minZ=z; if (z>maxZ) maxZ=z;
+        }
+
+        int cMinX = (int)Math.floor(minX/16.0);
+        int cMaxX = (int)Math.floor(maxX/16.0);
+        int cMinZ = (int)Math.floor(minZ/16.0);
+        int cMaxZ = (int)Math.floor(maxZ/16.0);
+
+        double stepSize = 16.0/STEP;
+        int total = STEP*STEP;
+
+        for (int cx=cMinX; cx<=cMaxX; cx++) {
+            double baseX = cx*16.0 + stepSize/2.0;
+            for (int cz=cMinZ; cz<=cMaxZ; cz++) {
+                double baseZ = cz*16.0 + stepSize/2.0;
+                int inside=0;
+                for (int i=0;i<STEP;i++){
+                    double x = baseX + i*stepSize;
+                    for (int j=0;j<STEP;j++){
+                        double z = baseZ + j*stepSize;
+                        if (pointInPoly(x,z,xs,zs)) inside++;
+                    }
+                }
+                if (inside>0){
+                    double frac = (double)inside/total;
+                    String key = worldName + ":" + cx + "," + cz;
+                    res.put(key, frac);
+                }
+            }
+        }
+        return res;
+    }
+
+    private Set<String> chunkKeysForPolygon(String worldName, List<Point2> poly){
+        return getChunkFractionsKeys(worldName, poly).keySet();
+    }
+
+    // ===== Планировщик: 00:05 раз в сутки =====
     public void startZoneBillingScheduler() {
         long delay  = ticksUntilNextTime();
         long period = 20L * 60 * 60 * 24;
-        Bukkit.getScheduler().runTaskTimerAsynchronously(zm.ul, this::snapshotAndMaybeBillAllZones, delay, period);
+
+        // Запускаем на ГЛАВНОМ потоке: снимем снапшоты и дернём async-вычисления
+        Bukkit.getScheduler().runTaskTimer(zm.ul, () -> {
+            try {
+                snapshotAndMaybeBillAllZones(); // внутри сам разделит на sync/async этапы
+            } catch (Throwable t) {
+                Bukkit.getLogger().warning("[Zones] Billing tick failed: " + t.getMessage());
+            }
+        }, delay, period);
     }
 
     private long ticksUntilNextTime(){
@@ -46,49 +165,91 @@ public class ZoneActivityCalculations {
 
     /** Снимок стоимости за день + авто-биллинг. */
     public void snapshotAndMaybeBillAllZones() {
-        LocalDate today = LocalDate.now(zm.zoneId);
+        final LocalDate today = LocalDate.now(zm.zoneId);
 
-        // 1) зафиксировать дневную стоимость
-        for (ZoneInfo z : zm.zoneList.values()) {
-            double daily = calculateZoneDailyCostCached(z, zm.activityTracker.getChunkStatsMap(), zm.activityTracker.getWeights());
-            z.addDailyCost(today, daily);
-        }
-
-        // 2) авто-списание по расписанию
-        for (ZoneInfo z : zm.zoneList.values()) {
-            LocalDate next = z.getNextBillingDate();
-            if (LocalDate.now(zm.zoneId).isBefore(next)) continue;
-
-            double due = z.getDueSinceLastBill(today);
-            try {
-                z.markBilled(today);
-                if (due > 0) {
-                    // zm.ul.moneyManager.withdraw(z.getOwner(), due);
-                    Bukkit.getLogger().info("[Zones] Auto-billed " + z.getName() + " owner=" + z.getOwner()
-                            + " amount=" + String.format(Locale.US, "%.2f", due));
-                }
-            } catch (Exception ex) {
-                Bukkit.getLogger().warning("[Zones] Auto-billing failed " + z.getName() + ": " + ex.getMessage());
+        // --- СНЯТИЕ СНАПШОТОВ (SAFE: главный поток) ---
+        // 1) зоны (immutable снапшоты без Bukkit-объектов)
+        final Map<String, ZoneSnapshot> zoneSnaps = new HashMap<>();
+        final Map<String, ZoneInfo> zoneById = new HashMap<>();
+        for (ZoneInfo z : new ArrayList<>(zm.zoneList.values())) { // снимок списка
+            ZoneSnapshot snap = ZoneSnapshot.from(z);
+            if (snap != null) {
+                zoneSnaps.put(snap.id(), snap);
+                zoneById.put(snap.id(), z);
             }
         }
+
+        // 2) копия карты статистики (сама ConcurrentHashMap, чтение потокобезопасно)
+        final Map<String, ChunkStats> statsCopy = new HashMap<>(zm.activityTracker.getChunkStatsMap());
+
+        // 3) веса — просто значение
+        final ActivityWeights weights = zm.activityTracker.getWeights();
+
+        // --- ВЫЧИСЛЕНИЯ (ASYNC: без Bukkit) ---
+        Bukkit.getScheduler().runTaskAsynchronously(zm.ul, () -> {
+            try {
+                // суточная стоимость по снапшотам
+                final Map<String, Double> dailyCosts = new HashMap<>();
+                for (ZoneSnapshot s : zoneSnaps.values()) {
+                    double mul = overlapAwareTypeMultiplierSnapshot(s, zoneSnaps.values());
+                    double cost = calculateDailyCostSnapshot(s, statsCopy, weights, mul);
+                    dailyCosts.put(s.id(), cost);
+                }
+
+                // --- ЗАПИСЬ РЕЗУЛЬТАТОВ (обратно на главный поток) ---
+                Bukkit.getScheduler().runTask(zm.ul, () -> {
+                    // 1) фиксируем дневные стоимости
+                    for (Map.Entry<String, Double> e : dailyCosts.entrySet()) {
+                        ZoneInfo z = zoneById.get(e.getKey());
+                        if (z != null) z.addDailyCost(today, e.getValue());
+                    }
+
+                    // 2) авто-списание по расписанию (только sync!)
+                    for (ZoneInfo z : zoneById.values()) {
+                        LocalDate next = z.getNextBillingDate();
+                        if (LocalDate.now(zm.zoneId).isBefore(next)) continue;
+
+                        double due = z.getDueSinceLastBill(today);
+                        try {
+                            z.markBilled(today);
+                            if (due > 0) {
+                                // zm.ul.moneyManager.withdraw(z.getOwner(), due);
+                                Bukkit.getLogger().info("[Zones] Auto-billed " + z.getName() + " owner=" + z.getOwner()
+                                        + " amount=" + String.format(Locale.US, "%.2f", due));
+                            }
+                        } catch (Exception ex) {
+                            Bukkit.getLogger().warning("[Zones] Auto-billing failed " + z.getName() + ": " + ex.getMessage());
+                        }
+                    }
+                });
+
+            } catch (Throwable t) {
+                Bukkit.getLogger().warning("[Zones] Async cost calc failed: " + t.getMessage());
+            }
+        });
     }
 
     /* ===== Почасовой ряд (старые → новые) ===== */
     public List<Double> getZoneHourlySeries(ZoneInfo zone,
                                             Map<String, ChunkStats> statsMap,
                                             int maxHours) {
-        Map<Chunk, Double> fractions = getChunkFractions(zone.getCorners());
+        World w = zone.getWorld();
+        if (w == null) return Collections.emptyList();
+
+        // Полигон → ключи чанков
+        List<Location> corners = zone.getCorners();
+        if (corners == null || corners.size() < 3) return Collections.emptyList();
+        List<Point2> poly = new ArrayList<>(corners.size());
+        for (Location L : corners) poly.add(new Point2(L.getX(), L.getZ()));
+        Map<String, Double> fractions = getChunkFractionsKeys(w.getName(), poly);
         if (fractions.isEmpty()) return Collections.emptyList();
 
-        // Собираем hourlySamples всех чанков
+        // Соберём hourlySamples по ключам "world:x,z"
         Map<String, double[]> chunkSamples = new HashMap<>(fractions.size()*2);
         int maxLen = 0;
-        for (Chunk ch : fractions.keySet()) {
-            String key = chunkKey(ch);
+        for (String key : fractions.keySet()) {
             ChunkStats s = statsMap.get(key);
             if (s == null || s.hourlySamples.isEmpty()) continue;
-
-            // Deque<Double> → double[] (экономим боксы)
             int n = s.hourlySamples.size();
             if (n > maxLen) maxLen = n;
             double[] arr = new double[n];
@@ -104,9 +265,9 @@ public class ZoneActivityCalculations {
         List<Double> out = new ArrayList<>(take);
         for (int offset = take-1; offset >= 0; offset--) {
             double sum=0, wsum=0;
-            for (Map.Entry<Chunk, Double> e : fractions.entrySet()) {
+            for (Map.Entry<String, Double> e : fractions.entrySet()) {
                 double frac = e.getValue();
-                double[] arr = chunkSamples.get(chunkKey(e.getKey()));
+                double[] arr = chunkSamples.get(e.getKey());
                 if (arr == null) continue;
                 int idx = arr.length - 1 - offset;
                 if (idx < 0) continue;
@@ -118,26 +279,36 @@ public class ZoneActivityCalculations {
         return out;
     }
 
+
     /* ===== Дневная цена с кэшем ===== */
-    public void invalidateZoneCost(ZoneInfo zone) { if (zone!=null) costCache.remove(zone.getID()); }
 
     public double calculateZoneDailyCostCached(ZoneInfo zone,
                                                Map<String, ChunkStats> statsMap,
                                                ActivityWeights weights) {
         double typeMul = overlapAwareTypeMultiplier(zone);
         String key = zone.getID();
+
+        // сигнатура без привязки к Chunk
         String sig = costSignature(zone.getCorners(), typeMul);
         long now = System.currentTimeMillis();
 
         CostCacheEntry hit = costCache.get(key);
         if (hit != null && hit.sig.equals(sig) && (now - hit.ts) < COST_TTL_MS) return hit.cost;
 
-        Map<Chunk, Double> fr = getChunkFractions(zone.getCorners());
+        World w = zone.getWorld();
+        if (w == null) { costCache.put(key, new CostCacheEntry(0, now, sig)); return 0; }
+
+        // БЕЗОПАСНО: считаем доли в ключах "world:x,z"
+        List<Location> corners = zone.getCorners();
+        List<Point2> poly = new ArrayList<>(corners.size());
+        for (Location L : corners) poly.add(new Point2(L.getX(), L.getZ()));
+        Map<String, Double> fr = getChunkFractionsKeys(w.getName(), poly);
+
         if (fr.isEmpty()) { costCache.put(key, new CostCacheEntry(0, now, sig)); return 0; }
 
         double twv=0, tw=0;
-        for (Map.Entry<Chunk, Double> e : fr.entrySet()) {
-            ChunkStats st = statsMap.get(chunkKey(e.getKey()));
+        for (Map.Entry<String, Double> e : fr.entrySet()) {
+            ChunkStats st = statsMap.get(e.getKey());
             if (st == null) continue;
             double dailyAvg = st.getDailyAverage(weights);
             double f = e.getValue();
@@ -150,69 +321,17 @@ public class ZoneActivityCalculations {
         return cost;
     }
 
+
     /* ===== Покрытие чанков полигоном ===== */
     private static final int STEP = 4; // 4x4=16 выборок на чанк (баланс точности/скорости)
-
-    /**
-     * Доли покрытия чанков полигоном по XZ. Без аллокаций Vector2d.
-     */
-    public Map<Chunk, Double> getChunkFractions(List<Location> corners) {
-        Map<Chunk, Double> res = new HashMap<>();
-        if (corners == null || corners.size() < 3) return res;
-
-        World w = corners.getFirst().getWorld();
-        if (w == null) return res;
-
-        // полигоны в массивы + AABB
-        int n = corners.size();
-        double[] xs = new double[n];
-        double[] zs = new double[n];
-        double minX=Double.POSITIVE_INFINITY, maxX=Double.NEGATIVE_INFINITY;
-        double minZ=Double.POSITIVE_INFINITY, maxZ=Double.NEGATIVE_INFINITY;
-        for (int i=0;i<n;i++){
-            Location L = corners.get(i);
-            double x=L.getX(), z=L.getZ();
-            xs[i]=x; zs[i]=z;
-            if (x<minX) minX=x; if (x>maxX) maxX=x;
-            if (z<minZ) minZ=z; if (z>maxZ) maxZ=z;
-        }
-
-        int cMinX = (int)Math.floor(minX/16.0);
-        int cMaxX = (int)Math.floor(maxX/16.0);
-        int cMinZ = (int)Math.floor(minZ/16.0);
-        int cMaxZ = (int)Math.floor(maxZ/16.0);
-
-        double stepSize = 16.0/STEP;
-        for (int cx=cMinX; cx<=cMaxX; cx++) {
-            double baseX = cx*16.0 + stepSize/2.0;
-            for (int cz=cMinZ; cz<=cMaxZ; cz++) {
-                double baseZ = cz*16.0 + stepSize/2.0;
-
-                int inside=0, total=STEP*STEP;
-                for (int i=0;i<STEP;i++){
-                    double x = baseX + i*stepSize;
-                    for (int j=0;j<STEP;j++){
-                        double z = baseZ + j*stepSize;
-                        if (pointInPoly(x,z,xs,zs)) inside++;
-                    }
-                }
-                if (inside>0){
-                    double frac = (double)inside/total;
-                    Chunk ch = w.getChunkAt(cx, cz);
-                    res.put(ch, frac);
-                }
-            }
-        }
-        return res;
-    }
 
     /* ===== Пересечения/мультипликатор ===== */
     private double overlapAwareTypeMultiplier(ZoneInfo target){
         ZoneTypeData base = zm.zoneLimits.get(target.getType());
-        double baseMul = base!=null ? base.priceMultiplier() : 1.0;
+        double baseMul = base != null ? base.priceMultiplier() : 1.0;
 
         List<Location> tCorners = target.getCorners();
-        if (tCorners == null || tCorners.size()<3) return baseMul;
+        if (tCorners == null || tCorners.size() < 3) return baseMul;
         World tw = tCorners.getFirst().getWorld();
         if (tw == null) return baseMul;
 
@@ -220,21 +339,35 @@ public class ZoneActivityCalculations {
         Set<String> tKeys = chunkKeysForCorners(tCorners);
         if (tKeys.isEmpty()) return baseMul;
 
-        double sum = baseMul; int cnt = 1;
-        for (ZoneInfo other : zm.zoneList.values()){
-            if (other==null || other==target) continue;
-            List<Location> oc = other.getCorners();
-            if (oc==null || oc.size()<3) continue;
-            World ow = oc.getFirst().getWorld();
-            if (ow==null || !ow.equals(tw)) continue;
+        double sum = baseMul;
+        int cnt = 1;
 
-            if (intersectsByChunks(tKeys, chunkKeysForCorners(oc))) {
-                ZoneTypeData ztd = zm.zoneLimits.get(other.getType());
-                if (ztd != null) { sum += ztd.priceMultiplier(); cnt++; }
+        for (ZoneInfo other : zm.zoneList.values()){
+            if (other == null || other == target) continue;
+
+            List<Location> oc = other.getCorners();
+            if (oc == null || oc.size() < 3) continue;
+            World ow = oc.getFirst().getWorld();
+            if (ow == null || !ow.equals(tw)) continue;
+
+            // быстрый предчек по чанкам
+            if (!intersectsByChunks(tKeys, chunkKeysForCorners(oc))) continue;
+
+            // учтём только те пересечения, которые действительно разрешены правилами
+            if (!zm.canZonesCoexist(target, other)) {
+                // пересечение есть, но правила запрещают — НЕ усредняем по нему
+                continue;
+            }
+
+            ZoneTypeData ztd = zm.zoneLimits.get(other.getType());
+            if (ztd != null) {
+                sum += ztd.priceMultiplier();
+                cnt++;
             }
         }
         return sum / cnt;
     }
+
 
     /* ===== Вспомогательные ===== */
     private static boolean intersectsByChunks(Set<String> a, Set<String> b){
@@ -247,13 +380,16 @@ public class ZoneActivityCalculations {
     }
 
     private Set<String> chunkKeysForCorners(List<Location> corners){
-        Map<Chunk, Double> fr = getChunkFractions(corners);
-        Set<String> keys = new HashSet<>(fr.size()*2);
-        for (Chunk c : fr.keySet()) keys.add(chunkKey(c));
+        Set<String> keys = new HashSet<>();
+        if (corners == null || corners.size() < 3) return keys;
+        World w = corners.getFirst().getWorld();
+        if (w == null) return keys;
+
+        List<Point2> poly = new ArrayList<>(corners.size());
+        for (Location L : corners) poly.add(new Point2(L.getX(), L.getZ()));
+        keys.addAll(getChunkFractionsKeys(w.getName(), poly).keySet());
         return keys;
     }
-
-    private static String chunkKey(Chunk c){ return c.getWorld().getName()+":"+c.getX()+","+c.getZ(); }
 
     private static String costSignature(List<Location> corners, double mul){
         if (corners==null || corners.isEmpty()) return "empty|mul="+mul;

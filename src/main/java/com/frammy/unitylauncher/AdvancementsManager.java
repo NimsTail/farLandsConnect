@@ -18,7 +18,6 @@ import org.bukkit.plugin.java.JavaPlugin;
 public final class AdvancementsManager implements Listener {
 
     private final JavaPlugin plugin;
-    private UltimateAdvancementAPI api;
     private AdvancementTab achievements;
     private static final String ROOT_BG = "textures/block/stone.png";
 
@@ -27,7 +26,7 @@ public final class AdvancementsManager implements Listener {
     }
 
     public void init() {
-        api = UltimateAdvancementAPI.getInstance(plugin);
+        UltimateAdvancementAPI api = UltimateAdvancementAPI.getInstance(plugin);
         achievements = api.createAdvancementTab(AdvancementTabNamespaces.achievements_NAMESPACE);
 
         RootAdvancement ach0 = new RootAdvancement(

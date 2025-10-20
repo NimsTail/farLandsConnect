@@ -13,9 +13,13 @@ import static com.frammy.unitylauncher.UnityLauncher.DBConnect;
 
 public class CountryRelationshipDao {
 
+    /* ======================
+       Публичные методы
+       ====================== */
+
     /** Вернёт список стран или пустой список при ошибке. */
     public List<String> listAllCountries() {
-        final String sql = "SELECT name FROM Countries";
+        final String sql = "SELECT `Name` FROM `Countries`";
         List<String> out = new ArrayList<>();
 
         try (Connection con = DBConnect()) {
@@ -41,7 +45,7 @@ public class CountryRelationshipDao {
         final Map<String, String> out = new HashMap<>();
         if (countryName == null || countryName.isEmpty()) return out;
 
-        final String sql = "SELECT relationship FROM Countries WHERE name = ?";
+        final String sql = "SELECT `Relationship` FROM `Countries` WHERE `Name` = ?";
 
         try (Connection con = DBConnect()) {
             if (con == null) {
@@ -66,14 +70,17 @@ public class CountryRelationshipDao {
         }
     }
 
+    /** Сохраняет отношения страны. Делает UPSERT и гарантирует значения для всех NOT NULL полей. */
     public void saveRelationsFor(String countryName, Map<String, String> map) {
         if (countryName == null || countryName.isEmpty()) return;
         final String json = toJson(map);
 
+        // Вариант 1: попытаться UPSERT-ом. Важно: указать все NOT NULL без дефолтов.
         final String upsert =
-                "INSERT INTO Countries (name, relationship, Players) " +
-                        "VALUES (?, ?, JSON_ARRAY()) " +
-                        "ON DUPLICATE KEY UPDATE relationship = VALUES(relationship)";
+                "INSERT INTO `Countries` " +
+                        "(`Name`, `Relationship`, `Players`, `Permissions`, `Upgrades`, `CountryInfo`, `isVerified`) " +
+                        "VALUES (?, ?, JSON_ARRAY(), JSON_OBJECT(), '{}', JSON_OBJECT(), 0) " +
+                        "ON DUPLICATE KEY UPDATE `Relationship` = VALUES(`Relationship`)";
 
         try (Connection con = DBConnect()) {
             if (con == null) {
@@ -92,14 +99,19 @@ public class CountryRelationshipDao {
             logOther("saveRelationsFor(UPSERT " + countryName + ")", t);
         }
 
-        final String upd = "UPDATE Countries SET relationship = ? WHERE name = ?";
-        final String ins = "INSERT INTO Countries (name, relationship, Players) VALUES (?, ?, JSON_ARRAY())";
+        // Вариант 2 (fallback): UPDATE -> если 0 строк, то INSERT с полным набором полей.
+        final String upd = "UPDATE `Countries` SET `Relationship` = ? WHERE `Name` = ?";
+        final String ins =
+                "INSERT INTO `Countries` " +
+                        "(`Name`, `Relationship`, `Players`, `Permissions`, `Upgrades`, `CountryInfo`, `isVerified`) " +
+                        "VALUES (?, ?, JSON_ARRAY(), JSON_OBJECT(), '{}', JSON_OBJECT(), 0)";
 
         try (Connection con = DBConnect()) {
             if (con == null) {
                 warnOnce("saveRelationsFor(fallback): DBConnect() == null");
                 return;
             }
+            boolean oldAuto = con.getAutoCommit();
             con.setAutoCommit(false);
             int updated;
             try (PreparedStatement psUpd = con.prepareStatement(upd)) {
@@ -115,12 +127,17 @@ public class CountryRelationshipDao {
                 }
             }
             con.commit();
+            con.setAutoCommit(oldAuto);
         } catch (SQLException e) {
             logSql("saveRelationsFor(fallback " + countryName + ")", e);
         } catch (Throwable t) {
             logOther("saveRelationsFor(fallback " + countryName + ")", t);
         }
     }
+
+    /* ======================
+       Внутренние утилиты
+       ====================== */
 
     private static final Gson GSON = new GsonBuilder().disableHtmlEscaping().create();
 

@@ -1,5 +1,4 @@
 package com.frammy.unitylauncher;
-import java.util.List;
 
 public class PlayerVariables {
     double money;

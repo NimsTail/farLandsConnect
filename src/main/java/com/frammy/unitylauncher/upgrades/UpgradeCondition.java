@@ -6,7 +6,6 @@ import com.frammy.unitylauncher.zones.ZoneManager;
 import com.frammy.unitylauncher.zones.ZoneType;
 import net.luckperms.api.LuckPermsProvider;
 import net.luckperms.api.model.group.Group;
-import net.luckperms.api.query.QueryOptions;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 
@@ -100,15 +99,18 @@ public class UpgradeCondition {
         if (country == null || permissionKey == null) return false;
 
         try {
-            String groupName = normalizeGroupName(country);
-            Group group = LuckPermsProvider.get().getGroupManager().getGroup(groupName);
+            var lp = LuckPermsProvider.get();
+            String groupName = normalizeGroupName(country); // БЕЗ "group."
+            Group group = lp.getGroupManager().getGroup(groupName);
             if (group == null) {
-                dbg("countryHasPermission: группа " + groupName + " не найдена.");
+                dbg("countryHasPermission: группа '" + groupName + "' не найдена.");
                 return false;
             }
 
+            // Контексты LP
+            var opts = lp.getContextManager().getStaticQueryOptions();
             boolean result = group.getCachedData()
-                    .getPermissionData((QueryOptions) LuckPermsProvider.get().getContextManager().getStaticContext())
+                    .getPermissionData(opts)
                     .checkPermission(permissionKey)
                     .asBoolean();
 
@@ -119,6 +121,7 @@ public class UpgradeCondition {
             return false;
         }
     }
+
 
     /* ============================================================
        УТИЛИТЫ
@@ -144,9 +147,13 @@ public class UpgradeCondition {
 
     /** Нормализует имя страны в формат group.<normalized> */
     private static String normalizeGroupName(String country) {
-        String norm = country.trim().toLowerCase()
+        return country.trim().toLowerCase()
                 .replace(' ', '_')
                 .replaceAll("[^a-z0-9_\\-.]", "");
-        return "group." + norm;
     }
+    // Публичный адаптер: получить страну-владельца для зоны (или null)
+    public static String resolveCountryForZonePublic(com.frammy.unitylauncher.zones.ZoneInfo zi) {
+        return resolveCountryForZone(zi);
+    }
+
 }

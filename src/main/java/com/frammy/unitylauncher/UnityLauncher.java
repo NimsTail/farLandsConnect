@@ -111,7 +111,6 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
                 Bukkit.getScheduler().runTask(this, () -> {
                     signManager.loadSignData();
-                    zoneManager.loadZoneData();
                     zoneManager.loadZonesFromConfig();
 
                     // Обновляем все SHOP_LIST таблички через 5 секунд
@@ -142,6 +141,11 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         // слушатели апгрейдов
         UpgradesListener.registerAll(this);
         Objects.requireNonNull(getCommand("brand")).setExecutor(new com.frammy.unitylauncher.upgrades.BrandCommand());
+
+//        Bukkit.getPluginManager().registerEvents(new com.frammy.unitylauncher.RedstoneDebugListener(), this);
+//        Bukkit.getPluginManager().registerEvents(new com.frammy.unitylauncher.IndustryFurnaceGuard(), this);
+
+
 
         // ★ добавлено: асинхронный пинг БД после старта (чтобы поймать проблемы сразу)
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
@@ -349,82 +353,6 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         t.printStackTrace(new PrintWriter(sw));
         Bukkit.getLogger().severe(sw.toString());
     }
-
-    // ★ добавлено: безопасные асинхронные версии ранее закомментированных методов
-
-//    /** Асинхронно сбрасывает DayDealCode всем пользователям. */
-//    public static void resetDayDealCodeAsync() {
-//        Bukkit.getScheduler().runTaskAsynchronously(getInstance(), () -> {
-//            String sql = "UPDATE Users SET DayDealCode = 0";
-//            try (Connection con = DBConnect()) {
-//                if (con == null) {
-//                    Bukkit.getLogger().warning("[UnityLauncher] resetDayDealCodeAsync: DBConnect() == null");
-//                    return;
-//                }
-//                try (PreparedStatement ps = con.prepareStatement(sql)) {
-//                    int updated = ps.executeUpdate();
-//                    Bukkit.getLogger().info("[UnityLauncher] resetDayDealCodeAsync: updated rows = " + updated);
-//                }
-//            } catch (Throwable t) {
-//                Bukkit.getLogger().severe("[UnityLauncher] resetDayDealCodeAsync failed: " + t.getMessage());
-//                logDbException(t);
-//            }
-//        });
-//    }
-//
-//    /**
-//     * Асинхронно обновляет Playtime накопительно.
-//     * playTime: имя игрока -> добавляемые секунды/тиков (в твоих единицах).
-//     */
-//    public static void updatePlaytimeAsync(Map<String, Long> playTime) {
-//        if (playTime == null || playTime.isEmpty()) return;
-//
-//        Bukkit.getScheduler().runTaskAsynchronously(getInstance(), () -> {
-//            String selectSql = "SELECT Playtime FROM Users WHERE Name = ? LIMIT 1";
-//            String updateSql = "UPDATE Users SET Playtime = ? WHERE Name = ?";
-//
-//            try (Connection con = DBConnect()) {
-//                if (con == null) {
-//                    Bukkit.getLogger().warning("[UnityLauncher] updatePlaytimeAsync: DBConnect() == null");
-//                    return;
-//                }
-//                con.setAutoCommit(false);
-//
-//                try (PreparedStatement psSel = con.prepareStatement(selectSql);
-//                     PreparedStatement psUpd = con.prepareStatement(updateSql)) {
-//
-//                    for (Map.Entry<String, Long> e : playTime.entrySet()) {
-//                        String name = e.getKey();
-//                        long delta = e.getValue() == null ? 0L : e.getValue();
-//
-//                        long current = 0L;
-//                        psSel.clearParameters();
-//                        psSel.setString(1, name);
-//                        try (ResultSet rs = psSel.executeQuery()) {
-//                            if (rs.next()) current = rs.getLong("Playtime");
-//                        }
-//
-//                        long newValue = current + Math.max(0L, delta);
-//                        psUpd.clearParameters();
-//                        psUpd.setLong(1, newValue);
-//                        psUpd.setString(2, name);
-//                        psUpd.addBatch();
-//                    }
-//
-//                    psUpd.executeBatch();
-//                    con.commit();
-//                } catch (Throwable t) {
-//                    try { con.rollback(); } catch (Throwable ignore) {}
-//                    throw t;
-//                } finally {
-//                    try { con.setAutoCommit(true); } catch (Throwable ignore) {}
-//                }
-//            } catch (Throwable t) {
-//                Bukkit.getLogger().severe("[UnityLauncher] updatePlaytimeAsync failed: " + t.getMessage());
-//                logDbException(t);
-//            }
-//        });
-//    }
 
     /* ===================== Ошибки/уведомления ===================== */
 

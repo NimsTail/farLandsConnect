@@ -8,8 +8,11 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.*;
 import org.bukkit.inventory.AnvilInventory;
+import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.persistence.PersistentDataContainer;
+import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.scheduler.BukkitRunnable;
 
 import java.io.File;
@@ -88,125 +91,41 @@ public class MoneyManager implements Listener {
        // player.sendMessage("Вы получили " + totalCents / 100 + " долларов и " + totalCents % 100 + " центов.");
     }
 
-    public void takeMoney(Player player, double amount, boolean isCountry) {
+    public void takeMoney(Player player, double amount, boolean toCountry) {
+        if (player == null || amount <= 0) return;
 
-        int totalCents = (int) Math.round(amount * 100); // Сумма в центах
-        int remainingCents = totalCents;
+        double remaining = round2(amount);
 
-        Map<Integer, List<ItemStack>> moneyMap = new TreeMap<>(Collections.reverseOrder());
-        int totalInventoryCents = 0;
+        // Списываем ТОЛЬКО предметную валюту из инвентаря по слотам.
+        Inventory inv = player.getInventory();
+        ItemStack[] contents = inv.getStorageContents(); // важен индексный доступ
 
-        // Сканируем инвентарь игрока
-        for (ItemStack item : player.getInventory().getContents()) {
-            if (isMoney(item)) {
-                double itemValue = extractMoneyValue(item);
-                player.sendMessage(String.valueOf(itemValue));
-                int itemCents = (int) Math.round(itemValue * 100);
-                totalInventoryCents += itemCents * item.getAmount();
+        for (int slot = 0; slot < contents.length && remaining > 0; slot++) {
+            ItemStack stack = contents[slot];
+            if (!isMoney(stack)) continue;
 
-                moneyMap.putIfAbsent(itemCents, new ArrayList<>());
-                moneyMap.get(itemCents).add(item);
+            double unit = getMoneyValue(stack); // номинал одной штуки
+            if (unit <= 0) continue;
+
+            int canTakeByValue = (int) Math.floor((remaining + 1e-9) / unit);
+            if (canTakeByValue <= 0) continue;
+
+            int take = Math.min(canTakeByValue, stack.getAmount());
+            if (take <= 0) continue;
+
+            int newAmount = stack.getAmount() - take;
+            remaining = round2(remaining - unit * take);
+
+            if (newAmount <= 0) {
+                inv.setItem(slot, null);
+            } else {
+                ItemStack copy = stack.clone();
+                copy.setAmount(newAmount);
+                inv.setItem(slot, copy);
             }
         }
 
-        // Проверяем, достаточно ли средств
-        if (totalInventoryCents < totalCents) {
-            player.sendMessage(ChatColor.GRAY + "Недостаточно средств для выполнения операции.");
-            return;
-        }
-
-        List<ItemStack> itemsToRemove = new ArrayList<>();
-        List<ItemStack> changeToGive = new ArrayList<>();
-
-        // Забираем деньги из инвентаря
-        for (Map.Entry<Integer, List<ItemStack>> entry : moneyMap.entrySet()) {
-            int denominationCents = entry.getKey();
-            List<ItemStack> stacks = entry.getValue();
-
-            for (ItemStack stack : stacks) {
-                while (remainingCents > 0 && stack.getAmount() > 0) {
-                    if (remainingCents >= denominationCents) {
-                        // Забираем купюру и уменьшаем оставшуюся сумму
-                        remainingCents -= denominationCents;
-                        //removeMoney(player, stack); // Удаляем купюру из сохранений
-                        stack.setAmount(stack.getAmount() - 1);
-                        if (stack.getAmount() == 0) itemsToRemove.add(stack);
-                    } else {
-                        // Если купюра больше, чем нужно, используем её для сдачи
-                        int changeCents = denominationCents - remainingCents;
-                        remainingCents = 0;
-                       // removeMoney(player, stack); // Удаляем купюру из сохранений
-                        stack.setAmount(stack.getAmount() - 1);
-                        if (stack.getAmount() == 0) itemsToRemove.add(stack);
-
-                        // Рассчитываем сдачу
-                        for (int denom : dollarDenominations) {
-                            while (changeCents >= denom * 100) {
-                                changeCents -= denom * 100;
-                                ItemStack changeItem = createMoneyItem(Material.PRISMARINE_SHARD, denom, "Ⓕ");
-                                changeToGive.add(changeItem);
-                            }
-                        }
-                        for (int denom : centDenominations) {
-                            while (changeCents >= denom) {
-                                changeCents -= denom;
-                                ItemStack changeItem = createMoneyItem(Material.PRISMARINE_CRYSTALS, denom / 100.0, "ⓒ");
-                                changeToGive.add(changeItem);
-                            }
-                        }
-
-                        // Если сдачу невозможно выдать, отменяем операцию
-                        if (changeCents > 0) {
-                            player.sendMessage("Ошибка: сдачу невозможно выдать. Обратитесь к администратору.");
-                            return;
-                        }
-                    }
-                }
-
-                if (remainingCents <= 0) break;
-            }
-
-            if (remainingCents <= 0) break;
-        }
-
-        // Удаляем купюры из инвентаря
-        for (ItemStack item : itemsToRemove) {
-            player.getInventory().remove(item);
-        }
-
-        // Регистрируем и выдаём сдачу
-        for (ItemStack item : changeToGive) {
-            player.getInventory().addItem(item);
-            double value = extractMoneyValue(item);
-            String type = item.getType() == Material.PRISMARINE_SHARD ? "Ⓕ" : "ⓒ";
-           // registerMoney(player, item, value, type); // Регистрируем сдачу
-        }
-
-        // Проверяем, остались ли неоплаченные средства
-        if (remainingCents > 0) {
-            player.sendMessage("Ошибка: не удалось снять полную сумму. Обратитесь к администратору.");
-            return;
-        }
-        if (isCountry) {
-
-        } else {
-            UnityCommands.getInstance().getPlayerInfo(player.getName(), data -> new BukkitRunnable() {
-                @Override
-                public void run() {
-                    Map<String, Object> updates = new HashMap<>();
-                    updates.put("money", data.money + amount);
-                    UnityCommands.getInstance().mergeAndUpdatePlayerData(player.getName(),"GeneralData", updates);
-
-                }
-
-            }.runTask(UnityLauncher.getInstance()));
-            player.sendMessage(ChatColor.GRAY + "На твой счёт было взнесено " + ChatColor.YELLOW + amount + ChatColor.GRAY +"F.");
-
-        }
-
-
-
-       // player.sendMessage("С вашего счета снято " + amount + " долларов.");
+        // Если осталась непокрытая сумма — предметов не хватило.
     }
 
 
@@ -256,18 +175,88 @@ public class MoneyManager implements Listener {
         issuedMoneyConfig.set(path, moneyIds); // Обновляем путь с новым списком.
         saveIssuedMoney();
     }*/
+   private boolean isMoney(ItemStack item) {
+       if (item == null || item.getType().isAir()) return false;
+       ItemMeta meta = item.getItemMeta();
+       if (meta == null) return false;
 
-    private boolean isMoney(ItemStack item) {
-        if (item == null || item.getType() == Material.AIR) return false;
-        if (item.getType() == Material.PRISMARINE_SHARD || item.getType() == Material.PRISMARINE_CRYSTALS) {
-            ItemMeta meta = item.getItemMeta();
-            String displayName = meta.getDisplayName();
-            if (!meta.hasDisplayName()) {
-                Bukkit.getLogger().info("NO META FOR " + item);
-                return false;
+       // 1) PDC — самый надёжный маркер валюты
+       NamespacedKey key = new NamespacedKey(UnityLauncher.getInstance(), "money.value");
+       PersistentDataContainer pdc = meta.getPersistentDataContainer();
+       if (pdc.has(key, PersistentDataType.DOUBLE) || pdc.has(key, PersistentDataType.INTEGER)) {
+           return true;
+       }
+
+       // 2) (опционально) CustomModelData — если используете выделенный диапазон для купюр
+       if (meta.hasCustomModelData()) {
+           int cmd = meta.getCustomModelData();
+           if (cmd >= 10_000 && cmd < 11_000) return true;
+       }
+
+       // 3) Фолбэк по текстам (аккуратно, чтобы не ловить «ложные деньги»)
+       if (meta.hasDisplayName()) {
+           String n = ChatColor.stripColor(meta.getDisplayName());
+           if (n.contains("Ⓕ") || n.contains("₣") || n.matches(".*\\bF\\b.*")) {
+               return true;
+           }
+       }
+       if (meta.hasLore()) {
+           for (String line : Objects.requireNonNull(meta.getLore())) {
+               String s = ChatColor.stripColor(line == null ? "" : line);
+               if (s.contains("Ⓕ") || s.contains("₣") || s.matches(".*\\d+(?:[.,]\\d+)?\\s*[F₣Ⓕ].*")) {
+                   return true;
+               }
+           }
+       }
+       return false;
+   }
+
+    private double getMoneyValue(ItemStack item) {
+        if (item == null || item.getType().isAir()) return 0.0;
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null) return 0.0;
+
+        NamespacedKey key = new NamespacedKey(UnityLauncher.getInstance(), "money.value");
+        PersistentDataContainer pdc = meta.getPersistentDataContainer();
+
+        if (pdc.has(key, PersistentDataType.DOUBLE)) {
+            Double v = pdc.get(key, PersistentDataType.DOUBLE);
+            if (v != null && v > 0) return v;
+        }
+        if (pdc.has(key, PersistentDataType.INTEGER)) {
+            Integer v = pdc.get(key, PersistentDataType.INTEGER);
+            if (v != null && v > 0) return v.doubleValue();
+        }
+
+        // Фолбэк — вытащить номинал из текста
+        if (meta.hasDisplayName()) {
+            String n = ChatColor.stripColor(meta.getDisplayName());
+            Double parsed = parseValueFromText(n);
+            if (parsed != null) return parsed;
+        }
+        if (meta.hasLore()) {
+            for (String line : Objects.requireNonNull(meta.getLore())) {
+                Double parsed = parseValueFromText(ChatColor.stripColor(line));
+                if (parsed != null) return parsed;
             }
-            return meta.getDisplayName().contains("Ⓕ") || meta.getDisplayName().contains("ⓒ");
-        } else return false;
+        }
+
+        // Если не нашли — 1.0 или 0.0 (на твой вкус)
+        return 1.0;
+    }
+
+    private Double parseValueFromText(String s) {
+        if (s == null || s.isBlank()) return null;
+        var m = java.util.regex.Pattern.compile("(\\d+(?:[.,]\\d+)?)\\s*[F₣Ⓕ]").matcher(s);
+        if (m.find()) {
+            try { return Double.parseDouble(m.group(1).replace(',', '.')); }
+            catch (NumberFormatException ignored) {}
+        }
+        return null;
+    }
+
+    private double round2(double v) {
+        return Math.round(v * 100.0) / 100.0;
     }
 
     private double extractMoneyValue(ItemStack item) {
@@ -321,9 +310,6 @@ public class MoneyManager implements Listener {
         }
     }
 
-    public HashMap<String, List<String>> getChestMoneyMap() {
-        return chestMoneyMap;
-    }
     /*@EventHandler
     public void onItemDrop(PlayerDropItemEvent event) {
         ItemStack item = event.getItemDrop().getItemStack();

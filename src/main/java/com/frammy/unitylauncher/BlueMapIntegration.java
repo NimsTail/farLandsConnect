@@ -16,16 +16,14 @@ import org.bukkit.Location;
 import org.bukkit.entity.Player;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.GeometryFactory;
+import org.locationtech.jts.geom.LinearRing;
 import org.locationtech.jts.geom.Polygon;
 
 import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
 
@@ -48,71 +46,83 @@ public class BlueMapIntegration {
     public Logger getLogger() {
         return logger;
     }
+
+    /** Обновлённая функция с корректной проверкой пересечений (XZ + Y-overlap) и фолбэком по высоте */
     public void addBlueMapMarker(String id, Location location, String setID, String setLabel, String markerType, List<Vector3d> extrudePoints, Player p) {
         if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
             BlueMapAPI.getInstance().flatMap(blueMapAPI -> blueMapAPI.getMap(location.getWorld().getName())).ifPresent(map -> {
-                // Проверяем наличие MarkerSet
                 Map<String, MarkerSet> markerSets = map.getMarkerSets();
-                if (markerSets != null) {
-                    MarkerSet markerSet = markerSets.computeIfAbsent(setID, k -> new MarkerSet(setLabel));
-                    if (markerSet.getMarkers() != null) {
-                        switch (markerType) {
-                            case "extrude":
-                                // Преобразуем extrudePoints в Vector2d для новой фигуры
-                                List<Vector2d> basePoints = extrudePoints.stream()
-                                        .map(loc -> new Vector2d(loc.getX(), loc.getZ()))
-                                        .collect(Collectors.toList());
-                                Shape newShape = new Shape(basePoints);
-
-                                // Проверяем пересечение с существующими ExtrudeMarker
-                                for (Marker existingMarker : markerSet.getMarkers().values()) {
-                                    if (existingMarker instanceof ExtrudeMarker extrudeMarker) {
-                                        if (shapesIntersect(newShape, extrudeMarker.getShape())) {
-                                            p.sendMessage(ChatColor.RED + "Маркер пересекается с существующим: " + extrudeMarker.getLabel());
-                                            Bukkit.getLogger().warning("Маркер пересекается с существующим: " + extrudeMarker.getLabel());
-                                            return; // Прекращаем добавление нового маркера
-                                        } else {
-                                            //saveShopData(p, id);
-                                            p.sendMessage(ChatColor.GREEN + "Торговая точка успешно создана!");
-                                            markerPoints.clear();
-                                            plugin.getAwaitingCorrectCommand().remove(p);
-                                        }
-                                    }
-                                }
-
-                                // Добавляем новый маркер, если пересечений нет
-                                ExtrudeMarker extrudeMarker = new ExtrudeMarker(id, newShape, 42, 152);
-                                extrudeMarker.setLabel(id);
-                                markerSet.getMarkers().put(id, extrudeMarker);
-                                break;
-
-                            case "point_atm":
-                                // Создаём POI-маркер
-                                Vector3d position = new Vector3d(location.getX() + 0.5, location.getY(), location.getZ() + 0.5);
-                                POIMarker marker = new POIMarker("atm_" + id, position);
-                                marker.setLabel("ATM");
-                                marker.setIcon("assets/atm.png", 8, 8);
-                                markerSet.getMarkers().put(String.valueOf(id), marker);
-                                break;
-                            case "point_shop":
-                                // Создаём POI-маркер
-                                position = new Vector3d(location.getX() + 0.5, location.getY(), location.getZ() + 0.5);
-                                marker = new POIMarker("shop_" + id, position);
-                                marker.setLabel("Табличка о продаже");
-                                marker.setDetail("ID - '" + id + "'");
-                                marker.setIcon("assets/atm.png", 8, 8);
-                                markerSet.getMarkers().put(String.valueOf(id), marker);
-                                break;
-
-                            default:
-                                Bukkit.getLogger().warning("Unknown markerType: " + markerType);
-                                break;
-                        }
-                    } else {
-                        Bukkit.getLogger().warning("MarkerSet or Markers map is null for setID: " + setID);
-                    }
-                } else {
+                if (markerSets == null) {
                     Bukkit.getLogger().warning("MarkerSets is null for map: " + location.getWorld().getName());
+                    return;
+                }
+
+                MarkerSet markerSet = markerSets.computeIfAbsent(setID, k -> new MarkerSet(setLabel));
+                if (markerSet.getMarkers() == null) {
+                    Bukkit.getLogger().warning("Markers map is null for setID: " + setID);
+                    return;
+                }
+
+                switch (String.valueOf(markerType).toLowerCase(Locale.ROOT)) {
+                    case "extrude" -> {
+                        if (extrudePoints == null || extrudePoints.size() < 3) {
+                            if (p != null) p.sendMessage(ChatColor.RED + "Недостаточно точек для полигона.");
+                            return;
+                        }
+
+                        // Контур XZ
+                        List<Vector2d> basePoints = extrudePoints.stream()
+                                .map(v -> new Vector2d(v.getX(), v.getZ()))
+                                .collect(Collectors.toList());
+                        Shape newShape = new Shape(basePoints);
+
+                        // Высоты Y (фолбэк на 42..152, как было раньше)
+                        double minY = extrudePoints.stream().mapToDouble(Vector3d::getY).min().orElse(42);
+                        double maxY = extrudePoints.stream().mapToDouble(Vector3d::getY).max().orElse(152);
+                        if (minY > maxY) { double t = minY; minY = maxY; maxY = t; }
+
+                        // Проверяем пересечения со всеми существующими ExtrudeMarker в этом наборе
+                        for (Marker existingMarker : markerSet.getMarkers().values()) {
+                            if (existingMarker instanceof ExtrudeMarker em) {
+                                // сначала проверяем по высоте
+                                if (!yOverlap(minY, maxY, em.getShapeMinY(), em.getShapeMaxY())) continue;
+                                // затем по XZ
+                                if (polygonsIntersectXZ(newShape, em.getShape())) {
+                                    if (p != null) p.sendMessage(ChatColor.RED + "Маркер пересекается с существующим: " + em.getLabel());
+                                    Bukkit.getLogger().warning("Маркер пересекается с существующим: " + em.getLabel());
+                                    return; // прекращаем добавление
+                                }
+                            }
+                        }
+
+                        // Добавляем новый маркер (пересечений нет)
+                        ExtrudeMarker extrudeMarker = new ExtrudeMarker(id, newShape, (float) minY, (float) maxY);
+                        extrudeMarker.setLabel(id);
+                        markerSet.getMarkers().put(id, extrudeMarker);
+
+                        if (p != null) p.sendMessage(ChatColor.GREEN + "Торговая точка успешно создана!");
+                        markerPoints.clear();
+                        plugin.getAwaitingCorrectCommand().remove(p);
+                    }
+
+                    case "point_atm" -> {
+                        Vector3d position = new Vector3d(location.getX() + 0.5, location.getY(), location.getZ() + 0.5);
+                        POIMarker marker = new POIMarker("atm_" + id, position);
+                        marker.setLabel("ATM");
+                        marker.setIcon("assets/atm.png", 8, 8);
+                        markerSet.getMarkers().put(String.valueOf(id), marker);
+                    }
+
+                    case "point_shop" -> {
+                        Vector3d position = new Vector3d(location.getX() + 0.5, location.getY(), location.getZ() + 0.5);
+                        POIMarker marker = new POIMarker("shop_" + id, position);
+                        marker.setLabel("Табличка о продаже");
+                        marker.setDetail("ID - '" + id + "'");
+                        marker.setIcon("assets/atm.png", 8, 8);
+                        markerSet.getMarkers().put(String.valueOf(id), marker);
+                    }
+
+                    default -> Bukkit.getLogger().warning("Unknown markerType: " + markerType);
                 }
             });
         }
@@ -131,39 +141,34 @@ public class BlueMapIntegration {
 
     public void saveBlueMapMarkers(String setID) {
         if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
-            BlueMapAPI.getInstance().ifPresent(blueMapAPI -> {
-                // Перебираем все доступные карты (мира)
-                blueMapAPI.getMaps().forEach(map -> {
-                    MarkerSet markerSet = map.getMarkerSets().get(setID);
+            BlueMapAPI.getInstance().ifPresent(blueMapAPI -> blueMapAPI.getMaps().forEach(map -> {
+                MarkerSet markerSet = map.getMarkerSets().get(setID);
 
-                    if (markerSet != null) {
-                        // Определяем путь к файлу маркеров
-                        File markerFile = new File(getDataFolder().getParentFile(), "BMMarker/customData/" + map.getId() + "/" + setID + ".json");
+                if (markerSet != null) {
+                    File markerFile = new File(getDataFolder().getParentFile(), "BMMarker/customData/" + map.getId() + "/" + setID + ".json");
 
-                        // Проверка существования файла; если не существует - создаем
-                        if (!markerFile.exists()) {
-                            try {
-                                markerFile.getParentFile().mkdirs(); // Создаем родительскую директорию, если необходимо
-                                markerFile.createNewFile(); // Создаем файл
-                            } catch (IOException e) {
-                                getLogger().severe("Ошибка при создании файла маркеров: " + markerFile.getAbsolutePath());
-                                e.printStackTrace();
-                                return; // Остановить выполнение, если не удалось создать файл
-                            }
-                        }
-
-                        // Сохранение маркеров в файл
-                        try (FileWriter writer = new FileWriter(markerFile)) {
-                            MarkerGson.INSTANCE.toJson(markerSet, writer);
-                        } catch (IOException ex) {
-                            getLogger().severe("Ошибка при сохранении маркеров BlueMap.");
-                            ex.printStackTrace();
+                    if (!markerFile.exists()) {
+                        try {
+                            markerFile.getParentFile().mkdirs();
+                            markerFile.createNewFile();
+                        } catch (IOException e) {
+                            getLogger().severe("Ошибка при создании файла маркеров: " + markerFile.getAbsolutePath());
+                            e.printStackTrace();
+                            return;
                         }
                     }
-                });
-            });
+
+                    try (FileWriter writer = new FileWriter(markerFile)) {
+                        MarkerGson.INSTANCE.toJson(markerSet, writer);
+                    } catch (IOException ex) {
+                        getLogger().severe("Ошибка при сохранении маркеров BlueMap.");
+                        ex.printStackTrace();
+                    }
+                }
+            }));
         }
     }
+
     public void initializeBlueMapMarkerStorage(String setID) {
         if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
             BlueMapAPI.onEnable(blueMapAPI -> {
@@ -178,7 +183,6 @@ public class BlueMapIntegration {
 
                         if (!markerFile.exists() && markerFile.createNewFile()) {
                             getLogger().info("[BlueMap] Создан пустой файл маркеров: " + markerFile.getAbsolutePath());
-                            // Записываем пустой MarkerSet
                             try (FileWriter writer = new FileWriter(markerFile)) {
                                 MarkerGson.INSTANCE.toJson(new MarkerSet(setID), writer);
                             }
@@ -191,64 +195,66 @@ public class BlueMapIntegration {
             });
         }
     }
-    public void loadBlueMapMarkers() {
-        BlueMapAPI.getInstance().ifPresent(blueMapAPI -> {
-            // Перебираем все доступные карты (мира)
-            blueMapAPI.getMaps().forEach(map -> {
-                // Указываем путь к папке, где хранятся маркеры
-                File markerDirectory = new File(getDataFolder().getParentFile(), "BMMarker/customData/" + map.getId() + "/");
-                if (markerDirectory.exists() && markerDirectory.isDirectory()) {
-                    // Перебираем все файлы в директории
-                    File[] markerFiles = markerDirectory.listFiles((dir, name) -> name.endsWith(".json"));
 
-                    if (markerFiles != null) {
-                        for (File markerFile : markerFiles) {
-                            try (FileReader reader = new FileReader(markerFile)) {
-                                MarkerSet markerSet = MarkerGson.INSTANCE.fromJson(reader, MarkerSet.class);
-                                // Используем имя файла (без расширения) в качестве ключа для MarkerSet
-                                String markerSetName = markerFile.getName().replace(".json", "");
-                                map.getMarkerSets().put(markerSetName, markerSet);
-                            } catch (IOException ex) {
-                                getLogger().severe("Ошибка при загрузке маркеров BlueMap из файла: " + markerFile.getName());
-                                ex.printStackTrace();
-                            }
+    public void loadBlueMapMarkers() {
+        BlueMapAPI.getInstance().ifPresent(blueMapAPI -> blueMapAPI.getMaps().forEach(map -> {
+            File markerDirectory = new File(getDataFolder().getParentFile(), "BMMarker/customData/" + map.getId() + "/");
+            if (markerDirectory.exists() && markerDirectory.isDirectory()) {
+                File[] markerFiles = markerDirectory.listFiles((dir, name) -> name.endsWith(".json"));
+
+                if (markerFiles != null) {
+                    for (File markerFile : markerFiles) {
+                        try (FileReader reader = new FileReader(markerFile)) {
+                            MarkerSet markerSet = MarkerGson.INSTANCE.fromJson(reader, MarkerSet.class);
+                            String markerSetName = markerFile.getName().replace(".json", "");
+                            map.getMarkerSets().put(markerSetName, markerSet);
+                        } catch (IOException ex) {
+                            getLogger().severe("Ошибка при загрузке маркеров BlueMap из файла: " + markerFile.getName());
+                            ex.printStackTrace();
                         }
                     }
-                } else {
-                    getLogger().warning("Папка с маркерами не найдена или не является директорией: " + markerDirectory.getAbsolutePath());
-
                 }
-            });
-        });
-    }
-    private boolean shapesIntersect(Shape shape1, Shape shape2) {
-        GeometryFactory geometryFactory = new GeometryFactory();
-
-        // Преобразуем точки в массив координат и замыкаем линию
-        Coordinate[] coords1 = ensureClosed(Arrays.asList(shape1.getPoints()));
-        Coordinate[] coords2 = ensureClosed(Arrays.asList(shape2.getPoints()));
-
-        // Создаем полигоны
-        Polygon polygon1 = geometryFactory.createPolygon(coords1);
-        Polygon polygon2 = geometryFactory.createPolygon(coords2);
-
-        // Проверяем пересечение
-        return polygon1.intersects(polygon2);
+            } else {
+                getLogger().warning("Папка с маркерами не найдена или не является директорией: " + markerDirectory.getAbsolutePath());
+            }
+        }));
     }
 
-    /**
-     * Проверяет, что линии замкнуты, и добавляет первый элемент в конец массива, если необходимо.
-     */
-    private Coordinate[] ensureClosed(List<Vector2d> points) {
-        List<Coordinate> coordinates = points.stream()
-                .map(point -> new Coordinate(point.getX(), point.getY())) // Замените на ваши реальные поля
-                .collect(Collectors.toList());
+    // ===================== ПРОЧНЫЕ ХЕЛПЕРЫ ДЛЯ ПЕРЕСЕЧЕНИЙ =====================
 
-        // Если первый и последний координаты не совпадают, добавляем замыкающую точку
-        if (!coordinates.getFirst().equals(coordinates.getLast())) {
-            coordinates.add(new Coordinate(coordinates.getFirst()));
+    private static final GeometryFactory JTS = new GeometryFactory();
+    private static final double EPS_AREA = 1e-6;
+
+    private static boolean yOverlap(double aMin, double aMax, double bMin, double bMax) {
+        return !(aMax < bMin || bMax < aMin);
+    }
+
+    /** Преобразуем Shape (BlueMap) -> JTS Polygon (только XZ), с замыканием контура */
+    private static Polygon shapeToPolygon(Shape shape) {
+        List<Vector2d> pts = Arrays.asList(shape.getPoints());
+        if (pts.size() < 3) return null;
+
+        Coordinate[] coords = new Coordinate[pts.size() + 1];
+        for (int i = 0; i < pts.size(); i++) {
+            coords[i] = new Coordinate(pts.get(i).getX(), pts.get(i).getY()); // XZ => (x, z) -> (x, y) в JTS-2D
         }
-        return coordinates.toArray(new Coordinate[0]);
+        coords[pts.size()] = new Coordinate(coords[0]);
+
+        try {
+            LinearRing shell = JTS.createLinearRing(coords);
+            return JTS.createPolygon(shell);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** Пересечение только по XZ-проекции (полигон с полигоном), с порогом площади. */
+    private static boolean polygonsIntersectXZ(Shape s1, Shape s2) {
+        Polygon p1 = shapeToPolygon(s1);
+        Polygon p2 = shapeToPolygon(s2);
+        if (p1 == null || p2 == null || p1.isEmpty() || p2.isEmpty()) return false;
+        var inter = p1.intersection(p2);
+        return !inter.isEmpty() && inter.getArea() > EPS_AREA;
     }
 
 }

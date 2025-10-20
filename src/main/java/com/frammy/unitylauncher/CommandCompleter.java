@@ -41,6 +41,7 @@ public class CommandCompleter implements TabCompleter {
                     completions.add("addcorner");
                     completions.add("removecorner");
                     completions.add("update");
+                    completions.add("remove");
                     completions.add("price");
                     break;
                 case "top":

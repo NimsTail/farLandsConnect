@@ -164,7 +164,8 @@ public class Unity implements CommandExecutor {
                     return true;
                 case "balance":
                 case "bal":
-                    UnityCommands.getInstance().getMoney(sender);
+                    double balance = UnityCommands.getInstance().getMoney(sender);
+                    sender.sendMessage("Ваш баланс: " + ChatColor.GREEN + balance + ChatColor.RESET + "!");
                     return true;
                 case "country":
                     UnityCommands.getInstance().getCountry(sender);
