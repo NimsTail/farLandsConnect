@@ -135,6 +135,13 @@ public class CountryRelationshipDao {
         }
     }
 
+    public void deleteByCountryTx(Connection conn, String countryName) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("DELETE FROM CountryRelations WHERE country = ?")) {
+            ps.setString(1, countryName);
+            ps.executeUpdate();
+        }
+    }
+
     /* ======================
        Внутренние утилиты
        ====================== */

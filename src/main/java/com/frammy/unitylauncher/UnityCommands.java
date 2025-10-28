@@ -1,6 +1,6 @@
 package com.frammy.unitylauncher;
 
-import com.google.gson.Gson;
+import com.google.gson.JsonObject;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
@@ -8,12 +8,7 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.Player;
 import org.bukkit.permissions.PermissionAttachmentInfo;
-import org.bukkit.scheduler.BukkitRunnable;
 import org.jetbrains.annotations.NotNull;
-import java.util.function.Consumer;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonParser;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -21,7 +16,6 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.List;
 import java.util.Map;
-import java.util.HashMap;
 import java.util.Objects;
 
 import static com.frammy.unitylauncher.UnityLauncher.onError;
@@ -36,44 +30,180 @@ public class UnityCommands {
         }
         return instance;
     }
-    public Map<String, Object> getJsonFieldValues(
-            String tableName,
-            String jsonColumn,
-            String whereColumn,
-            String whereValue,
-            List<String> jsonKeys
-    ) {
-        Map<String, Object> resultMap = new HashMap<>();
-        try (Connection con = DBConnect()) {
+
+    public static class PlayerData {
+        public String countryName;
+        public double money;
+    }
+
+// ==== BEGIN: in-memory cache for Users table (all JSON columns in one shot) ====
+
+    private static final long PLAYER_CACHE_TTL_MS = 60_000; // 60 сек. поправь под себя
+
+    private final java.util.concurrent.ConcurrentHashMap<String, CachedPlayerRow> playerCache =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    private record CachedPlayerRow(JsonObject customization, JsonObject social, JsonObject general, JsonObject stats, long loadedAt) {
+
+        // упрощаем сигнатуру: TTL берём из внешней константы
+            boolean isExpired(long nowMs) {
+                return nowMs - loadedAt > PLAYER_CACHE_TTL_MS;
+            }
+        }
+
+    private static com.google.gson.JsonObject safeParseObject(com.google.gson.JsonParser parser, String json) {
+        try {
+            if (json == null || json.isEmpty()) return new com.google.gson.JsonObject();
+            var el = parser.parse(json);
+            return (el != null && el.isJsonObject()) ? el.getAsJsonObject() : new com.google.gson.JsonObject();
+        } catch (Exception ignored) {
+            return new com.google.gson.JsonObject();
+        }
+    }
+
+    // Преобразование JsonElement -> Java Object (без Streams.parse)
+    private static Object jsonElementToJava(com.google.gson.JsonElement el) {
+        if (el == null || el.isJsonNull()) return null;
+        if (el.isJsonPrimitive()) {
+            var p = el.getAsJsonPrimitive();
+            if (p.isBoolean()) return p.getAsBoolean();
+            if (p.isNumber())  return p.getAsNumber();
+            if (p.isString())  return p.getAsString();
+            return p.getAsString();
+        }
+        if (el.isJsonArray()) {
+            java.util.List<Object> out = new java.util.ArrayList<>();
+            for (var e : el.getAsJsonArray()) out.add(jsonElementToJava(e));
+            return out;
+        }
+        if (el.isJsonObject()) {
+            java.util.Map<String, Object> map = new java.util.HashMap<>();
+            for (var e : el.getAsJsonObject().entrySet()) {
+                map.put(e.getKey(), jsonElementToJava(e.getValue()));
+            }
+            return map;
+        }
+        return null;
+    }
+
+    private CachedPlayerRow loadPlayerRowFromDB(String playerName) throws Exception {
+        try (java.sql.Connection con = DBConnect()) {
+            if (con == null) return null;
+
+            String sql = "SELECT CustomizationData, SocialData, GeneralData, StatsData " +
+                    "FROM Users WHERE Name = ? LIMIT 1";
+            try (java.sql.PreparedStatement ps = con.prepareStatement(sql)) {
+                ps.setString(1, playerName);
+                try (java.sql.ResultSet rs = ps.executeQuery()) {
+                    if (!rs.next()) return null;
+
+                    com.google.gson.JsonParser parser = new com.google.gson.JsonParser();
+
+                    var cust = safeParseObject(parser, rs.getString("CustomizationData"));
+                    var soc  = safeParseObject(parser, rs.getString("SocialData"));
+                    var gen  = safeParseObject(parser, rs.getString("GeneralData"));
+                    var st   = safeParseObject(parser, rs.getString("StatsData"));
+
+                    return new CachedPlayerRow(cust, soc, gen, st, System.currentTimeMillis());
+                }
+            }
+        }
+    }
+
+    private CachedPlayerRow getOrLoadCachedPlayer(String playerName) {
+        long now = System.currentTimeMillis();
+        CachedPlayerRow row = playerCache.get(playerName);
+        if (row != null && !row.isExpired(now)) return row;
+
+        try {
+            CachedPlayerRow fresh = loadPlayerRowFromDB(playerName);
+            if (fresh != null) {
+                playerCache.put(playerName, fresh);
+                return fresh;
+            }
+        } catch (Exception e) {
+            System.err.println("[UnityCommands] loadPlayerRowFromDB error: " + e.getMessage());
+            e.printStackTrace();
+        }
+        return row; // вернём (возможно, протухший) как best-effort
+    }
+
+    private void upsertCacheAfterUpdate(String playerName, String column, com.google.gson.JsonObject newWholeColumn) {
+        CachedPlayerRow prev = playerCache.get(playerName);
+        long now = System.currentTimeMillis();
+        if (prev == null) {
+            com.google.gson.JsonObject cust = new com.google.gson.JsonObject();
+            com.google.gson.JsonObject soc  = new com.google.gson.JsonObject();
+            com.google.gson.JsonObject gen  = new com.google.gson.JsonObject();
+            com.google.gson.JsonObject st   = new com.google.gson.JsonObject();
+
+            switch (column) {
+                case "CustomizationData" -> cust = newWholeColumn;
+                case "SocialData"        -> soc  = newWholeColumn;
+                case "GeneralData"       -> gen  = newWholeColumn;
+                case "StatsData"         -> st   = newWholeColumn;
+            }
+            playerCache.put(playerName, new CachedPlayerRow(cust, soc, gen, st, now));
+            return;
+        }
+
+        var cust = prev.customization.deepCopy();
+        var soc  = prev.social.deepCopy();
+        var gen  = prev.general.deepCopy();
+        var st   = prev.stats.deepCopy();
+
+        switch (column) {
+            case "CustomizationData" -> cust = newWholeColumn;
+            case "SocialData"        -> soc  = newWholeColumn;
+            case "GeneralData"       -> gen  = newWholeColumn;
+            case "StatsData"         -> st   = newWholeColumn;
+        }
+        playerCache.put(playerName, new CachedPlayerRow(cust, soc, gen, st, now));
+    }
+
+// ==== END: cache ====
+
+    public Map<String, Object> getJsonFieldValues(String table,
+                                                  String jsonColumn,
+                                                  String keyColumn,
+                                                  String keyValue,
+                                                  java.util.List<String> keys) {
+        Map<String, Object> resultMap = new java.util.HashMap<>();
+
+        boolean canUseCache = "Users".equalsIgnoreCase(table) && "Name".equalsIgnoreCase(keyColumn);
+        if (canUseCache) {
+            CachedPlayerRow row = getOrLoadCachedPlayer(keyValue);
+            if (row != null) {
+                com.google.gson.JsonObject col;
+                switch (jsonColumn) {
+                    case "CustomizationData" -> col = row.customization;
+                    case "SocialData"        -> col = row.social;
+                    case "GeneralData"       -> col = row.general;
+                    case "StatsData"         -> col = row.stats;
+                    default -> col = null;
+                }
+                if (col != null) {
+                    for (String k : keys) {
+                        if (col.has(k)) resultMap.put(k, jsonElementToJava(col.get(k)));
+                    }
+                    return resultMap;
+                }
+            }
+            // при промахе — пойдём в БД
+        }
+
+        try (java.sql.Connection con = DBConnect()) {
             if (con == null) return resultMap;
 
-            Map<String, List<String>> allowedJsonColumns = Map.of(
-                    "Users", List.of("CustomizationData", "SocialData", "GeneralData", "StatsData"),
-                    "Countries", List.of("GeneralData", "StatsData")
-            );
-
-            if (!allowedJsonColumns.containsKey(tableName)) {
-                System.err.println("Недопустимая таблица: " + tableName);
-                return resultMap;
-            }
-            if (!allowedJsonColumns.get(tableName).contains(jsonColumn)) {
-                System.err.println("Недопустимая JSON-колонка '" + jsonColumn + "' для таблицы '" + tableName + "'");
-                return resultMap;
-            }
-
-            String query = "SELECT " + jsonColumn + " FROM " + tableName + " WHERE " + whereColumn + " = ?;";
-            try (PreparedStatement st = con.prepareStatement(query)) {
-                st.setString(1, whereValue);
-                try (ResultSet rs = st.executeQuery()) {
+            String sql = "SELECT " + jsonColumn + " FROM " + table + " WHERE " + keyColumn + " = ? LIMIT 1;";
+            try (java.sql.PreparedStatement ps = con.prepareStatement(sql)) {
+                ps.setString(1, keyValue);
+                try (java.sql.ResultSet rs = ps.executeQuery()) {
                     if (rs.next()) {
-                        String jsonStr = rs.getString(1);
-                        if (jsonStr != null && !jsonStr.isEmpty()) {
-                            JsonObject obj = JsonParser.parseString(jsonStr).getAsJsonObject();
-                            Gson gson = new Gson();
-                            for (String key : jsonKeys) {
-                                JsonElement el = obj.get(key);
-                                resultMap.put(key, el == null || el.isJsonNull() ? null : gson.fromJson(el, Object.class));
-                            }
+                        String json = rs.getString(1);
+                        var obj = safeParseObject(new com.google.gson.JsonParser(), json);
+                        for (String k : keys) {
+                            if (obj.has(k)) resultMap.put(k, jsonElementToJava(obj.get(k)));
                         }
                     }
                 }
@@ -85,47 +215,53 @@ public class UnityCommands {
         return resultMap;
     }
 
-    public void mergeAndUpdatePlayerData(String playerName, String column, Map<String, Object> updates) {
-        List<String> validColumns = List.of("CustomizationData", "SocialData", "GeneralData", "StatsData");
+    public void mergeAndUpdatePlayerData(String playerName, String column, java.util.Map<String, Object> updates) {
+        java.util.List<String> validColumns = java.util.List.of("CustomizationData", "SocialData", "GeneralData", "StatsData");
         if (!validColumns.contains(column)) {
             System.err.println("Недопустимая колонка: " + column);
             return;
         }
 
-        try (Connection con = DBConnect()) {
+        try (java.sql.Connection con = DBConnect()) {
             if (con == null) return;
 
-            String selectQuery = "SELECT " + column + " FROM Users WHERE Name = ?;";
-            JsonObject currentJson = new JsonObject();
-
-            try (PreparedStatement selectSt = con.prepareStatement(selectQuery)) {
-                selectSt.setString(1, playerName);
-                try (ResultSet rs = selectSt.executeQuery()) {
-                    if (rs.next()) {
-                        String jsonStr = rs.getString(column);
-                        if (jsonStr != null && !jsonStr.isEmpty()) {
-                            currentJson = JsonParser.parseString(jsonStr).getAsJsonObject();
+            com.google.gson.JsonObject current;
+            CachedPlayerRow cached = playerCache.get(playerName);
+            if (cached != null && !cached.isExpired(System.currentTimeMillis())) {
+                switch (column) {
+                    case "CustomizationData" -> current = cached.customization.deepCopy();
+                    case "SocialData"        -> current = cached.social.deepCopy();
+                    case "GeneralData"       -> current = cached.general.deepCopy();
+                    case "StatsData"         -> current = cached.stats.deepCopy();
+                    default -> current = new com.google.gson.JsonObject();
+                }
+            } else {
+                String select = "SELECT " + column + " FROM Users WHERE Name = ? LIMIT 1;";
+                try (java.sql.PreparedStatement ps = con.prepareStatement(select)) {
+                    ps.setString(1, playerName);
+                    try (java.sql.ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) {
+                            current = safeParseObject(new com.google.gson.JsonParser(), rs.getString(1));
+                        } else {
+                            current = new com.google.gson.JsonObject();
                         }
-                    } else {
-                        System.out.println("Игрок не найден: " + playerName);
-                        return;
                     }
                 }
             }
 
-            Gson gson = new Gson();
-            for (Map.Entry<String, Object> e : updates.entrySet()) {
-                currentJson.add(e.getKey(), gson.toJsonTree(e.getValue()));
+            com.google.gson.Gson gson = new com.google.gson.Gson();
+            for (var e : updates.entrySet()) {
+                current.add(e.getKey(), gson.toJsonTree(e.getValue()));
             }
 
-            String updateQuery = "UPDATE Users SET " + column + " = ? WHERE Name = ?;";
-            try (PreparedStatement updateSt = con.prepareStatement(updateQuery)) {
-                updateSt.setString(1, currentJson.toString());
-                updateSt.setString(2, playerName);
-                updateSt.executeUpdate();
+            String update = "UPDATE Users SET " + column + " = ? WHERE Name = ?;";
+            try (java.sql.PreparedStatement ps = con.prepareStatement(update)) {
+                ps.setString(1, current.toString());
+                ps.setString(2, playerName);
+                ps.executeUpdate();
             }
 
-            System.out.println("Обновление успешно: " + playerName + " → " + column);
+            upsertCacheAfterUpdate(playerName, column, current);
         } catch (Exception e) {
             System.err.println("Ошибка обновления JSON: " + e.getMessage());
             e.printStackTrace();
@@ -427,6 +563,7 @@ public class UnityCommands {
             }
         }
     }
+
     public int getShops(@NotNull CommandSender sender) {
         Connection con = DBConnect();
         if (con != null) {
@@ -454,7 +591,6 @@ public class UnityCommands {
         }
         return 0;
     }
-
 
     public void getTop(@NotNull CommandSender sender, String category) {
         Connection con = DBConnect();
@@ -557,42 +693,39 @@ public class UnityCommands {
     public void getNotifications(@NotNull CommandSender sender) {
         getNotified(sender);
     }
-    public void getPlayerInfo(String sender, Consumer<GeneralData> callback) { // java.util.function.Consumer
-        new BukkitRunnable() {
-            @Override
-            public void run() {
-                GeneralData result = null;
-                try (Connection con = DBConnect()) {
-                    if (con != null) {
-                        String query = "SELECT GeneralData FROM Users WHERE Name = ?;";
-                        try (PreparedStatement st = con.prepareStatement(query)) {
-                            st.setString(1, sender);
-                            try (ResultSet rs = st.executeQuery()) {
-                                if (rs.next()) {
-                                    String generalDataJson = rs.getString("GeneralData");
-                                    if (generalDataJson != null && !generalDataJson.isEmpty()) {
-                                        Gson gson = new Gson();
-                                        result = gson.fromJson(generalDataJson, GeneralData.class);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } catch (Exception e) {
-                    onError("getPlayerInfo", Bukkit.getPlayer(sender));
+
+    public void getPlayerInfo(String playerName, java.util.function.Consumer<PlayerData> callback) {
+        org.bukkit.Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
+            try {
+                CachedPlayerRow row = getOrLoadCachedPlayer(playerName);
+                if (row == null) { callback.accept(null); return; }
+
+                PlayerData pd = new PlayerData();
+
+                // money из GeneralData
+                if (row.general.has("money") && row.general.get("money").isJsonPrimitive()) {
+                    try { pd.money = row.general.get("money").getAsDouble(); } catch (Exception ignored) {}
                 }
 
-                GeneralData finalResult = result;
-                new BukkitRunnable() {
-                    @Override
-                    public void run() {
-                        callback.accept(finalResult);
-                    }
-                }.runTask(UnityLauncher.getInstance());
+                // countryName из SocialData (несколько возможных ключей, чтобы не отвалиться)
+                String c = null;
+                if (row.social.has("countryName")) c = safeGetString(row.social.get("countryName"));
+                if (c == null && row.social.has("country")) c = safeGetString(row.social.get("country"));
+                if (c == null && row.social.has("nation"))  c = safeGetString(row.social.get("nation"));
+                pd.countryName = c;
+
+                callback.accept(pd);
+            } catch (Exception e) {
+                e.printStackTrace();
+                callback.accept(null);
             }
-        }.runTaskAsynchronously(UnityLauncher.getInstance());
+        });
     }
 
+    private static String safeGetString(com.google.gson.JsonElement el) {
+        try { return el != null && el.isJsonPrimitive() ? el.getAsString() : null; }
+        catch (Exception ignored) { return null; }
+    }
 
     public static void getNotified(@NotNull CommandSender sender) {
         Connection con = DBConnect();
@@ -653,6 +786,7 @@ public class UnityCommands {
             }
         }
     }
+
     public void createOrder(String sellerName, String customerName, String spriteName, Double price, Integer quantity, Location location, Map<Enchantment, Integer> enchantments /*, String customerName, ..., другие параметры */) {
         Connection con = DBConnect();
         if (con != null) {

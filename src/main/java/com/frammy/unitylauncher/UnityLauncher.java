@@ -2,16 +2,19 @@ package com.frammy.unitylauncher;
 
 import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
 import com.frammy.unitylauncher.chunkactivity.ChunkActivityHeatmapExporter;
-import com.frammy.unitylauncher.signs.SignCategory;
 import com.frammy.unitylauncher.signs.SignManager;
-import com.frammy.unitylauncher.signs.SignVariables;
+import com.frammy.unitylauncher.tab.LuckPermsPrefixService;
+import com.frammy.unitylauncher.tab.TabDatabaseSync;
+import com.frammy.unitylauncher.tab.TabPrefixService;
+import com.frammy.unitylauncher.upgrades.BrandCommand;
+import com.frammy.unitylauncher.upgrades.UpgradesListener;
 import com.frammy.unitylauncher.zones.ZoneActivityCalculations;
 import com.frammy.unitylauncher.zones.ZoneManager;
-import com.frammy.unitylauncher.upgrades.UpgradesListener;
 import com.frammy.unitylauncher.zones.countryrelations.CountryRegistryJdbc;
 import com.frammy.unitylauncher.zones.countryrelations.CountryRelationshipDao;
 import com.frammy.unitylauncher.zones.countryrelations.DiplomacyService;
-import de.bluecolored.bluemap.api.BlueMapAPI;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import net.md_5.bungee.api.chat.ClickEvent;
 import net.md_5.bungee.api.chat.HoverEvent;
 import net.md_5.bungee.api.chat.TextComponent;
@@ -19,6 +22,7 @@ import net.md_5.bungee.api.chat.hover.content.Text;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
+import org.bukkit.OfflinePlayer;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -26,8 +30,10 @@ import org.bukkit.event.player.AsyncPlayerChatEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
+import javax.sql.DataSource;
 import java.io.InputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -36,9 +42,15 @@ import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class UnityLauncher extends JavaPlugin implements Listener {
+
+    // === singleton ===
     private static UnityLauncher instance;
+    public static UnityLauncher getInstance() { return instance; }
+
+    // === managers / services ===
     private final Set<Player> awaitingCorrectCommand = new HashSet<>();
-    public ArrayList<String> commandCategories= new ArrayList<>();
+    public final List<String> commandCategories = new ArrayList<>();
+
     public MoneyManager moneyManager;
     private ZoneManager zoneManager;
     public ZoneActivityCalculations zoneActivityCalculations;
@@ -46,43 +58,70 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     private ActivityTracker tracker;
     private WebSocketManager webSocketManager;
     private BlueMapIntegration blueMapIntegration;
+
     public DiplomacyService diplomacy;
     public CountryRegistryJdbc countryRegistryJdbc;
-    public Set<Player> getAwaitingCorrectCommand() {return awaitingCorrectCommand;}
+    public CountryRelationshipDao countryRelationshipDao;
 
-    // ★ добавлено: кэш для db.properties и разовая инициализация драйвера
-    private static volatile Properties DB_PROPS;                 // кэш пропертей
+    // DB pool
+    private HikariDataSource hikari;
+
+    // expose some stuff
+    public BlueMapIntegration getBlueMapIntegration() { return blueMapIntegration; }
+    public SignManager getSignManager() { return signManager; }
+    public ZoneManager getZoneManager() { return zoneManager; }
+    public ZoneActivityCalculations getZoneActivityCalculations() { return zoneActivityCalculations; }
+    public DataSource getDataSource() { return hikari; }
+    public Set<Player> getAwaitingCorrectCommand() { return awaitingCorrectCommand; }
+
+    // cached db.properties + driver status
+    private static volatile Properties DB_PROPS;
     private static final AtomicBoolean DRIVER_LOADED = new AtomicBoolean(false);
 
     @Override
     public void onEnable() {
-        AdvancementsManager advManager = new AdvancementsManager(this);
-        advManager.init();
+        instance = this;
 
+        // --- register self as listener ---
         Bukkit.getPluginManager().registerEvents(this, this);
+
+        // --- money / balance accounting ---
         moneyManager = new MoneyManager(getDataFolder(), "unity_launcher");
         getServer().getPluginManager().registerEvents(moneyManager, this);
-        webSocketManager = new WebSocketManager(getLogger());
+
+        // --- activity tracker (chunk activity sampling) ---
         tracker = new ActivityTracker(this);
-        this.blueMapIntegration = new BlueMapIntegration(this, getLogger(), getDataFolder());
-        this.zoneManager = new ZoneManager(this, null, blueMapIntegration, tracker); // пока передаём null, позже установим SignManager
-        this.signManager = new SignManager(this, getDataFolder(), zoneManager, blueMapIntegration, UnityCommands.getInstance());
-        this.zoneManager.setSignManager(signManager);
-        this.zoneActivityCalculations = new ZoneActivityCalculations(zoneManager);
-        zoneActivityCalculations.startZoneBillingScheduler();
 
-        CountryRelationshipDao dao = new CountryRelationshipDao();
-        diplomacy = new DiplomacyService(dao);
-        diplomacy.loadAll();
-        countryRegistryJdbc = new CountryRegistryJdbc();
-        countryRegistryJdbc.start(this);
-        Bukkit.getOnlinePlayers().forEach(p -> countryRegistryJdbc.ensureScheduledRefresh(p.getName()));
-        Bukkit.getScheduler().runTaskAsynchronously(this, diplomacy::loadAll);
+        // --- websocket manager for the external launcher bridge ---
+        // uses constructor (Plugin plugin, Logger logger, String wsUrl) indirectly via convenience ctor
+        webSocketManager = new WebSocketManager(getLogger());
 
+        // --- BlueMap markers / heatmap layer integration ---
+        blueMapIntegration = new BlueMapIntegration(this, getLogger(), getDataFolder());
+
+        // --- zone manager (claims / stores / regions / country borders) ---
+        zoneManager = new ZoneManager(this, null, blueMapIntegration, tracker);
+
+        // --- sign manager (shops, scroll text etc.) ---
+        signManager = new SignManager(
+                this,
+                getDataFolder(),
+                zoneManager,
+                blueMapIntegration,
+                UnityCommands.getInstance()
+        );
+        zoneManager.setSignManager(signManager);
         getServer().getPluginManager().registerEvents(signManager, this);
+
+        // --- activity-based billing & overlap multipliers for zones ---
+        zoneActivityCalculations = new ZoneActivityCalculations(zoneManager);
+
+        // --- command registration & /ul help wiring ---
         HelpCommandManager helpManager = new HelpCommandManager();
-        Objects.requireNonNull(getCommand("unityLauncher")).setExecutor(new Unity(helpManager, webSocketManager, tracker, zoneManager));
-        Objects.requireNonNull(this.getCommand("unityLauncher")).setTabCompleter(new CommandCompleter());
+        Objects.requireNonNull(getCommand("unityLauncher"))
+                .setExecutor(new Unity(helpManager, webSocketManager, tracker, zoneManager));
+        Objects.requireNonNull(getCommand("unityLauncher"))
+                .setTabCompleter(new CommandCompleter());
 
         commandCategories.add("Авторизация");
         commandCategories.add("Финансы");
@@ -102,63 +141,95 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         helpManager.addCommand("/ul group LIST/SET/PREFIX", "Настраивает группы прав для государства", "Страна");
         helpManager.addCommand("/ul shop create НАЗВАНИЕ", "Создание торговой точки", "Финансы");
 
-        // Загрузка табличек и зон ТОЛЬКО после инициализации BlueMap
-        if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
-            BlueMapAPI.onEnable(api -> {
-                getLogger().info("Загружаем маркеры для BlueMap.");
-                blueMapIntegration.initializeBlueMapMarkerStorage("zones_shop");
-                blueMapIntegration.loadBlueMapMarkers();
+        // --- diplomacy / international relations (COUNTRIES table) ---
+        countryRelationshipDao = new CountryRelationshipDao();
+        diplomacy = new DiplomacyService(countryRelationshipDao);
+        Bukkit.getScheduler().runTaskAsynchronously(this, diplomacy::loadAll);
 
-                Bukkit.getScheduler().runTask(this, () -> {
-                    signManager.loadSignData();
-                    zoneManager.loadZonesFromConfig();
+        // --- countries registry / who leads which country / what country owns a player ---
+        // new CountryRegistryJdbc is lightweight (sync lookups from Countries table)
+        countryRegistryJdbc = new CountryRegistryJdbc(this);
 
-                    // Обновляем все SHOP_LIST таблички через 5 секунд
-                    Bukkit.getScheduler().runTaskLater(this, () -> {
-                        for (Map.Entry<Location, SignVariables> entry : signManager.genericSignList.entrySet()) {
-                            if (entry.getValue().getSignCategory() == SignCategory.SHOP_LIST) {
-                                signManager.updateAllRelatedShopListSigns(entry.getKey());
-                            }
-                        }
-                    }, 20L * 5);
-                });
-            });
-        } else {
-            getLogger().warning("BlueMap не включён. Таблички и зоны не будут инициализированы!");
+        // --- lazy BlueMap load (restore saved markers etc. after world is ready) ---
+        new LazyBlueMapLoader(this).scheduleLazyLoad();
+
+        // --- export heatmap layer for BlueMap after startup ---
+        Bukkit.getScheduler().runTaskLater(this, () ->
+                Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+                    try {
+                        var stats   = tracker.getChunkStatsMap();
+                        var weights = tracker.getWeights();
+                        Bukkit.getScheduler().runTask(this, () ->
+                                ChunkActivityHeatmapExporter.exportHeatmapToBlueMapLayer(stats, "world", weights)
+                        );
+                    } catch (Throwable t) {
+                        getLogger().severe("Ошибка экспорта тепловой карты: " + t.getMessage());
+                        t.printStackTrace();
+                    }
+                }), 40L);
+
+        // --- init DB pool early so DBConnect() uses hikari ---
+        initDataSource();
+
+        // --- tab prefix sync for LuckPerms/scoreboard ---
+        TabPrefixService tabPrefixService = getTabPrefixService();
+
+        // применить префиксы всем уже онлайн после старта
+        Bukkit.getScheduler().runTaskLater(this, tabPrefixService::applyForAllOnlinePlayers, 40L);
+
+
+
+        // --- PlaceholderAPI expansion for %unity_prefix% ---
+        if (getServer().getPluginManager().getPlugin("PlaceholderAPI") != null) {
+            new com.frammy.unitylauncher.tab.UnityPrefixExpansion(this, countryRegistryJdbc).register();
         }
-        instance = this;
 
-        Bukkit.getScheduler().runTaskLater(this, () -> ChunkActivityHeatmapExporter.exportHeatmapToBlueMapLayer(
-                tracker.getChunkStatsMap(),
-                "world",
-                tracker.getWeights()
-        ), 40L);
+        // --- LuckPerms presence probe (diagnostic only) ---
+        boolean lpOk;
+        try {
+            net.luckperms.api.LuckPerms ignored = net.luckperms.api.LuckPermsProvider.get();
+            lpOk = true;
+        } catch (Throwable t) {
+            lpOk = false;
+        }
+        getLogger().info("[UL] LuckPerms present = " + lpOk);
 
-        // Регистрация всех апгрейдов
-        getLogger().info("UnityLauncher enabled!");
-        Bukkit.getPluginManager().registerEvents(new UpgradesListener(), this);
-        Bukkit.getPluginManager().registerEvents(new UpgradesListener.SmartHopperListener(this), this);
-        // слушатели апгрейдов
+        if (countryRegistryJdbc == null) {
+            getLogger().warning("[UL] countryRegistryJdbc == null (апгрейды не узнают страну)");
+        } else {
+            getLogger().info("[UL] countryRegistryJdbc OK");
+        }
+        if (zoneManager == null) {
+            getLogger().warning("[UL] ZoneManager == null (getZoneAt не сработает)");
+        } else {
+            getLogger().info("[UL] ZoneManager OK");
+        }
+
+        zoneManager.loadZonesFromConfig();
+        getLogger().info("[UL] Zones loaded: " + zoneManager.getZones().size());
+
+        // --- upgrades listener (chunk upgrades / ATM / etc.) ---
         UpgradesListener.registerAll(this);
-        Objects.requireNonNull(getCommand("brand")).setExecutor(new com.frammy.unitylauncher.upgrades.BrandCommand());
 
-//        Bukkit.getPluginManager().registerEvents(new com.frammy.unitylauncher.RedstoneDebugListener(), this);
-//        Bukkit.getPluginManager().registerEvents(new com.frammy.unitylauncher.IndustryFurnaceGuard(), this);
+        // РЕГИСТРАЦИЯ КОМАНДЫ /brand
+        BrandCommand brandCmd = new BrandCommand();
+        Objects.requireNonNull(getCommand("brand"), "command 'brand' not found in plugin.yml")
+                .setExecutor(brandCmd);
+        Objects.requireNonNull(getCommand("brand"), "command 'brand' not found in plugin.yml")
+                .setTabCompleter(brandCmd);
 
+        // --- zone billing scheduler (daily cost calc + auto-billing async logic) ---
+        zoneActivityCalculations.startZoneBillingScheduler();
 
-
-        // ★ добавлено: асинхронный пинг БД после старта (чтобы поймать проблемы сразу)
+        // --- async ping DB for health logging ---
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
             try (Connection c = DBConnect()) {
                 if (c == null) {
                     Bukkit.getLogger().severe("[UnityLauncher] DB ping: нет подключения (DBConnect() вернул null)");
                 } else {
                     try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery("SELECT 1")) {
-                        if (rs.next()) {
-                            Bukkit.getLogger().info("[UnityLauncher] DB ping: OK");
-                        } else {
-                            Bukkit.getLogger().warning("[UnityLauncher] DB ping: нет результата SELECT 1");
-                        }
+                        if (rs.next()) Bukkit.getLogger().info("[UnityLauncher] DB ping: OK");
+                        else Bukkit.getLogger().warning("[UnityLauncher] DB ping: нет результата SELECT 1");
                     }
                 }
             } catch (Throwable t) {
@@ -166,20 +237,27 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                 logDbException(t);
             }
         });
+
+        getLogger().info("UnityLauncher enabled!");
     }
 
-    public ZoneManager getZoneManager() {
-        return zoneManager;
+    private @NotNull TabPrefixService getTabPrefixService() {
+        TabDatabaseSync tabDb = new TabDatabaseSync(getDataSource(), "main", "world", this);
+        TabPrefixService tabPrefixService =
+                new TabPrefixService(this, this::computeTabPrefixFromCache, tabDb);
+        LuckPermsPrefixService lpPrefixService =
+                new LuckPermsPrefixService(this);
+        tabPrefixService.setLuckPermsPrefixService(lpPrefixService);
+        return tabPrefixService;
     }
 
     @Override
     public void onDisable() {
+
+        // save sign data (shops etc.)
         try {
-            if (countryRegistryJdbc != null) countryRegistryJdbc.stop();
-        } catch (Throwable ignore) {}
-        try {
-            if (this.signManager != null) {
-                this.signManager.saveSignData();
+            if (signManager != null) {
+                signManager.saveSignData();
             } else {
                 getLogger().warning("[UnityLauncher] signManager is null on disable — skipping saveSignData()");
             }
@@ -187,9 +265,10 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             getLogger().warning("[UnityLauncher] saveSignData() failed: " + t.getMessage());
         }
 
+        // save zones.yml
         try {
-            if (this.zoneManager != null) {
-                this.zoneManager.saveZonesToConfig();
+            if (zoneManager != null) {
+                zoneManager.saveZonesToConfig();
             } else {
                 getLogger().warning("[UnityLauncher] zoneManager is null on disable — skipping saveZonesToConfig()");
             }
@@ -197,6 +276,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             getLogger().warning("[UnityLauncher] saveZonesToConfig() failed: " + t.getMessage());
         }
 
+        // persist chunk activity to disk
         try {
             if (tracker != null) {
                 tracker.forceSampleNow();
@@ -206,6 +286,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             getLogger().warning("[UnityLauncher] tracker save failed: " + t.getMessage());
         }
 
+        // close websocket sessions
         try {
             if (webSocketManager != null) {
                 webSocketManager.disconnectAll();
@@ -214,12 +295,14 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             getLogger().warning("[UnityLauncher] webSocketManager disconnect failed: " + t.getMessage());
         }
 
+        // save diplomacy state
         try {
             diplomacy.snapshot().keySet().forEach(diplomacy::save);
         } catch (Throwable t) {
             getLogger().warning("[UnityLauncher] diplomacy save failed: " + t.getMessage());
         }
 
+        // persist BlueMap markers
         try {
             if (blueMapIntegration != null) {
                 blueMapIntegration.saveBlueMapMarkers("services");
@@ -230,14 +313,19 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             getLogger().warning("[UnityLauncher] blueMapIntegration save failed: " + t.getMessage());
         }
 
+        // shutdown DB pool
+        if (hikari != null) {
+            try { hikari.close(); } catch (Throwable ignore) {}
+            hikari = null;
+        }
+
         instance = null;
         getLogger().info("UnityLauncher disabled.");
     }
 
-    public static UnityLauncher getInstance() {
-        return instance;
-    }
+    /* ===================== Player-related events ===================== */
 
+    // make fps:// URLs clickable instead of sending them raw
     @EventHandler
     public void onChat(AsyncPlayerChatEvent event) {
         String message = event.getMessage();
@@ -252,16 +340,38 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         }
     }
 
+    // update action bar zone name only when player crosses block boundary
     @EventHandler
     public void onPlayerMove(PlayerMoveEvent event) {
-        // вызываем только при смене блока (уменьшит нагрузку и дребезг)
         if (event.getFrom().getBlockX() == event.getTo().getBlockX()
                 && event.getFrom().getBlockY() == event.getTo().getBlockY()
                 && event.getFrom().getBlockZ() == event.getTo().getBlockZ()) {
             return;
         }
-        zoneManager.checkPlayerZone(event.getPlayer());
+        if (zoneManager != null) {
+            zoneManager.checkPlayerZone(event.getPlayer());
+        }
     }
+
+    // block chat if player is forced to finish /ul shop flow first
+    @EventHandler
+    public void onPlayerChat(AsyncPlayerChatEvent event) {
+        Player player = event.getPlayer();
+        if (awaitingCorrectCommand.contains(player)) {
+            player.sendMessage(ChatColor.RED + "Ты не можешь отправлять сообщения, пока не укажешь границы магазина. Используй: /ul shop addcorner");
+            event.setCancelled(true);
+        }
+    }
+
+    // register websocket session on join
+    @EventHandler
+    public void onJoin(PlayerJoinEvent e){
+        if (webSocketManager != null) {
+            webSocketManager.connectPlayer(e.getPlayer().getName());
+        }
+    }
+
+    /* ===================== Small helpers ===================== */
 
     public String encodeLocation(Location loc) {
         return loc.getWorld().getName() + "_" + loc.getBlockX() + "_" + loc.getBlockY() + "_" + loc.getBlockZ();
@@ -271,36 +381,71 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         awaitingCorrectCommand.add(player);
     }
 
-    // Обработчик событий для перехвата сообщений в чате
-    @EventHandler
-    public void onPlayerChat(AsyncPlayerChatEvent event) {
-        Player player = event.getPlayer();
-
-        // Если игрок в списке ожидания, блокируем его сообщение
-        if (awaitingCorrectCommand.contains(player)) {
-            player.sendMessage(ChatColor.RED + "Ты не можешь отправлять сообщения, пока не укажешь границы магазина. Используй: /ul shop addcorner");
-            event.setCancelled(true); // Блокируем сообщение
-        }
-    }
-
     public int getMaxBaseLength(Collection<String> values) {
         return values.stream().mapToInt(String::length).max().orElse(1);
     }
 
-    @EventHandler
-    public void onJoin(PlayerJoinEvent e){
-        webSocketManager.connectPlayer(e.getPlayer().getName());
-        countryRegistryJdbc.ensureScheduledRefresh(e.getPlayer().getName());
+    /**
+     * Возвращает {prefix, suffix} для TAB по UUID игрока.
+     *
+     * Логика сейчас минималистичная:
+     * - узнаём ник по UUID;
+     * - спрашиваем страну у countryRegistryJdbc.getCountryOfPlayer(name) (синхронно по кэшу/БД Countries);
+     * - если страна известна → §7[<Страна>] §r;
+     * - иначе null.
+     *
+     * suffix пока не используется.
+     */
+    public String[] computeTabPrefixFromCache(UUID uuid) {
+        try {
+            if (countryRegistryJdbc == null) {
+                getLogger().warning("[TAB] countryRegistryJdbc == null");
+                return new String[]{null, null};
+            }
+
+            // ник игрока
+            OfflinePlayer off = Bukkit.getOfflinePlayer(uuid);
+            String name = off.getName();
+            if (name == null || name.isBlank()) {
+                return new String[]{null, null};
+            }
+
+            // берём чисто префикс роли (например "§o§d❉Президент")
+            String rolePrefixRaw = countryRegistryJdbc.getPlayerRolePrefix(name);
+
+            String finalPrefix = null;
+            if (rolePrefixRaw != null && !rolePrefixRaw.isBlank()) {
+                // нормализуем & -> § на всякий случай
+                finalPrefix = rolePrefixRaw.replace('&', '§').trim() + " ";
+            }
+
+            // возвращаем {prefix, suffix}, суффикс нам не нужен
+            return new String[]{finalPrefix, null};
+
+        } catch (Throwable t) {
+            getLogger().warning("[TAB] Exception while computing prefix: " + t.getMessage());
+            t.printStackTrace();
+            return new String[]{null, null};
+        }
     }
 
-    /* ===================== БАЗА ДАННЫХ ===================== */
+    /* ===================== DATABASE ===================== */
 
-    // ★ изменено: DBConnect с кэшем пропертей и разовой загрузкой драйвера
+    /**
+     * Глобальная точка подключения к БД.
+     * 1) если Hikari уже инициализирован — берём connect из пула;
+     * 2) иначе fallback на DriverManager (db.properties).
+     */
     @Nullable
     public static Connection DBConnect() {
         try {
-            Properties props = loadDbProps(); // может бросить исключение, логируем ниже
-            String url = props.getProperty("db.url");
+            UnityLauncher inst = UnityLauncher.getInstance();
+            if (inst != null && inst.getDataSource() != null) {
+                return inst.getDataSource().getConnection();
+            }
+
+            Properties props = loadDbProps();
+            String url  = props.getProperty("db.url");
             String user = props.getProperty("db.user");
             String pass = props.getProperty("db.password");
 
@@ -323,7 +468,45 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         }
     }
 
-    // ★ добавлено: кэш загрузки db.properties из ресурсов
+    /** Hikari pool init (called from onEnable). */
+    private void initDataSource() {
+        try {
+            Properties props = loadDbProps();
+            String url  = props.getProperty("db.url");
+            String user = props.getProperty("db.user");
+            String pass = props.getProperty("db.password");
+
+            if (url == null || user == null || pass == null) {
+                getLogger().severe("[UnityLauncher] db.properties: отсутствуют db.url/db.user/db.password — пул не инициализирован.");
+                return;
+            }
+
+            HikariConfig cfg = buildHikariConfig(url, user, pass);
+            hikari = new HikariDataSource(cfg);
+            getLogger().info("HikariCP инициализирован: " + cfg.getPoolName());
+        } catch (Throwable t) {
+            getLogger().severe("[UnityLauncher] Не удалось инициализировать HikariCP: " + t.getMessage());
+            logDbException(t);
+        }
+    }
+
+    private static @NotNull HikariConfig buildHikariConfig(String url, String user, String pass) {
+        HikariConfig cfg = new HikariConfig();
+        cfg.setJdbcUrl(url);
+        cfg.setUsername(user);
+        cfg.setPassword(pass);
+
+        cfg.setMaximumPoolSize(8);
+        cfg.setMinimumIdle(2);
+        cfg.setConnectionTimeout(8000);
+        cfg.setIdleTimeout(60_000);
+        cfg.setMaxLifetime(10 * 60_000);
+        cfg.setPoolName("UnityLauncher-DBPool");
+        cfg.setDriverClassName("com.mysql.cj.jdbc.Driver");
+        return cfg;
+    }
+
+    /** кэшированная загрузка db.properties из resources */
     private static Properties loadDbProps() throws Exception {
         Properties cached = DB_PROPS;
         if (cached != null) return cached;
@@ -354,7 +537,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         Bukkit.getLogger().severe(sw.toString());
     }
 
-    /* ===================== Ошибки/уведомления ===================== */
+    /* ===================== User-facing error helper ===================== */
 
     public static void onError(String reason, @Nullable Player p) {
         String prefix = ChatColor.RED + "[UnityLauncher] ";

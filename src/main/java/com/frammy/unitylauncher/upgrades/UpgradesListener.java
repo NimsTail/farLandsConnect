@@ -2,59 +2,99 @@ package com.frammy.unitylauncher.upgrades;
 
 import com.frammy.unitylauncher.UnityLauncher;
 import com.frammy.unitylauncher.zones.ZoneInfo;
-import com.frammy.unitylauncher.zones.ZoneManager;
 import com.frammy.unitylauncher.zones.ZoneType;
-import net.md_5.bungee.api.ChatMessageType;
-import net.md_5.bungee.api.chat.TextComponent;
 import org.bukkit.*;
 import org.bukkit.block.Block;
-import org.bukkit.block.BlockState;
-import org.bukkit.enchantments.Enchantment;
-import org.bukkit.entity.minecart.HopperMinecart;
 import org.bukkit.entity.Player;
+import org.bukkit.event.*;
 import org.bukkit.event.block.BlockPlaceEvent;
-import org.bukkit.event.inventory.FurnaceSmeltEvent;
+import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.inventory.InventoryMoveItemEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
+import org.bukkit.inventory.InventoryHolder;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
-import org.bukkit.inventory.*;
-import org.bukkit.plugin.Plugin;
-import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.scheduler.BukkitRunnable;
+import org.bukkit.scheduler.BukkitTask;
+
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ThreadLocalRandom;
-
-import org.bukkit.Location;
-import org.bukkit.Material;
-import org.bukkit.Sound;
-import org.bukkit.World;
-import org.bukkit.entity.Entity;
-import org.bukkit.entity.Item;
-import org.bukkit.entity.TNTPrimed;
-import org.bukkit.event.EventHandler;
-import org.bukkit.event.EventPriority;
-import org.bukkit.event.Listener;
-import org.bukkit.event.entity.EntityExplodeEvent;
-import org.bukkit.inventory.ItemStack;
 
 public class UpgradesListener implements Listener {
 
-    public UpgradesListener() { }
-
-    public static void registerAll(JavaPlugin plugin) {
-        if (plugin == null) return;
-        Bukkit.getPluginManager().registerEvents(new UpgradesListener(), plugin);
+    public static boolean DEBUG = false;
+    private static void d(String msg) {
+        if (DEBUG) {
+            Bukkit.getLogger().info("[UL/UpgradesListener] " + msg);
+        }
     }
 
-    /* ==============================
-       Redstone
-       ============================== */
+    // NEW: храним кандидатов на турбо-тик.
+    // Ключ = координаты блока хоппера. Значение = последний момент, когда он был активен.
+    // ConcurrentHashMap чтоб не орать в логах про модификацию из эвента и тика.
+    private static final Map<Block, Long> TURBO_HOPPERS = new ConcurrentHashMap<>();
 
-    private static final EnumSet<Material> BASIC_REDS = EnumSet.of(
+    // NEW: задача, которая крутится раз в тик и реально двигает предметы.
+    private static BukkitTask turboTask;
+
+    public static void registerAll(JavaPlugin plugin) {
+        d("registerAll() called, plugin=" + (plugin != null ? plugin.getName() : "null"));
+        if (plugin == null) return;
+
+        Bukkit.getPluginManager().registerEvents(new UpgradesListener(), plugin);
+        d("registerAll() listener registered");
+
+        // NEW: запускаем тикер турбо-хопперов.
+        // Выполняется СИНХРОННО в основном треде сервера.
+        if (turboTask != null) {
+            turboTask.cancel();
+        }
+        turboTask = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
+            long now = System.currentTimeMillis();
+
+            int processed = 0;
+            int BUDGET_PER_RUN = 50; // например не больше 50 турбо-хопперов за запуск задачи
+
+            Iterator<Map.Entry<Block, Long>> it = TURBO_HOPPERS.entrySet().iterator();
+            while (it.hasNext() && processed < BUDGET_PER_RUN) {
+                Map.Entry<Block, Long> en = it.next();
+                Block b = en.getKey();
+
+                if (!(b.getState() instanceof org.bukkit.block.Hopper hopperState)) {
+                    it.remove();
+                    continue;
+                }
+
+                if (!b.getChunk().isLoaded()) {
+                    continue;
+                }
+
+                Location loc = b.getLocation();
+                if (!canTurboFastCached(loc)) {
+                    it.remove();
+                    continue;
+                }
+
+                fastTickHopper(hopperState);
+                processed++;
+
+                if (now - en.getValue() > 5000L) {
+                    it.remove();
+                }
+            }
+        }, 2L, 2L);
+
+        d("registerAll() turboTask started");
+    }
+
+    /* ==========================
+       1) РЕДСТОУН — по группе
+       ========================== */
+
+    private static final EnumSet<Material> REDSTONE_BASIC = EnumSet.of(
             Material.REDSTONE,
             Material.REDSTONE_WIRE,
             Material.REDSTONE_TORCH,
@@ -67,7 +107,7 @@ public class UpgradesListener implements Listener {
             Material.DROPPER
     );
 
-    private static final EnumSet<Material> ADVANCED_REDS = EnumSet.of(
+    private static final EnumSet<Material> REDSTONE_ADVANCED = EnumSet.of(
             Material.REPEATER,
             Material.COMPARATOR,
             Material.OBSERVER,
@@ -81,377 +121,460 @@ public class UpgradesListener implements Listener {
             Material.TRIPWIRE_HOOK,
             Material.TRIPWIRE
     );
-
-    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGH)
-    public void onRedstonePlace(BlockPlaceEvent e) {
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
+    public void onPlace(BlockPlaceEvent e) {
         Player p = e.getPlayer();
-        boolean hasBasic = UpgradeCondition.hasGlobalUpgrade(p, "unity.redstone.basic");
-        boolean hasAdvanced = UpgradeCondition.hasGlobalUpgrade(p, "unity.redstone.advanced");
-        Material type = e.getBlockPlaced().getType();
+        Material m = e.getBlockPlaced().getType();
 
-        if (!hasBasic && !hasAdvanced) {
-            if (BASIC_REDS.contains(type) || ADVANCED_REDS.contains(type)) {
-                denyRedstonePlaceActionBar(e, p, "Требуется апгрейд: Базовый редстоун!");
-            }
+        boolean rsLvl1 = p.isOp() || p.hasPermission("unity.upgrade.redstone.1");
+        boolean rsLvl2 = p.isOp() || p.hasPermission("unity.upgrade.redstone.2");
+
+        if (REDSTONE_BASIC.contains(m) && !rsLvl1) {
+            e.setCancelled(true);
+            p.sendMessage(ChatColor.RED + "⚡ Базовые редстоун-компоненты доступны с апгрейдом 'Редстоун I'.");
+            p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 0.8f, 0.5f);
             return;
         }
-        if (hasBasic && !hasAdvanced && ADVANCED_REDS.contains(type)) {
-            denyRedstonePlaceActionBar(e, p, "Требуется апгрейд: Продвинутый редстоун!");
+
+        if (REDSTONE_ADVANCED.contains(m) && !rsLvl2) {
+            e.setCancelled(true);
+            p.sendMessage(ChatColor.RED + "⚙ Продвинутые редстоун-механизмы требуют апгрейда 'Редстоун II'.");
+            p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 0.8f, 0.5f);
         }
     }
 
-    private void denyRedstonePlaceActionBar(BlockPlaceEvent e, Player p, String msg) {
-        e.setCancelled(true);
-        p.spigot().sendMessage(ChatMessageType.ACTION_BAR, new TextComponent(ChatColor.RED + "⚠ " + msg));
-        p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 0.8f, 0.5f);
-    }
-
-    /* ==============================
-       Furnace Ore Boost (+15% к выходу)
-       ============================== */
+    /* ==================================================
+       2) ПЕЧКИ — работают только в стране/колонии
+       ================================================== */
 
     private static final Set<Material> ORE_SMELT_OUTPUTS = EnumSet.of(
-            Material.IRON_INGOT, Material.GOLD_INGOT, Material.COPPER_INGOT
+            Material.IRON_INGOT,
+            Material.GOLD_INGOT,
+            Material.COPPER_INGOT
     );
+
+    // шанс, что результат будет +1
     private static final double ORE_BOOST_CHANCE = 0.15;
 
     @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
-    public void onFurnaceSmelt(FurnaceSmeltEvent e) {
-        Block b = e.getBlock();
+    public void onFurnaceSmelt(org.bukkit.event.inventory.FurnaceSmeltEvent e) {
+        Block block = e.getBlock();
+        Location loc = block.getLocation();
+        if (!UpgradeCondition.isInsideCountryOrColony(loc)) return;
+        String country = UpgradeCondition.locationCountryOwner(loc);
+        if (country == null || country.isBlank()) return;
+        if (UpgradeCondition.countryMaxLevel(country, "unity.furnace.ore_boost", 1) < 1) return;
         ItemStack result = e.getResult();
         if (result.getType() == Material.AIR) return;
+        if (!ORE_SMELT_OUTPUTS.contains(result.getType())) return;
+        if (java.util.concurrent.ThreadLocalRandom.current().nextDouble() >= ORE_BOOST_CHANCE) return;
 
-        // было: UpgradeCondition.hasGlobalUpgradeAt(...)
-        if (!hasCountryUpgradeAt(b.getLocation(), "unity.furnace.ore_boost")) return;
+        ItemStack bonus = result.clone();
+        int maxStack = Math.min(bonus.getMaxStackSize(), 64);
+        int newAmount = Math.min(bonus.getAmount() + 1, maxStack);
+        bonus.setAmount(newAmount);
 
-        if (ORE_SMELT_OUTPUTS.contains(result.getType())) {
-            if (ThreadLocalRandom.current().nextDouble() < ORE_BOOST_CHANCE) {
-                ItemStack bonus = result.clone();
-                int max = Math.min(bonus.getMaxStackSize(), 64);
-                int newAmount = Math.min(bonus.getAmount() + 1, max);
-                bonus.setAmount(newAmount);
-                e.setResult(bonus);
+        e.setResult(bonus);
 
-                b.getWorld().spawnParticle(Particle.CAMPFIRE_COSY_SMOKE, b.getLocation().add(0.5, 1.0, 0.5), 2);
-                b.getWorld().playSound(b.getLocation(), Sound.BLOCK_FURNACE_FIRE_CRACKLE, 0.3f, 1.2f);
-            }
+        World w = block.getWorld();
+        Location fxLoc = block.getLocation().add(0.5, 1.0, 0.5);
+        w.spawnParticle(Particle.CAMPFIRE_COSY_SMOKE, fxLoc, 2);
+        w.playSound(fxLoc, Sound.BLOCK_FURNACE_FIRE_CRACKLE, 0.3f, 1.2f);
+
+        if (DEBUG) {
+            d("onFurnaceSmelt BONUS +1 " + result.getType() +
+                    " at " + loc + " country=" + country);
         }
     }
 
-    /* ==============================
-       Smart Hoppers
-       ============================== */
+    /* ==============================================================
+       3) ВОРОНКИ — L1 замедление/норма; L2 турбо в INDUSTRIAL
+       ============================================================== */
 
-    public static final class SmartHopperListener implements Listener {
+    // каждая воронка без апгрейда работает через тик (toggle)
+    private static final Map<String, Boolean> HOPPER_TOGGLE = new HashMap<>();
 
-        private final Plugin plugin;
-        private final Map<String, Boolean> flipMap = new ConcurrentHashMap<>();
-
-        public SmartHopperListener(Plugin plugin) {
-            this.plugin = plugin;
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
+    public void onHopperMove(InventoryMoveItemEvent e) {
+        InventoryHolder initiator = e.getInitiator().getHolder();
+        Location loc = holderLocation(initiator);
+        if (loc == null) {
+            d("onHopperMove: holder location null");
+            return;
         }
 
-        @EventHandler(priority = EventPriority.MONITOR)
-        public void onInventoryMove(InventoryMoveItemEvent e) {
-            HopperRef hopperSrc = asHopper(e.getSource());
-            HopperRef hopperDst = asHopper(e.getDestination());
-            if (hopperSrc == null && hopperDst == null) return;
+        String country = UpgradeCondition.locationCountryOwner(loc); // canonical страны
+        int hopperLvl = UpgradeCondition.countryMaxLevel(country, "unity.hopper.smart", 2);
 
-            Location anchor = hopperSrc != null ? hopperSrc.location() : hopperDst.location();
-            int level = getUpgradeLevel(anchor); // 0 — без апгрейда; 1 — ваниль; 2 — перенос целого слота
+        d("onHopperMove at " + loc + " country=" + country + " hopperLvl=" + hopperLvl);
 
-            if (level == 0) {
-                String key = (hopperSrc != null ? hopperSrc.key() : hopperDst.key());
-                boolean flip = flipMap.getOrDefault(key, false);
-                if (flip) e.setCancelled(true);
-                flipMap.put(key, !flip);
+        // --- Lvl 0: замедление - каждый второй тик блокируем
+        if (hopperLvl <= 0) {
+            String key = hopperKeyFromHolder(initiator);
+            if (key == null) {
+                d("onHopperMove lvl0 slow-mode DEFAULT CANCEL (no key)");
+                e.setCancelled(true);
                 return;
             }
 
-            if (level == 1) return;
+            boolean prev = HOPPER_TOGGLE.getOrDefault(key, false);
+            boolean allowThisTick = !prev;
+            HOPPER_TOGGLE.put(key, allowThisTick);
 
-            if (hopperSrc != null) {
-                final Inventory hopperInv = e.getSource();
-                final Inventory dst = e.getDestination();
-                new BukkitRunnable() {
-                    @Override public void run() {
-                        moveFullestSlotFromHopper(hopperInv, dst);
-                    }
-                }.runTaskLater(plugin, 1L);
+            d("onHopperMove lvl0 slow-mode key=" + key + " allow=" + allowThisTick);
+
+            if (!allowThisTick) {
+                e.setCancelled(true);
             }
+            return;
         }
 
-        private int getUpgradeLevel(Location loc) {
-            try {
-                // было: hasGlobalOrIndustrialUpgradeAt(...)
-                if (hasCountryUpgradeAt(loc, "unity.hopper.smart.2")) return 2;
-                if (hasCountryUpgradeAt(loc, "unity.hopper.smart.1")) return 1;
-            } catch (Throwable ignored) {}
-            return 0;
+        // Lvl1+: не трогаем, ванильный перенос разрешён.
+        // Если нет турбо — стоп на этом.
+        if (hopperLvl < 2) {
+            d("onHopperMove: hopperLvl < 2 -> normal speed, no turbo");
+            return;
         }
 
-        /** Переносит целиком самый наполненный стек из хоппера в приёмник, без дюпа. */
-        private void moveFullestSlotFromHopper(Inventory hopperInv, Inventory dst) {
-            if (hopperInv == null || dst == null) return;
-
-            int bestSlot = -1;
-            ItemStack best = null;
-            ItemStack[] contents = hopperInv.getContents();
-
-            for (int i = 0; i < contents.length; i++) {
-                ItemStack it = contents[i];
-                if (it == null || it.getType() == Material.AIR) continue;
-                if (best == null || it.getAmount() > best.getAmount()) {
-                    best = it; bestSlot = i;
-                }
-            }
-            if (bestSlot < 0) return;
-
-            ItemStack toMove = best.clone();
-            hopperInv.setItem(bestSlot, null);
-
-            Map<Integer, ItemStack> leftover = dst.addItem(toMove);
-
-            if (!leftover.isEmpty()) {
-                ItemStack rest = leftover.values().iterator().next();
-                int restAmt = (rest != null ? rest.getAmount() : 0);
-                if (restAmt > 0) {
-                    ItemStack slotNow = hopperInv.getItem(bestSlot);
-                    if (slotNow == null || slotNow.getType() == Material.AIR) {
-                        hopperInv.setItem(bestSlot, rest);
-                    } else {
-                        HashMap<Integer, ItemStack> backLeft = hopperInv.addItem(rest);
-                        if (!backLeft.isEmpty()) {
-                            Location drop = inventoryAnchor(hopperInv);
-                            if (drop != null) drop.getWorld().dropItemNaturally(drop, backLeft.values().iterator().next());
-                        }
-                    }
-                }
-            }
+        // Lvl2+: возможен турбо, НО только если инициатор именно Hopper и он в INDUSTRIAL.
+        if (!(initiator instanceof org.bukkit.block.Hopper hopperState)) {
+            d("onHopperMove: initiator is not Hopper -> skip turbo mark");
+            return;
         }
 
-        private Location inventoryAnchor(Inventory inv) {
-            try {
-                InventoryHolder h = inv.getHolder();
-                if (h instanceof BlockState bs) return bs.getLocation();
-                if (h instanceof HopperMinecart mh) return mh.getLocation();
-            } catch (Throwable ignored) {}
-            return null;
+        boolean insideIndustrial = UpgradeCondition.isInsideZoneTypeRaw(loc, ZoneType.INDUSTRIAL);
+        d("onHopperMove turbo check: insideIndustrial=" + insideIndustrial);
+
+        if (!insideIndustrial) {
+            return;
         }
 
-        private HopperRef asHopper(Inventory inv) {
-            try {
-                if (inv == null) return null;
-                InventoryHolder holder = inv.getHolder();
-                if (holder instanceof org.bukkit.block.Hopper bs) {
-                    return HopperRef.forBlock(bs.getLocation());
-                }
-                if (holder instanceof HopperMinecart cart) {
-                    return HopperRef.forMinecart(cart.getUniqueId(), cart.getLocation());
-                }
-            } catch (Throwable ignored) {}
-            return null;
-        }
-
-        private record HopperRef(String key, Location loc) {
-            static HopperRef forBlock(Location loc) {
-                String k = "B:" + loc.getWorld().getUID() + ":" + loc.getBlockX() + ":" + loc.getBlockY() + ":" + loc.getBlockZ();
-                return new HopperRef(k, loc);
-            }
-            static HopperRef forMinecart(UUID uuid, Location loc) {
-                return new HopperRef("M:" + uuid, loc);
-            }
-            Location location() { return loc; }
-        }
+        // CHANGED: раньше мы делали tryFastChainPush(hopperState) прямо тут.
+        // Теперь мы просто помечаем этот хоппер для фоновой обработки.
+        Block hopperBlock = hopperState.getBlock();
+        TURBO_HOPPERS.put(hopperBlock, System.currentTimeMillis());
+        d("onHopperMove TURBO MARKED at " + loc);
     }
 
-    /* ==============================
-       TNT dupe
-       ============================== */
+    // кэш права на турбо, чтоб не дёргать LuckPerms и зоны каждый тик
+    private static final Map<Block, Eligibility> TURBO_ELIGIBILITY = new ConcurrentHashMap<>();
 
-    private static final Map<Material, Double> DUP_WHITELIST = Map.of(
-            Material.DIAMOND, 0.10,
-            Material.RAW_IRON, 0.12,
-            Material.RAW_GOLD, 0.12,
-            Material.RAW_COPPER, 0.12,
-            Material.ANCIENT_DEBRIS, 0.05
-    );
+    private record Eligibility(boolean canTurbo, long checkedAt) {
+    }
 
-    private static final ItemStack FORTUNE2_PICK;
+    // сколько мс кэшируем право на турбо для одного хоппера
+    private static final long TURBO_ELIGIBILITY_CACHE_MS = 1000L;
+
+    private static boolean canTurboFastCached(Location loc) {
+        Block b = loc.getBlock();
+        Eligibility e = TURBO_ELIGIBILITY.get(b);
+
+        long now = System.currentTimeMillis();
+        if (e != null && (now - e.checkedAt) < TURBO_ELIGIBILITY_CACHE_MS) {
+            return e.canTurbo;
+        }
+
+        // Пересчитать "честно"
+        boolean fresh = computeTurboEligibility(loc);
+
+        TURBO_ELIGIBILITY.put(b, new Eligibility(fresh, now));
+        return fresh;
+    }
+
+    // это твоя оригинальная логика "а точно ли этот хоппер турбо-допущен"
+    private static boolean computeTurboEligibility(Location loc) {
+        String country = UpgradeCondition.locationCountryOwner(loc);
+        int hopperLvl = UpgradeCondition.countryMaxLevel(country, "unity.hopper.smart", 2);
+        if (hopperLvl < 2) return false;
+
+        return UpgradeCondition.isInsideZoneTypeRaw(loc, ZoneType.INDUSTRIAL);
+    }
+
+    // =======================
+    // TURBO-логика для воронок (теперь вызывается ТОЛЬКО таймером)
+    // =======================
+
+    // NEW: отдельный метод, который тикает уже помеченный турбо-хоппер.
+    private static void fastTickHopper(org.bukkit.block.Hopper hopperState) {
+        if (hopperState == null) return;
+
+        org.bukkit.inventory.Inventory hopperInv = hopperState.getInventory();
+
+        boolean pulled = pullOneMoreFromAbove(hopperState, hopperInv);
+        boolean pushed = pushOneMoreForward(hopperState, hopperInv);
+    }
+
+    /**
+     * Попытаться стянуть +1 предмет из инвентаря НАД воронкой в саму воронку.
+     * Возвращает true если реально переместили предмет.
+     */
+    private static boolean pullOneMoreFromAbove(org.bukkit.block.Hopper hopperState,
+                                                org.bukkit.inventory.Inventory hopperInv) {
+        Location myLoc = hopperState.getLocation();
+        Location aboveLoc = myLoc.clone().add(0, 1, 0);
+
+        org.bukkit.block.BlockState aboveState = aboveLoc.getBlock().getState();
+        if (!(aboveState instanceof InventoryHolder srcHolder)) return false;
+
+        org.bukkit.inventory.Inventory srcInv = srcHolder.getInventory();
+
+        int srcSlot = -1;
+        ItemStack srcStack = null;
+        ItemStack[] contents = srcInv.getContents();
+        for (int i = 0; i < contents.length; i++) {
+            ItemStack it = contents[i];
+            if (it == null || it.getType().isAir() || it.getAmount() <= 0) continue;
+            srcSlot = i;
+            srcStack = it;
+            break;
+        }
+        if (srcSlot < 0) return false;
+
+        ItemStack oneItem = srcStack.clone();
+        oneItem.setAmount(1);
+
+        HashMap<Integer, ItemStack> leftover = hopperInv.addItem(oneItem);
+        boolean success = leftover.isEmpty();
+        if (!success) {
+            return false;
+        }
+
+        int newAmount = srcStack.getAmount() - 1;
+        if (newAmount <= 0) {
+            srcInv.setItem(srcSlot, null);
+        } else {
+            ItemStack newStack = srcStack.clone();
+            newStack.setAmount(newAmount);
+            srcInv.setItem(srcSlot, newStack);
+        }
+
+        return true;
+    }
+
+    /**
+     * Попытаться протолкнуть +1 предмет из воронки вперёд по направлению клюва.
+     * Возвращает true если реально переместили 1 предмет.
+     */
+    private static boolean pushOneMoreForward(org.bukkit.block.Hopper hopperState,
+                                              org.bukkit.inventory.Inventory hopperInv) {
+        Location myLoc = hopperState.getLocation();
+
+        org.bukkit.block.data.type.Hopper data =
+                (org.bukkit.block.data.type.Hopper) hopperState.getBlock().getBlockData();
+        org.bukkit.block.BlockFace face = data.getFacing(); // NORTH, SOUTH, EAST, WEST, DOWN
+
+        Location outLoc = myLoc.clone().add(face.getModX(), face.getModY(), face.getModZ());
+        org.bukkit.block.BlockState outState = outLoc.getBlock().getState();
+        if (!(outState instanceof InventoryHolder dstHolder)) {
+            d("pushOneMoreForward: no InventoryHolder at " + outLoc + " from hopper " + myLoc);
+            return false;
+        }
+
+        org.bukkit.inventory.Inventory dstInv = dstHolder.getInventory();
+
+        int hopperSlot = -1;
+        ItemStack hopperStack = null;
+        ItemStack[] hopperContents = hopperInv.getContents();
+        for (int i = 0; i < hopperContents.length; i++) {
+            ItemStack it = hopperContents[i];
+            if (it == null || it.getType().isAir() || it.getAmount() <= 0) continue;
+            hopperSlot = i;
+            hopperStack = it;
+            break;
+        }
+        if (hopperSlot < 0) return false;
+
+        ItemStack oneItem = hopperStack.clone();
+        oneItem.setAmount(1);
+
+        HashMap<Integer, ItemStack> leftover = dstInv.addItem(oneItem);
+        boolean success = leftover.isEmpty();
+        if (!success) {
+            return false;
+        }
+
+        int newAmount = hopperStack.getAmount() - 1;
+        if (newAmount <= 0) {
+            hopperInv.setItem(hopperSlot, null);
+        } else {
+            ItemStack newStack = hopperStack.clone();
+            newStack.setAmount(newAmount);
+            hopperInv.setItem(hopperSlot, newStack);
+        }
+
+        d("pushOneMoreForward: pushed +1 " + oneItem.getType()
+                + " from hopper " + myLoc + " toward " + face);
+        return true;
+    }
+
+    private static String hopperKeyFromHolder(InventoryHolder holder) {
+        try {
+            if (holder instanceof org.bukkit.block.Hopper hopperState) {
+                org.bukkit.Location l = hopperState.getLocation();
+                return l.getWorld().getUID() + ":" +
+                        l.getBlockX() + "," + l.getBlockY() + "," + l.getBlockZ();
+            }
+            if (holder instanceof org.bukkit.block.BlockState bs) {
+                org.bukkit.Location l = bs.getLocation();
+                return l.getWorld().getUID() + ":" +
+                        l.getBlockX() + "," + l.getBlockY() + "," + l.getBlockZ();
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    private static Location holderLocation(InventoryHolder h) {
+        try {
+            if (h instanceof org.bukkit.block.BlockState bs) {
+                return bs.getLocation();
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    /* ============================================
+       4) TNT-«QUARRY» — в стране/колониях
+       ============================================ */
+
+    private static final Map<Material, Double> TNT_DUP_WHITELIST = new HashMap<>();
     static {
-        ItemStack p = new ItemStack(Material.DIAMOND_PICKAXE);
-        p.addUnsafeEnchantment(Enchantment.FORTUNE, 2);
-        FORTUNE2_PICK = p;
+        TNT_DUP_WHITELIST.put(Material.DIAMOND_ORE, 0.10);
+        TNT_DUP_WHITELIST.put(Material.DEEPSLATE_DIAMOND_ORE, 0.10);
+
+        TNT_DUP_WHITELIST.put(Material.IRON_ORE, 0.12);
+        TNT_DUP_WHITELIST.put(Material.DEEPSLATE_IRON_ORE, 0.12);
+
+        TNT_DUP_WHITELIST.put(Material.GOLD_ORE, 0.12);
+        TNT_DUP_WHITELIST.put(Material.DEEPSLATE_GOLD_ORE, 0.12);
+
+        TNT_DUP_WHITELIST.put(Material.COPPER_ORE, 0.12);
+        TNT_DUP_WHITELIST.put(Material.DEEPSLATE_COPPER_ORE, 0.12);
     }
-
-    private static final Set<Material> ORES = EnumSet.of(
-            Material.COAL_ORE, Material.DEEPSLATE_COAL_ORE,
-            Material.IRON_ORE, Material.DEEPSLATE_IRON_ORE,
-            Material.GOLD_ORE, Material.DEEPSLATE_GOLD_ORE,
-            Material.COPPER_ORE, Material.DEEPSLATE_COPPER_ORE,
-            Material.LAPIS_ORE, Material.DEEPSLATE_LAPIS_ORE,
-            Material.REDSTONE_ORE, Material.DEEPSLATE_REDSTONE_ORE,
-            Material.EMERALD_ORE, Material.DEEPSLATE_EMERALD_ORE,
-            Material.DIAMOND_ORE, Material.DEEPSLATE_DIAMOND_ORE,
-            Material.NETHER_GOLD_ORE, Material.NETHER_QUARTZ_ORE,
-            Material.ANCIENT_DEBRIS
-    );
-
-    private static boolean isOre(Material m) { return ORES.contains(m); }
 
     @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
-    public void onTntQuarryExplode(EntityExplodeEvent e) {
-        Entity ent = e.getEntity();
-        if (!(ent instanceof TNTPrimed)) return;
+    public void onExplode(EntityExplodeEvent e) {
+        Location loc = e.getLocation();
+        String country = UpgradeCondition.locationCountryOwner(loc);
+        d("onExplode at " + loc + " country=" + country + " blocks=" + e.blockList().size());
+        if (country == null) return;
 
-        Location loc = ent.getLocation();
-        World w = loc.getWorld();
+        boolean enabled = UpgradeCondition.countryMaxLevel(country, "unity.tnt.quarry", 1) >= 1;
+        d("onExplode Enabled=" + enabled);
+        if (!enabled) return;
 
-        // было: UpgradeCondition.hasGlobalUpgradeAt(loc, "unity.tnt.quarry")
-        if (w == null || !hasCountryUpgradeAt(loc, "unity.tnt.quarry")) return;
+        Random rnd = new Random();
+        for (Block b : e.blockList()) {
+            Double prob = TNT_DUP_WHITELIST.get(b.getType());
+            if (prob == null) continue;
 
-        List<Block> blocks = e.blockList();
-        if (blocks.isEmpty()) return;
-
-        List<ItemStack> toDrop = new ArrayList<>(blocks.size() * 2);
-        for (Block b : blocks) {
-            Material t = b.getType();
-            if (t == Material.AIR) continue;
-            try {
-                Collection<ItemStack> drops = isOre(t) ? b.getDrops(FORTUNE2_PICK) : b.getDrops();
-                if (!drops.isEmpty()) toDrop.addAll(drops);
-            } catch (Throwable ignored) {}
-        }
-
-        if (!toDrop.isEmpty()) {
-            ThreadLocalRandom rnd = ThreadLocalRandom.current();
-            List<ItemStack> extra = new ArrayList<>();
-            for (ItemStack is : toDrop) {
-                Double ch = DUP_WHITELIST.get(is.getType());
-                if (ch != null && rnd.nextDouble() < ch) extra.add(is.clone());
+            if (rnd.nextDouble() <= prob) {
+                Collection<ItemStack> drops = b.getDrops();
+                d("drop dup for " + b.getType() + " items=" + drops.size());
+                for (ItemStack dIt : drops) {
+                    if (dIt == null || dIt.getType().isAir() || dIt.getAmount() <= 0) continue;
+                    loc.getWorld().dropItemNaturally(b.getLocation(), dIt.clone());
+                }
             }
-            if (!extra.isEmpty()) toDrop.addAll(extra);
         }
-
-        e.setYield(0f);
-        for (Block b : blocks) {
-            try { if (b.getType() != Material.AIR) b.setType(Material.AIR, false); } catch (Throwable ignored) {}
-        }
-
-        Location dropCenter = averageLocation(blocks, w, loc);
-        for (ItemStack s : toDrop) {
-            if (s == null || s.getType() == Material.AIR || s.getAmount() <= 0) continue;
-            Item item = w.dropItemNaturally(dropCenter, s);
-            item.setPickupDelay(10);
-        }
-        if (!toDrop.isEmpty()) w.playSound(dropCenter, Sound.ENTITY_ITEM_PICKUP, 0.5f, 0.9f);
     }
 
-    private static Location averageLocation(List<Block> blocks, World w, Location fallback) {
-        if (blocks == null || blocks.isEmpty()) return fallback;
-        double x = 0, y = 0, z = 0; int n = 0;
-        for (Block b : blocks) { x += b.getX() + .5; y += b.getY() + .5; z += b.getZ() + .5; n++; }
-        return n == 0 ? fallback : new Location(w, x / n, y / n, z / n);
-    }
+    /* =======================================================
+       5) ЭФФЕКТЫ (Haste и др.) — в своей стране/колонии
+       ======================================================= */
 
-    /* ==============================
-       Haste
-       ============================== */
-
-    private final ZoneManager zones = UnityLauncher.getInstance().getZoneManager();
-    private final Map<UUID, Long> lastApplied = new HashMap<>();
-
-    private static final int HASTE_TICKS = 20 * 12;
+    private static final int EFFECT_TICKS = 20 * 12;
     private static final long REAPPLY_COOLDOWN_MS = 4000;
+    private final Map<UUID, Long> lastApplied = new ConcurrentHashMap<>();
 
     @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
     public void onMove(PlayerMoveEvent e) {
-        if (e.getFrom().getBlockX() == e.getTo().getBlockX()
-                && e.getFrom().getBlockY() == e.getTo().getBlockY()
-                && e.getFrom().getBlockZ() == e.getTo().getBlockZ()) return;
-        checkAndApply(e.getPlayer());
+        if (sameBlock(e)) return;
+        Player p = e.getPlayer();
+        long now = System.currentTimeMillis();
+        Long last = lastApplied.get(p.getUniqueId());
+        if (last != null && (now - last) < REAPPLY_COOLDOWN_MS) return;
+        checkAndApply(p);
     }
 
     @EventHandler
     public void onJoin(PlayerJoinEvent e) {
-        Bukkit.getScheduler().runTaskLater(UnityLauncher.getInstance(),
-                () -> checkAndApply(e.getPlayer()), 20L);
+        d("onJoin " + e.getPlayer().getName());
+        Bukkit.getScheduler().runTaskLater(
+                UnityLauncher.getInstance(),
+                () -> checkAndApply(e.getPlayer()),
+                20L
+        );
     }
 
     @EventHandler
     public void onRespawn(PlayerRespawnEvent e) {
-        Bukkit.getScheduler().runTaskLater(UnityLauncher.getInstance(),
-                () -> checkAndApply(e.getPlayer()), 20L);
+        d("onRespawn " + e.getPlayer().getName());
+        Bukkit.getScheduler().runTaskLater(
+                UnityLauncher.getInstance(),
+                () -> checkAndApply(e.getPlayer()),
+                20L
+        );
+    }
+
+    private boolean sameBlock(PlayerMoveEvent e) {
+        return e.getFrom().getBlockX() == e.getTo().getBlockX()
+                && e.getFrom().getBlockY() == e.getTo().getBlockY()
+                && e.getFrom().getBlockZ() == e.getTo().getBlockZ();
     }
 
     private void checkAndApply(Player p) {
-        if (!p.isOnline()) return;
+        if (p == null || p.isDead() || p.getGameMode() == GameMode.SPECTATOR) return;
 
-        ZoneInfo zi = zones != null ? zones.getZoneAt(p.getLocation()) : null;
-        boolean inIndustrial = zi != null && zi.getType() == ZoneType.INDUSTRIAL;
-
-        // было: groupHas(zi, node)
-        boolean hasAdv = inIndustrial && UpgradeCondition.hasUpgradeInZone(p, zi, "unity.zone.haste.advanced");
-        boolean hasBasicOnly = inIndustrial && !hasAdv && UpgradeCondition.hasUpgradeInZone(p, zi, "unity.zone.haste.basic");
-
-        boolean shouldHave = inIndustrial && (hasAdv || hasBasicOnly);
-        int amp = hasAdv ? 1 : 0; // basic -> 0 (Haste I), advanced -> 1 (Haste II)
-
-        PotionEffect current = p.getPotionEffect(PotionEffectType.HASTE);
-        if (shouldHave) {
-            long now = System.currentTimeMillis();
-            Long last = lastApplied.get(p.getUniqueId());
-
-            boolean needReapply =
-                    current == null
-                            || current.getAmplifier() != amp
-                            || current.getDuration() < 20 * 4
-                            || last == null
-                            || (now - last) > REAPPLY_COOLDOWN_MS;
-
-            if (needReapply) {
-                p.addPotionEffect(new PotionEffect(
-                        PotionEffectType.HASTE,
-                        HASTE_TICKS,
-                        amp,
-                        true,   // ambient
-                        false,  // без частиц
-                        true    // с иконкой
-                ));
-                lastApplied.put(p.getUniqueId(), now);
-            }
-        } else {
-            if (current != null && current.getAmplifier() <= 1 && current.isAmbient() && !current.hasParticles()) {
-                p.removePotionEffect(PotionEffectType.HASTE);
-            }
+        long now = System.currentTimeMillis();
+        Long last = lastApplied.get(p.getUniqueId());
+        if (last != null && (now - last) < REAPPLY_COOLDOWN_MS) {
+            return;
         }
+
+        ZoneInfo z = UpgradeCondition.zoneAt(p.getLocation());
+        if (z == null) {
+            d("checkAndApply " + p.getName() + ": no zone -> clear");
+            lastApplied.put(p.getUniqueId(), now);
+            return;
+        }
+
+        ZoneType zt = z.getType();
+        if (zt != ZoneType.COUNTRY && zt != ZoneType.COLONY) {
+            d("checkAndApply " + p.getName() + ": zone is " + zt + " -> clear");
+            lastApplied.put(p.getUniqueId(), now);
+            return;
+        }
+
+        String pc = UpgradeCondition.playerCountryCanonical(p.getName());
+        String zc = UpgradeCondition.zoneCountryCanonical(z);
+
+        d("checkAndApply " + p.getName() + ": pc=" + pc + " zc=" + zc);
+
+        if (pc == null || !pc.equals(zc)) {
+            d("checkAndApply " + p.getName() + ": not same country -> clear");
+            lastApplied.put(p.getUniqueId(), now);
+            return;
+        }
+
+        int hasteLvl = UpgradeCondition.countryMaxLevel(pc, "unity.zone.haste", 2);
+        int speedLvl = UpgradeCondition.countryMaxLevel(pc, "unity.zone.speed", 2);
+        int resLvl   = UpgradeCondition.countryMaxLevel(pc, "unity.zone.resistance", 2);
+
+        int hasteAmp = (hasteLvl > 0 ? hasteLvl - 1 : -1);
+        int speedAmp = (speedLvl > 0 ? speedLvl - 1 : -1);
+        int resAmp   = (resLvl   > 0 ? resLvl   - 1 : -1);
+
+        d("checkAndApply " + p.getName() + ": amps haste=" + hasteAmp + " speed=" + speedAmp + " res=" + resAmp);
+
+        applyOrRemove(p, PotionEffectType.HASTE, hasteAmp);
+        applyOrRemove(p, PotionEffectType.SPEED, speedAmp);
+        applyOrRemove(p, PotionEffectType.RESISTANCE, resAmp);
+
+        lastApplied.put(p.getUniqueId(), now);
     }
 
-    /* ==============================
-       Общий хелпер для апгрейдов по локации
-       ============================== */
-
-    /**
-     * Проверка ноды пермишена у страны, «владеющей» зоной по данной локации.
-     * Логика соответствуют новой UpgradeCondition: если зона — COUNTRY,
-     * страна берётся из самой зоны, иначе — страна берётся из кэша по создателю зоны.
-     */
-    private static boolean hasCountryUpgradeAt(Location loc, String permissionKey) {
-        if (loc == null) return false;
-
-        ZoneManager zm = UnityLauncher.getInstance().getZoneManager();
-        ZoneInfo zi = (zm != null) ? zm.getZoneAt(loc) : null;
-        if (zi == null) return false;
-
-        String country;
-        if (zi.getType() == ZoneType.COUNTRY && zi.hasCountry()) {
-            country = zi.getCountryName();
-        } else {
-            // страна создателя зоны — из кэша (без SQL)
-            country = UnityLauncher.getInstance().countryRegistryJdbc.getCountryCached(zi.getOwner());
-        }
-        if (country == null || country.isBlank()) return false;
-
-        return UpgradeCondition.countryHasPermission(country, permissionKey);
+    private void applyOrRemove(Player p, PotionEffectType type, int amplifier) {
+        if (amplifier >= 0)
+            p.addPotionEffect(new PotionEffect(type, EFFECT_TICKS, amplifier, true, false, true));
     }
 }

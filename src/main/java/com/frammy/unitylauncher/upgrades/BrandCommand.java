@@ -31,7 +31,7 @@ public class BrandCommand implements TabExecutor {
 
     // ==== Маркеры: невидимые символы, которыми помечаем «наши» строки
     private static final String MARK1 = "\u200B"; // text
-    private static final String MARK2 = "\u200C"; // made
+    private static final String MARK2 = "\u3164"; // made
     private static final String MARK3 = "\u2064"; // time
 
     private static boolean hasOurMark(String s) {
@@ -207,36 +207,66 @@ public class BrandCommand implements TabExecutor {
 // ===== хелперы =====
 
     private static void showInfo(Player p, ItemStack s) {
+        if (s == null || s.getType().isAir()) {
+            p.sendMessage(ChatColor.YELLOW + "В руке нет предмета.");
+            return;
+        }
+
         ItemMeta meta = s.getItemMeta();
         if (meta == null) {
             p.sendMessage(ChatColor.YELLOW + "Нет метаданных предмета.");
             return;
         }
 
-        List<String> parts = getStrings(Objects.requireNonNull(meta.hasLore() ? meta.getLore() : null));
+        // lore может быть null → treat as empty
+        List<String> lore = meta.hasLore() ? meta.getLore() : null;
+        List<String> parts = getStrings(lore);
 
         if (parts.isEmpty()) {
             p.sendMessage(ChatColor.YELLOW + "Бренд не установлен.");
             return;
         }
 
-        // Выведем в одну строку: "МЕТКА | Сделано: автор | ДАТА"
+        // пример: "меч бога | Сделано frammy | 12:44 28.10.2025"
         p.sendMessage(String.join(ChatColor.GRAY + " | ", parts));
     }
 
     private static @NotNull List<String> getStrings(List<String> lore) {
         List<String> parts = new ArrayList<>();
-        for (String s : lore) {
-            if (s.contains(MARK1)) {
-                parts.add( ChatColor.GRAY + s.replace(MARK1, "").trim());
+        if (lore == null || lore.isEmpty()) {
+            return parts;
+        }
+
+        for (String line : lore) {
+            if (line == null) continue;
+
+            // MARK1 = кастомный текст
+            if (line.contains(MARK1)) {
+                // убираем маркер и сохраняем в части
+                String cleaned = line.replace(MARK1, "").trim();
+                if (!cleaned.isEmpty()) {
+                    parts.add(ChatColor.GRAY + cleaned);
+                }
             }
-            if (s.contains(MARK2)) {
-                parts.add(ChatColor.GOLD + s.replace(MARK2, "").trim() + ChatColor.GRAY);
+
+            // MARK2 = "Сделано <ник>"
+            if (line.contains(MARK2)) {
+                String cleaned = line.replace(MARK2, "").trim();
+                if (!cleaned.isEmpty()) {
+                    parts.add(ChatColor.GOLD + cleaned + ChatColor.GRAY);
+                }
             }
-            if (s.contains(MARK3)) {
-                parts.add(ChatColor.GRAY + s.replace(MARK3, "").trim());
+
+            // MARK3 = время
+            if (line.contains(MARK3)) {
+                String cleaned = line.replace(MARK3, "").trim();
+                if (!cleaned.isEmpty()) {
+                    parts.add(ChatColor.GRAY + cleaned);
+                }
             }
         }
+
         return parts;
     }
+
 }

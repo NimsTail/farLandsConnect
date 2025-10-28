@@ -37,10 +37,15 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
+import org.yaml.snakeyaml.LoaderOptions;
+import org.yaml.snakeyaml.Yaml;
+import org.yaml.snakeyaml.constructor.SafeConstructor;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
@@ -75,6 +80,9 @@ public class SignManager implements Listener {
     }
     public UnityLauncher getPlugin() {
         return unityLauncher;
+    }
+    private File signsFile() {
+        return new File(getDataFolder(), "signs.yml"); // либо твой фактический путь
     }
 
     @EventHandler
@@ -819,7 +827,7 @@ public class SignManager implements Listener {
     @EventHandler
     public  void onPlayerLeave(PlayerQuitEvent e) {
         Player p = e.getPlayer();
-        if(unityLauncher.getAwaitingCorrectCommand().contains(p.getName())) {
+        if (unityLauncher.getAwaitingCorrectCommand().contains(p)) {
             UnityCommands.getInstance().setShops(p,UnityCommands.getInstance().getShops(p) + 1);
             unityLauncher.getAwaitingCorrectCommand().remove(p);
         }
@@ -1438,4 +1446,127 @@ public class SignManager implements Listener {
         }
         return null;
     }
+
+    /** Применяет DTO батчами. Мы обновляем ТОЛЬКО существующие записи, чтобы не гадать конструктор. */
+    public void applySignsDTOBatched(List<SignDTO> dto, int perTick) {
+        if (dto == null || dto.isEmpty()) return;
+        final int BATCH = Math.max(50, perTick);
+
+        unityLauncher.getLogger().info("[SignManager] Применяем таблички батчами: " + dto.size() + " шт., " + BATCH + "/тик");
+
+        AtomicInteger idx = new AtomicInteger(0);
+        new org.bukkit.scheduler.BukkitRunnable() {
+            @Override public void run() {
+                int start = idx.get();
+                int end = Math.min(start + BATCH, dto.size());
+
+                for (int i = start; i < end; i++) {
+                    SignDTO s = dto.get(i);
+                    org.bukkit.World w = Bukkit.getWorld(s.world());
+                    if (w == null) continue;
+                    Location loc = new Location(w, s.x(), s.y(), s.z());
+
+                    // Если запись существует — обновим поля; иначе пропустим (не знаем твой конструктор)
+                    SignVariables vars = genericSignList.get(loc);
+                    if (vars != null) {
+                        if (s.category() != null) vars.setSignCategory(s.category());
+                        if (s.ownerName() != null) vars.setOwnerName(s.ownerName());
+                        // label — если у тебя есть соответствующее поле/метод — примени тут
+                    }
+                }
+
+                idx.set(end);
+                if (end >= dto.size()) {
+                    cancel();
+                    unityLauncher.getLogger().info("[SignManager] Применение DTO завершено: " + dto.size());
+                }
+            }
+        }.runTaskTimer(unityLauncher, 1L, 1L);
+    }
+
+
+    /** Асинхронно читает YAML и строит DTO, не трогая Bukkit/World/Location. */
+    public CompletableFuture<List<SignDTO>> loadSignsDTOAsync() {
+        return CompletableFuture.supplyAsync(() -> {
+            File f = signsFile();
+            if (!f.exists()) {
+                unityLauncher.getLogger().warning("[SignManager] signs.yml не найден: " + f.getAbsolutePath());
+                return List.of();
+            }
+            try (FileInputStream in = new FileInputStream(f)) {
+                // SnakeYAML 2.x: нужен LoaderOptions
+                Yaml yaml = new Yaml(new SafeConstructor(new LoaderOptions()));
+                Object root = yaml.load(in);
+
+                List<SignDTO> out = new ArrayList<>();
+
+                if (root instanceof Map<?, ?> map) {
+                    Object signs = map.containsKey("signs") ? map.get("signs") : map.get("data");
+                    if (signs instanceof Iterable<?> list) {
+                        for (Object o : list) parseOneDTO(o, out);
+                    } else {
+                        // возможно, карта id -> entry
+                        for (Object v : map.values()) parseOneDTO(v, out);
+                    }
+                } else if (root instanceof Iterable<?> list) {
+                    for (Object o : list) parseOneDTO(o, out);
+                }
+
+                unityLauncher.getLogger().info("[SignManager] Загружено DTO табличек: " + out.size());
+                return out;
+            } catch (Exception e) {
+                unityLauncher.getLogger().severe("[SignManager] Ошибка чтения signs.yml: " + e.getMessage());
+                e.printStackTrace();
+                return List.of();
+            }
+        });
+    }
+
+    private void parseOneDTO(Object node, List<SignDTO> out) {
+        if (!(node instanceof Map<?, ?> m)) return;
+
+        String world = asString(m.get("world"));
+        Integer x = asInt(m.get("x"));
+        Integer y = asInt(m.get("y"));
+        Integer z = asInt(m.get("z"));
+        if (world == null || x == null || y == null || z == null) return;
+
+        String catStr = asString(m.containsKey("category") ? m.get("category") : m.get("type"));
+
+        com.frammy.unitylauncher.signs.SignCategory defaultCat;
+        try {
+            defaultCat = com.frammy.unitylauncher.signs.SignCategory.valueOf("OTHER");
+        } catch (Exception ex) {
+            com.frammy.unitylauncher.signs.SignCategory[] vals = com.frammy.unitylauncher.signs.SignCategory.values();
+            defaultCat = vals.length > 0 ? vals[0] : null;
+        }
+
+        com.frammy.unitylauncher.signs.SignCategory cat;
+        try {
+            cat = (catStr == null) ? defaultCat :
+                    com.frammy.unitylauncher.signs.SignCategory.valueOf(catStr.toUpperCase());
+        } catch (IllegalArgumentException iae) {
+            cat = defaultCat;
+        }
+
+        String owner = asString(m.get("owner"));
+        Object labelObj = m.containsKey("label") ? m.get("label") : m.get("name");
+        String label = asString(labelObj);
+
+        out.add(new SignDTO(world, x, y, z, cat, owner, label));
+    }
+
+
+    private String asString(Object o) {
+        if (o == null) return null;
+        String s = String.valueOf(o).trim();
+        return s.isEmpty() ? null : s;
+    }
+
+    private Integer asInt(Object o) {
+        if (o == null) return null;
+        if (o instanceof Number n) return n.intValue();
+        try { return Integer.parseInt(String.valueOf(o)); } catch (Exception e) { return null; }
+    }
+
 }

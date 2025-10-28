@@ -48,6 +48,15 @@
             <id>luck-repo</id>
             <url>https://repo.lucko.me/</url>
         </repository>
+        <repository>
+            <id>placeholderapi</id>
+            <url>https://repo.extendedclip.com/releases/</url>
+        </repository>
+        <!-- на случай, если какие-то старые артефакты (в т.ч. bStats 1.x) потребуются транзитивно -->
+        <repository>
+            <id>codemc-repo</id>
+            <url>https://repo.codemc.io/repository/maven-public/</url>
+        </repository>
     </repositories>
 
     <pluginRepositories>
@@ -67,60 +76,51 @@
             <artifactId>Java-WebSocket</artifactId>
             <version>1.5.3</version>
         </dependency>
-
         <dependency>
             <groupId>de.bluecolored.bluemap</groupId>
             <artifactId>BlueMapAPI</artifactId>
             <version>2.7.2</version>
             <scope>provided</scope>
         </dependency>
-
         <dependency>
             <groupId>org.locationtech.jts</groupId>
             <artifactId>jts-core</artifactId>
             <version>1.19.0</version>
         </dependency>
-
         <dependency>
             <groupId>io.papermc.paper</groupId>
             <artifactId>paper-api</artifactId>
             <version>1.21.10-R0.1-SNAPSHOT</version>
             <scope>provided</scope>
         </dependency>
-
         <dependency>
             <groupId>com.flowpowered</groupId>
             <artifactId>flow-math</artifactId>
             <version>1.0.3</version>
             <scope>provided</scope>
         </dependency>
-
         <dependency>
             <groupId>com.mysql</groupId>
             <artifactId>mysql-connector-j</artifactId>
             <version>9.4.0</version>
         </dependency>
-
         <dependency>
             <groupId>commons-codec</groupId>
             <artifactId>commons-codec</artifactId>
             <version>1.16.0</version>
         </dependency>
-
         <dependency>
             <groupId>com.frengor</groupId>
             <artifactId>ultimateadvancementapi</artifactId>
             <version>2.4.0</version>
             <scope>provided</scope>
         </dependency>
-
         <dependency>
             <groupId>com.github.MilkBowl</groupId>
             <artifactId>VaultAPI</artifactId>
             <version>1.7.1</version>
             <scope>provided</scope>
         </dependency>
-
         <dependency>
             <groupId>net.luckperms</groupId>
             <artifactId>api</artifactId>
@@ -131,6 +131,30 @@
             <groupId>com.google.code.gson</groupId>
             <artifactId>gson</artifactId>
             <version>2.10.1</version>
+        </dependency>
+        <dependency>
+            <groupId>com.github.NEZNAMY</groupId>
+            <artifactId>TAB-API</artifactId>
+            <version>5.3.2</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>me.clip</groupId>
+            <artifactId>placeholderapi</artifactId>
+            <version>2.11.6</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.zaxxer</groupId>
+            <artifactId>HikariCP</artifactId>
+            <version>7.0.2</version>
+        </dependency>
+
+        <!-- Явно пинним bStats на современную версию, чтобы не тянулся старый 1.8 -->
+        <dependency>
+            <groupId>org.bstats</groupId>
+            <artifactId>bstats-bukkit</artifactId>
+            <version>3.1.0</version>
         </dependency>
     </dependencies>
 
@@ -152,7 +176,9 @@
                     <execution>
                         <id>load-local-secrets</id>
                         <phase>initialize</phase>
-                        <goals><goal>read-project-properties</goal></goals>
+                        <goals>
+                            <goal>read-project-properties</goal>
+                        </goals>
                         <configuration>
                             <files>
                                 <file>secrets.properties</file>
@@ -161,15 +187,54 @@
                     </execution>
                 </executions>
             </plugin>
+
+            <!-- Shade: гасим предупреждения, не кладём то, что сервер уже даёт, и не тащим свой slf4j-api -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
-                <version>3.2.4</version>
+                <version>3.5.3</version>
                 <executions>
                     <execution>
                         <phase>package</phase>
-                        <goals><goal>shade</goal></goals>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
                         <configuration>
+                            <artifactSet>
+                                <excludes>
+                                    <!-- не включаем в жирный jar то, что предоставляет сервер -->
+                                    <exclude>io.papermc.paper:paper-api</exclude>
+                                    <exclude>de.bluecolored.bluemap:BlueMapAPI</exclude>
+                                    <exclude>com.flowpowered:flow-math</exclude>
+                                    <exclude>com.github.MilkBowl:VaultAPI</exclude>
+                                    <exclude>net.luckperms:api</exclude>
+                                    <exclude>me.clip:placeholderapi</exclude>
+                                    <exclude>com.github.NEZNAMY:TAB-API</exclude>
+                                    <!-- логирование оставляем серверу -->
+                                    <exclude>org.slf4j:slf4j-api</exclude>
+                                </excludes>
+                            </artifactSet>
+
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <!-- убираем JPMS-модули и конфликтующие манифесты/подписи -->
+                                        <exclude>module-info.class</exclude>
+                                        <exclude>META-INF/MANIFEST.MF</exclude>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+
+                            <transformers>
+                                <!-- сохраняем SPI (например, драйверы JDBC) -->
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                            </transformers>
+
+                            <!-- оставляем оригинальный POM -->
                             <createDependencyReducedPom>false</createDependencyReducedPom>
                         </configuration>
                     </execution>
@@ -189,7 +254,9 @@
         <profile>
             <id>local-secrets</id>
             <activation>
-                <file><exists>secrets.properties</exists></file>
+                <file>
+                    <exists>secrets.properties</exists>
+                </file>
             </activation>
         </profile>
     </profiles>
