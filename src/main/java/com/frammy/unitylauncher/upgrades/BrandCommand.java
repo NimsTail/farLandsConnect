@@ -129,7 +129,6 @@ public class BrandCommand implements TabExecutor {
     private static void applyBrand(ItemStack s, String who) {
         ItemMeta meta = s.getItemMeta();
         if (meta == null) return;
-
         PersistentDataContainer pdc = meta.getPersistentDataContainer();
         long now = System.currentTimeMillis();
         pdc.set(KEY_BRAND, PersistentDataType.STRING, who);
@@ -190,7 +189,7 @@ public class BrandCommand implements TabExecutor {
                 if (plain.isEmpty()) return false;
                 boolean isRu = plain.startsWith("Сделано ");
                 boolean isEn = plain.toLowerCase(Locale.ROOT).startsWith("made by ");
-                boolean isTime = plain.matches("\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}");
+                boolean isTime = plain.matches("\\d{2}:\\d{2} \\d{2}\\.\\d{2}\\.\\d{4}");
                 return isRu || isEn || isTime;
             });
 

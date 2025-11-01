@@ -338,23 +338,21 @@ public class CountryRegistryJdbc {
     private static Map<Integer, RoleInfo> parseRoles(String permsJsonRaw) {
         Map<Integer, RoleInfo> out = new HashMap<>();
         if (permsJsonRaw == null || permsJsonRaw.isBlank()) return out;
-
         try {
             JsonElement root = JsonParser.parseString(permsJsonRaw);
-
-            // если Permissions был строкой с экранированным JSON, парсим вложенный
             if (root.isJsonPrimitive() && root.getAsJsonPrimitive().isString()) {
                 String inner = root.getAsString();
                 root = JsonParser.parseString(inner);
             }
-
             fillRolesFromRoot(out, root);
-        } catch (Throwable ignored) {
-            // оставляем пустую карту
-        }
-
+            if (out.isEmpty()) {
+                Bukkit.getLogger().warning("[CountryRegistryJdbc] parseRoles: empty after parse, raw=" +
+                        (permsJsonRaw.length()>128 ? permsJsonRaw.substring(0,128)+"..." : permsJsonRaw));
+            }
+        } catch (Throwable ignored) {}
         return out;
     }
+
 
     // попытка извлечь роли из уже распарсенного JsonElement root
     private static void fillRolesFromRoot(Map<Integer, RoleInfo> out, JsonElement root) {

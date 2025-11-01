@@ -204,7 +204,8 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         } else {
             getLogger().info("[UL] ZoneManager OK");
         }
-
+        saveDefaultConfig();
+        UpgradesListener.registerAll(this);
         zoneManager.loadZonesFromConfig();
         getLogger().info("[UL] Zones loaded: " + zoneManager.getZones().size());
 
@@ -321,6 +322,8 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
         instance = null;
         getLogger().info("UnityLauncher disabled.");
+
+        UpgradesListener.unregisterAll(this);
     }
 
     /* ===================== Player-related events ===================== */

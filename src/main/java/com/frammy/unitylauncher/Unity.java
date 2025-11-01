@@ -3,6 +3,7 @@ package com.frammy.unitylauncher;
 import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
 import com.frammy.unitylauncher.chunkactivity.ActivityWeights;
 import com.frammy.unitylauncher.chunkactivity.ChunkActivityHeatmapExporter;
+import com.frammy.unitylauncher.upgrades.UpgradesListener;
 import com.frammy.unitylauncher.zones.ZoneInfo;
 import com.frammy.unitylauncher.zones.ZoneManager;
 import com.frammy.unitylauncher.zones.countryrelations.DiplomacyService;
@@ -46,6 +47,35 @@ public class Unity implements CommandExecutor {
                              @NotNull Command command,
                              @NotNull String label,
                              @NotNull String[] args) {
+
+        // --- /ul reload (доступно консоли и игрокам с правом) ---
+        if (args.length >= 1 && args[0].equalsIgnoreCase("reload")) {
+            // консоль всегда может, игроки — только с пермишеном/OP
+            boolean allowed = !(sender instanceof Player) || sender.isOp() || sender.hasPermission("unitylauncher.reload");
+            if (!allowed) {
+                sender.sendMessage(ChatColor.RED + "Нет прав: unitylauncher.reload");
+                return true;
+            }
+
+            // 1) перечитать config.yml
+            plugin.reloadConfig();
+            // Если у тебя есть отдельный класс конфигов апгрейдов — раскомментируй:
+            // UpgradesConfig.load(plugin);
+
+            // 2) перезапустить апгрейды (листенеры/таски)
+            UpgradesListener.reload(plugin);
+
+            // 3) по желанию — перечитать зоны с диска (оставь, если зоны редактируешь вручную)
+            plugin.getZoneManager().loadZonesFromConfig();
+
+            // 4) (опционально) медленно пересчитать владельцев табличек
+             if (plugin.getSignManager() != null) {
+                 plugin.getZoneManager().scheduleSignOwnershipRecalc(plugin.getSignManager(), 200);
+             }
+
+            sender.sendMessage(ChatColor.GREEN + "UnityLauncher: конфиг, апгрейды и зоны перезагружены.");
+            return true;
+        }
 
         // только игрок
         if (!(sender instanceof Player p)) {

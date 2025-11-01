@@ -10,6 +10,8 @@ import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
 
+import java.util.concurrent.ConcurrentHashMap;
+
 public final class UpgradeCondition {
 
     private UpgradeCondition() {}
@@ -80,7 +82,9 @@ public final class UpgradeCondition {
     /* =====================
        ПРОВЕРКИ АПГРЕЙДОВ
        ===================== */
-
+    private static final long NODE_CACHE_MS = 1500L;
+    private static final ConcurrentHashMap<String, Long> NODE_TRUE_CACHE = new ConcurrentHashMap<>();
+    private static String nk(String c, String n) { return c + "§" + n; }
     /**
      * Проверяет строго одну ноду permission.
      * node обязан быть в формате "<prefix>.<feature>.<lvl>"
@@ -95,17 +99,19 @@ public final class UpgradeCondition {
         if (canonicalCountry == null || canonicalCountry.isBlank()) return false;
         if (node == null || node.isBlank()) return false;
 
+        long now = System.currentTimeMillis();
+        Long hit = NODE_TRUE_CACHE.get(nk(canonicalCountry, node));
+        if (hit != null && now - hit < NODE_CACHE_MS) return true;
+
         Group g = getCountryGroup(canonicalCountry);
         if (g == null) return false;
 
         try {
             LuckPerms lp = LuckPermsProvider.get();
             var opts = lp.getContextManager().getStaticQueryOptions();
-
-            return g.getCachedData()
-                    .getPermissionData(opts)
-                    .checkPermission(node)
-                    .asBoolean();
+            boolean ok = g.getCachedData().getPermissionData(opts).checkPermission(node).asBoolean();
+            if (ok) NODE_TRUE_CACHE.put(nk(canonicalCountry, node), now);
+            return ok;
         } catch (Throwable t) {
             d("countryHasNode EX " + t);
             return false;

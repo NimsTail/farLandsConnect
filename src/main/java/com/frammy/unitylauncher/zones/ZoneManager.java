@@ -143,6 +143,7 @@ public class ZoneManager {
     }
 
     public void setSignManager(SignManager signManager) { this.signManager = signManager; }
+
     public Collection<ZoneInfo> getZones() { return zoneList.values(); }
 
     private void saveZonesConfig() {
@@ -152,6 +153,7 @@ public class ZoneManager {
     /** Единый загрузчик из YAML + проставление владельцев табличек. */
     public void loadZonesFromConfig() {
         zoneList.clear();
+        boolean needsSave = false;
 
         for (String typeKey : zonesConfig.getKeys(false)) {
             ZoneType zoneType;
@@ -170,13 +172,21 @@ public class ZoneManager {
                     String name = z.getString("name", "Без названия");
                     String colorHex = z.getString("color", "#FFFFFF");
                     org.bukkit.Color color = hexToBukkit(colorHex);
-                    String markerID = z.getString("marker_ID", "marker_" + UUID.randomUUID());
+
+                    // marker_ID с автогенерацией + записью в YAML при отсутствии
+                    String markerID = z.getString("marker_ID", null);
+                    if (markerID == null || markerID.isBlank()) {
+                        markerID = "marker_" + UUID.randomUUID();
+                        z.set("marker_ID", markerID);
+                        needsSave = true;
+                    }
+
                     String worldOverride = z.getString("world", null);
 
                     List<Location> corners = new ArrayList<>();
                     for (Map<?, ?> m : z.getMapList("corners")) {
                         try {
-                            String wName = worldOverride != null ? worldOverride : (String) m.get("world");
+                            String wName = (worldOverride != null ? worldOverride : (String) m.get("world"));
                             World w = Bukkit.getWorld(wName);
                             if (w == null) continue;
                             double x  = num(m, "x");
@@ -186,6 +196,12 @@ public class ZoneManager {
                             float yaw   = fnum(m, "yaw");
                             corners.add(new Location(w, x, y, zz, yaw, pitch));
                         } catch (Throwable ignore) {}
+                    }
+
+                    // если world отсутствует наверху, но углы есть — проставим world из первого угла (удобно для будущих записей)
+                    if ((worldOverride == null || worldOverride.isBlank()) && !corners.isEmpty() && corners.getFirst().getWorld() != null) {
+                        z.set("world", corners.getFirst().getWorld().getName());
+                        needsSave = true;
                     }
 
                     long lastEdit = z.getLong("lastCornersEdit", -1L);
@@ -201,26 +217,13 @@ public class ZoneManager {
                     }
 
                     zoneList.put(markerID, zi);
-
-
-//                    // Проставляем владельцев табличек (по миру зоны)
-//                    String zoneWorld = corners.isEmpty() ? null : corners.getFirst().getWorld().getName();
-//                    if (zoneWorld != null && signManager != null && signManager.genericSignList != null) {
-//                        List<Vector2d> poly2D = poly2D(corners);
-//                        for (Location signLoc : signManager.genericSignList.keySet()) {
-//                            if (!zoneWorld.equals(signLoc.getWorld().getName())) continue;
-//                            if (pointInPolygon(new Vector2d(signLoc.getX(), signLoc.getZ()), poly2D)) {
-//                                signManager.genericSignList.get(signLoc).setOwnerName(owner);
-//                            }
-//                        }
-//                    }
-
-
                 }
             }
         }
 
+        if (needsSave) saveZonesToConfig();
     }
+
 // ========= ПЛАВНЫЙ ПЕРЕСЧЁТ ВЛАДЕЛЬЦЕВ ТАБЛИЧЕК ПОСЛЕ СТАРТА =========
 
     /** Плавно пересчитать ownerName у всех табличек по полигонам зон, не душа главный поток. */
@@ -232,6 +235,17 @@ public class ZoneManager {
         for (Location loc : signManager.genericSignList.keySet()) {
             if (loc.getWorld() == null) continue;
             signsByWorld.computeIfAbsent(loc.getWorld().getName(), k -> new ArrayList<>()).add(loc);
+        }
+
+        // Ключ: owner + '|' + type  → Отображаемое имя (страна если есть, иначе ник)
+        Map<String, String> ownerTypeDisplay = new HashMap<>();
+        for (ZoneInfo z : getAllZonesSnapshot()) {
+            String owner = z.getOwner();
+            if (owner == null) continue;
+            String display = (z.getCountryName() != null && !z.getCountryName().isBlank())
+                    ? z.getCountryName()
+                    : owner;
+            ownerTypeDisplay.put(owner + "|" + z.getType().name(), display);
         }
 
         // Кэш полигонов зон по миру: мир -> список (владелец, тип, полигон2D)
@@ -269,10 +283,18 @@ public class ZoneManager {
                     for (ZonePoly zpp : zp) {
                         if (pointInPolygon(p, zpp.poly())) {
                             SignVariables sv = signManager.genericSignList.get(signLoc);
-                            if (sv != null) sv.setOwnerName(zpp.owner());
+                            if (sv != null) {
+                                String key = (zpp.owner()) + "|" + zpp.type().name();
+                                String ownerDisplay = ownerTypeDisplay.getOrDefault(
+                                        key,
+                                        zpp.owner() != null ? zpp.owner() : "—"
+                                );
+                                sv.setOwnerName(ownerDisplay);
+                            }
                             break;
                         }
                     }
+
                 }
                 idx = end;
 
@@ -617,7 +639,9 @@ public class ZoneManager {
 
             // теперь убедимся, что ни одна точка не пересекается с чужими зонами, кроме нашего родителя
             for (Location loc : pts) {
-                ZoneInfo overlap = findOverlapAt(loc, p.getName(), type);
+                ZoneInfo overlap = findOverlapAt(loc, p.getName(), type,
+                        parentZoneForChildren.getMarkerID());
+
                 if (overlap == null) continue;
 
                 // если мы наткнулись на самого родителя (COUNTRY или COLONY), ок
@@ -689,11 +713,12 @@ public class ZoneManager {
 
     /** Находит чужую зону, в которую попадает точка loc.
      *  currentType/currentId — чтобы не ловить пересечение с самой собой при апдейте. */
-    private ZoneInfo findOverlapAt(Location loc, String owner, ZoneType currentType) {
+    private ZoneInfo findOverlapAt(Location loc, String owner, ZoneType currentType, String ignoreMarkerId) {
         for (ZoneInfo z : zoneList.values()) {
-            // игнорируем саму же редактируемую зону
-            if (z.getType() == currentType && Objects.equals(z.getID(), null)) continue;
-            // зоны того же типа того же владельца допускаем (если по логике нужно — оставь, либо убери эту строку)
+            // 1) игнорируем саму редактируемую зону (или родителя при создании)
+            if (ignoreMarkerId != null && ignoreMarkerId.equals(z.getMarkerID())) continue;
+
+            // 2) по желанию: игнорируем зоны того же владельца того же типа
             if (Objects.equals(z.getOwner(), owner) && z.getType() == currentType) continue;
 
             if (!worldOk(z.getCorners(), loc.getWorld())) continue;
@@ -704,7 +729,20 @@ public class ZoneManager {
 
     /** true, если точка попадает в ЧУЖУЮ зону. */
     private boolean isInOtherZone(Location loc, String owner, ZoneType currentType) {
-        return findOverlapAt(loc, owner, currentType) != null;
+        return findOverlapAt(loc, owner, currentType, null) != null;
+    }
+
+    public boolean isInsideZoneType(Location loc, ZoneType type) {
+        if (loc == null || type == null) return false;
+        World w = loc.getWorld();
+        if (w == null) return false;
+
+        for (ZoneInfo z : zoneList.values()) {
+            if (z.getType() != type) continue;
+            if (!worldOk(z.getCorners(), w)) continue;
+            if (pointInZone(loc, z.getCorners())) return true;
+        }
+        return false;
     }
 
     public void updateZone(Player p, String updateType, String value) {
@@ -840,11 +878,6 @@ public class ZoneManager {
 
         p.spigot().sendMessage(new TextComponent(ChatColor.YELLOW + "Удалить зону \"" + ChatColor.GOLD + zi.getName() + ChatColor.YELLOW + "\"? "), confirm, new TextComponent(" "), cancel);
         playerLastZone.put(p.getUniqueId(), zi);
-    }
-
-    public boolean isInsideZoneType(Location loc, ZoneType type) {
-        ZoneInfo z = getZoneAt(loc);
-        return z != null && z.getType() == type;
     }
 
     public void confirmRemoveZone(Player p) {
@@ -1022,7 +1055,7 @@ public class ZoneManager {
 
             if (m instanceof ExtrudeMarker em) {
                 em.setLabel(z.getName());
-                em.setShape(new Shape(base), 42, 255);
+                em.setShape(new Shape(base), -64, 255);
                 em.setFillColor(fill);
                 em.setLineColor(line);
                 em.setDetail(detailHtml(z));
@@ -1042,23 +1075,29 @@ public class ZoneManager {
 
     private String detailHtml(ZoneInfo z) {
         String owner = z.getOwner() != null ? z.getOwner() : "—";
+        String country = z.getCountryName() != null ? z.getCountryName() : "—";
         return "<b>" + zoneLimits.get(z.getType()).displayName() + " \"" + z.getName() + "\"</b>"
                 + "<br><br><i>Владелец:</i> " + owner
+                + "<br><i>Страна:</i> " + country
                 + "<br><i>Площадь:</i> " + String.format(Locale.US,"%.2f", calculateSurfaceArea(z.getCorners()));
     }
+
 
     // ==== Geometry ====
     private static boolean worldOk(List<Location> corners, World w) {
         return corners != null && corners.size() >= 3 && Objects.equals(corners.getFirst().getWorld(), w);
     }
+
     private boolean pointInZone(Location loc, List<Location> corners) {
         if (!worldOk(corners, loc.getWorld())) return false;
         if (loc.getY() < Y_MIN || loc.getY() > Y_MAX) return false;
         return pointInPolygon(new Vector2d(loc.getX(), loc.getZ()), poly2D(corners));
     }
+
     private static List<Vector2d> poly2D(List<Location> corners) {
         return corners.stream().map(l -> new Vector2d(l.getX(), l.getZ())).collect(Collectors.toList());
     }
+
     private static boolean pointInPolygon(Vector2d p, List<Vector2d> poly) {
         boolean inside = false; int j = poly.size() - 1;
         for (int i = 0; i < poly.size(); i++) {
@@ -1069,10 +1108,13 @@ public class ZoneManager {
         }
         return inside;
     }
+
     private static boolean ccw(Vector2d a, Vector2d b, Vector2d c) { return (b.getX()-a.getX())*(c.getY()-a.getY()) - (b.getY()-a.getY())*(c.getX()-a.getX()) > 0; }
+
     private static boolean segInter(Vector2d a, Vector2d b, Vector2d c, Vector2d d) {
         return ccw(a,c,d) != ccw(b,c,d) && ccw(a,b,c) != ccw(a,b,d);
     }
+
     private static boolean hasSelfIntersections(List<Vector2d> pts) {
         int n = pts.size();
         for (int i=0;i<n;i++) {
@@ -1085,6 +1127,7 @@ public class ZoneManager {
         }
         return false;
     }
+
     private static boolean areaOk(List<Location> pts, ZoneTypeData ztd) {
         double area = calculateSurfaceArea(pts);
         if (pts.size() >= 3 && area < ztd.minSize()) return false;
@@ -1096,7 +1139,6 @@ public class ZoneManager {
         double area = calculateSurfaceArea(pts);
         return area <= ztd.areaLimit();
     }
-
 
     // ==== Public adapters for SignManager ====
 
@@ -1134,14 +1176,18 @@ public class ZoneManager {
         int rgb = (int) Long.parseLong(s, 16);
         return org.bukkit.Color.fromRGB((rgb>>16)&0xFF, (rgb>>8)&0xFF, rgb&0xFF);
     }
+
     private static String bukkitToHex(org.bukkit.Color c) {
         return String.format("#%02X%02X%02X", c.getRed(), c.getGreen(), c.getBlue());
     }
+
     private static Color toBlueMapColor(org.bukkit.Color c, float a) { return new Color(c.getRed(), c.getGreen(), c.getBlue(), a); }
+
     private static double num(Map<?, ?> m, String key) {
         Object v = m.get(key);
         return (v instanceof Number) ? ((Number) v).doubleValue() : 0.0;
     }
+
     private static float fnum(Map<?, ?> m, String key) {
         Object v = m.get(key);
         return (v instanceof Number) ? ((Number) v).floatValue() : (float) 0.0;

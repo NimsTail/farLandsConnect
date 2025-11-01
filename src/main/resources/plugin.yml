@@ -17,7 +17,14 @@ commands:
   unityLauncher:
     aliases: ul
     description: Для связи с нашим лаунчером
+    usage: /<command> [subcommand]
+    permission: unitylauncher.use
 
 permissions:
   unity.brand:
+    default: op
+  unitylauncher.use:
+    default: true
+  unitylauncher.reload:
+    description: Reload UnityLauncher configs and upgrades
     default: op
