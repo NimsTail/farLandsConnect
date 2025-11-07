@@ -1,109 +1,87 @@
 package com.frammy.unitylauncher;
 
+import com.frammy.unitylauncher.zones.countryrelations.CountryRegistryJdbc;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
-import org.bukkit.Location;
 import org.bukkit.command.CommandSender;
-import org.bukkit.enchantments.Enchantment;
 import org.bukkit.entity.Player;
-import org.bukkit.permissions.PermissionAttachmentInfo;
 import org.jetbrains.annotations.NotNull;
-
+ import com.google.gson.Gson;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.sql.Statement;
-import java.util.List;
 import java.util.Map;
-import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
-import static com.frammy.unitylauncher.UnityLauncher.onError;
 import static com.frammy.unitylauncher.UnityLauncher.DBConnect;
 
+/**
+ * Обновлённый UnityCommands:
+ * - Источник истины по странам/ролям — CountryRegistryJdbc.
+ * - Баланс игрока: Users.GeneralData.money (JSON).
+ * - Баланс страны: Countries.CountryInfo.Money (JSON).
+ * - Все SQL через PreparedStatement.
+ * - Легаси-команды переведены в безопасные заглушки (можно удалить позже).
+ */
 public class UnityCommands {
     private static UnityCommands instance;
-
     public static UnityCommands getInstance() {
-        if (instance == null) {
-            instance = new UnityCommands();
-        }
+        if (instance == null) instance = new UnityCommands();
         return instance;
     }
 
+    /** Проекцию используем минимальную: страна + деньги игрока. */
     public static class PlayerData {
         public String countryName;
         public double money;
     }
 
-// ==== BEGIN: in-memory cache for Users table (all JSON columns in one shot) ====
-
-    private static final long PLAYER_CACHE_TTL_MS = 60_000; // 60 сек. поправь под себя
-
-    private final java.util.concurrent.ConcurrentHashMap<String, CachedPlayerRow> playerCache =
-            new java.util.concurrent.ConcurrentHashMap<>();
-
-    private record CachedPlayerRow(JsonObject customization, JsonObject social, JsonObject general, JsonObject stats, long loadedAt) {
-
-        // упрощаем сигнатуру: TTL берём из внешней константы
-            boolean isExpired(long nowMs) {
-                return nowMs - loadedAt > PLAYER_CACHE_TTL_MS;
-            }
-        }
-
-    private static com.google.gson.JsonObject safeParseObject(com.google.gson.JsonParser parser, String json) {
-        try {
-            if (json == null || json.isEmpty()) return new com.google.gson.JsonObject();
-            var el = parser.parse(json);
-            return (el != null && el.isJsonObject()) ? el.getAsJsonObject() : new com.google.gson.JsonObject();
-        } catch (Exception ignored) {
-            return new com.google.gson.JsonObject();
-        }
+    private CountryRegistryJdbc registry() {
+        return UnityLauncher.getInstance().getCountryRegistryJdbc();
     }
 
-    // Преобразование JsonElement -> Java Object (без Streams.parse)
-    private static Object jsonElementToJava(com.google.gson.JsonElement el) {
-        if (el == null || el.isJsonNull()) return null;
-        if (el.isJsonPrimitive()) {
-            var p = el.getAsJsonPrimitive();
-            if (p.isBoolean()) return p.getAsBoolean();
-            if (p.isNumber())  return p.getAsNumber();
-            if (p.isString())  return p.getAsString();
-            return p.getAsString();
+    /* ===================== КЭШ Users.* JSON (4 колонки) ===================== */
+
+    private static final long PLAYER_CACHE_TTL_MS = 60_000; // 60 сек
+    private final ConcurrentHashMap<String, CachedPlayerRow> playerCache = new ConcurrentHashMap<>();
+
+    private record CachedPlayerRow(JsonObject customization,
+                                   JsonObject social,
+                                   JsonObject general,
+                                   JsonObject stats,
+                                   long loadedAt) {
+        boolean isExpired(long nowMs) { return nowMs - loadedAt > PLAYER_CACHE_TTL_MS; }
+    }
+
+    private static JsonObject safeParseObject(String json) {
+        try {
+            if (json == null || json.isEmpty()) return new JsonObject();
+            JsonElement el = JsonParser.parseString(json);
+            return (el != null && el.isJsonObject()) ? el.getAsJsonObject() : new JsonObject();
+        } catch (Exception ignored) {
+            return new JsonObject();
         }
-        if (el.isJsonArray()) {
-            java.util.List<Object> out = new java.util.ArrayList<>();
-            for (var e : el.getAsJsonArray()) out.add(jsonElementToJava(e));
-            return out;
-        }
-        if (el.isJsonObject()) {
-            java.util.Map<String, Object> map = new java.util.HashMap<>();
-            for (var e : el.getAsJsonObject().entrySet()) {
-                map.put(e.getKey(), jsonElementToJava(e.getValue()));
-            }
-            return map;
-        }
-        return null;
     }
 
     private CachedPlayerRow loadPlayerRowFromDB(String playerName) throws Exception {
-        try (java.sql.Connection con = DBConnect()) {
+        try (Connection con = DBConnect()) {
             if (con == null) return null;
-
-            String sql = "SELECT CustomizationData, SocialData, GeneralData, StatsData " +
-                    "FROM Users WHERE Name = ? LIMIT 1";
-            try (java.sql.PreparedStatement ps = con.prepareStatement(sql)) {
+            String sql = """
+                    SELECT CustomizationData, SocialData, GeneralData, StatsData
+                    FROM Users WHERE Name = ? LIMIT 1
+                    """;
+            try (PreparedStatement ps = con.prepareStatement(sql)) {
                 ps.setString(1, playerName);
-                try (java.sql.ResultSet rs = ps.executeQuery()) {
+                try (ResultSet rs = ps.executeQuery()) {
                     if (!rs.next()) return null;
-
-                    com.google.gson.JsonParser parser = new com.google.gson.JsonParser();
-
-                    var cust = safeParseObject(parser, rs.getString("CustomizationData"));
-                    var soc  = safeParseObject(parser, rs.getString("SocialData"));
-                    var gen  = safeParseObject(parser, rs.getString("GeneralData"));
-                    var st   = safeParseObject(parser, rs.getString("StatsData"));
-
+                    JsonObject cust = safeParseObject(rs.getString("CustomizationData"));
+                    JsonObject soc  = safeParseObject(rs.getString("SocialData"));
+                    JsonObject gen  = safeParseObject(rs.getString("GeneralData"));
+                    JsonObject st   = safeParseObject(rs.getString("StatsData"));
                     return new CachedPlayerRow(cust, soc, gen, st, System.currentTimeMillis());
                 }
             }
@@ -114,7 +92,6 @@ public class UnityCommands {
         long now = System.currentTimeMillis();
         CachedPlayerRow row = playerCache.get(playerName);
         if (row != null && !row.isExpired(now)) return row;
-
         try {
             CachedPlayerRow fresh = loadPlayerRowFromDB(playerName);
             if (fresh != null) {
@@ -122,21 +99,16 @@ public class UnityCommands {
                 return fresh;
             }
         } catch (Exception e) {
-            System.err.println("[UnityCommands] loadPlayerRowFromDB error: " + e.getMessage());
-            e.printStackTrace();
+            Bukkit.getLogger().warning("[UnityCommands] loadPlayerRowFromDB: " + e);
         }
-        return row; // вернём (возможно, протухший) как best-effort
+        return row; // возможно протухший, но лучше чем ничего
     }
 
-    private void upsertCacheAfterUpdate(String playerName, String column, com.google.gson.JsonObject newWholeColumn) {
-        CachedPlayerRow prev = playerCache.get(playerName);
+    private void upsertCacheAfterUpdate(String playerName, String column, JsonObject newWholeColumn) {
         long now = System.currentTimeMillis();
+        CachedPlayerRow prev = playerCache.get(playerName);
         if (prev == null) {
-            com.google.gson.JsonObject cust = new com.google.gson.JsonObject();
-            com.google.gson.JsonObject soc  = new com.google.gson.JsonObject();
-            com.google.gson.JsonObject gen  = new com.google.gson.JsonObject();
-            com.google.gson.JsonObject st   = new com.google.gson.JsonObject();
-
+            JsonObject cust = new JsonObject(), soc = new JsonObject(), gen = new JsonObject(), st = new JsonObject();
             switch (column) {
                 case "CustomizationData" -> cust = newWholeColumn;
                 case "SocialData"        -> soc  = newWholeColumn;
@@ -146,12 +118,10 @@ public class UnityCommands {
             playerCache.put(playerName, new CachedPlayerRow(cust, soc, gen, st, now));
             return;
         }
-
-        var cust = prev.customization.deepCopy();
-        var soc  = prev.social.deepCopy();
-        var gen  = prev.general.deepCopy();
-        var st   = prev.stats.deepCopy();
-
+        JsonObject cust = prev.customization.deepCopy();
+        JsonObject soc  = prev.social.deepCopy();
+        JsonObject gen  = prev.general.deepCopy();
+        JsonObject st   = prev.stats.deepCopy();
         switch (column) {
             case "CustomizationData" -> cust = newWholeColumn;
             case "SocialData"        -> soc  = newWholeColumn;
@@ -161,27 +131,568 @@ public class UnityCommands {
         playerCache.put(playerName, new CachedPlayerRow(cust, soc, gen, st, now));
     }
 
-// ==== END: cache ====
+    /* ===================== Публичные утилиты JSON Users ===================== */
 
+    public void mergeAndUpdatePlayerData(String playerName, String column, Map<String, Object> updates) {
+        if (playerName == null || playerName.isBlank()) return;
+        if (updates == null || updates.isEmpty()) return;
+
+        // Разрешаем только эти 4 JSON-колонки:
+        final java.util.List<String> valid = java.util.List.of("CustomizationData","SocialData","GeneralData","StatsData");
+        if (!valid.contains(column)) {
+            Bukkit.getLogger().warning("[UnityCommands] mergeAndUpdatePlayerData: bad column " + column);
+            return;
+        }
+
+        try (Connection con = DBConnect()) {
+            if (con == null) return;
+
+            // 1) Берём текущий JSON: сначала из кэша (если не просрочен), иначе из БД
+            JsonObject current;
+            CachedPlayerRow cached = playerCache.get(playerName);
+            if (cached != null && !cached.isExpired(System.currentTimeMillis())) {
+                current = switch (column) {
+                    case "CustomizationData" -> cached.customization.deepCopy();
+                    case "SocialData"        -> cached.social.deepCopy();
+                    case "GeneralData"       -> cached.general.deepCopy();
+                    case "StatsData"         -> cached.stats.deepCopy();
+                    default -> new JsonObject();
+                };
+            } else {
+                String select = "SELECT " + column + " FROM Users WHERE Name = ? LIMIT 1;";
+                try (PreparedStatement ps = con.prepareStatement(select)) {
+                    ps.setString(1, playerName);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        current = rs.next() ? safeParseObject(rs.getString(1)) : new JsonObject();
+                    }
+                }
+            }
+
+            // 2) Накатываем патч
+            Gson gson = new Gson();
+            for (var e : updates.entrySet()) {
+                String key = e.getKey();
+                Object val = e.getValue();
+                if (val == null) {
+                    // семантика "удалить ключ", если передали null
+                    current.remove(key);
+                } else {
+                    current.add(key, gson.toJsonTree(val));
+                }
+            }
+
+            // 3) Обновляем БД
+            String update = "UPDATE Users SET " + column + " = ? WHERE Name = ?;";
+            try (PreparedStatement ps = con.prepareStatement(update)) {
+                ps.setString(1, current.toString());
+                ps.setString(2, playerName);
+                ps.executeUpdate();
+            }
+
+            // 4) Освежаем кэш
+            upsertCacheAfterUpdate(playerName, column, current);
+
+        } catch (Exception e) {
+            Bukkit.getLogger().warning("[UnityCommands] mergeAndUpdatePlayerData failed: " + e);
+        }
+    }
+
+    /** Асинхронно достаёт PlayerData (countryName из SocialData, money из GeneralData). */
+    public void getPlayerInfo(String playerName, Consumer<PlayerData> callback) {
+        Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
+            try {
+                CachedPlayerRow row = getOrLoadCachedPlayer(playerName);
+                if (row == null) { callback.accept(null); return; }
+                PlayerData pd = new PlayerData();
+                // money
+                if (row.general.has("money") && row.general.get("money").isJsonPrimitive()) {
+                    try { pd.money = row.general.get("money").getAsDouble(); } catch (Exception ignored) {}
+                }
+                // countryName — сначала SocialData, если пусто — спросим у CountryRegistryJdbc
+                String c = null;
+                if (row.social.has("countryName")) c = safeGetString(row.social.get("countryName"));
+                if (c == null) c = registry().getCountryOfPlayer(playerName);
+                pd.countryName = c;
+                callback.accept(pd);
+            } catch (Exception e) {
+                e.printStackTrace();
+                callback.accept(null);
+            }
+        });
+    }
+
+    private static String safeGetString(JsonElement el) {
+        try { return (el != null && el.isJsonPrimitive()) ? el.getAsString() : null; }
+        catch (Exception ignored) { return null; }
+    }
+
+    /* ===================== Команды (новая логика) ===================== */
+
+//    /** /pay <ник> <сумма> [комиссия] */
+//    public void pay(@NotNull CommandSender sender, String receiver, double amount, double customFee) {
+//        final String senderName = sender.getName();
+//        if (senderName.equalsIgnoreCase(receiver)) { sender.sendMessage(ChatColor.RED + "Нельзя отправить самому себе."); return; }
+//        if (amount <= 0) { sender.sendMessage(ChatColor.RED + "Сумма должна быть > 0."); return; }
+//
+//        CountryRegistryJdbc reg = registry();
+//        String sCountry = reg.getCountryOfPlayer(senderName);
+//        String rCountry = reg.getCountryOfPlayer(receiver);
+//
+//        final double feeFraction;
+//        if (customFee >= 0.0) {
+//            feeFraction = Math.max(0.0, customFee);
+//        } else {
+//            double defaultPct = 8.0;
+//            double sPct = (sCountry != null) ? reg.getCountryTransferFeePctOr(sCountry, defaultPct) : defaultPct;
+//            double rPct = (rCountry != null) ? reg.getCountryTransferFeePctOr(rCountry, defaultPct) : defaultPct;
+//            feeFraction = Math.max(sPct, rPct) / 100.0;
+//        }
+//
+//        try (Connection con = DBConnect()) {
+//            if (con == null) { sender.sendMessage(ChatColor.RED + "База недоступна."); return; }
+//            con.setAutoCommit(false);
+//
+//            UserJsonRow sRow = lockAndReadUserMoney(con, senderName);
+//            UserJsonRow rRow = lockAndReadUserMoney(con, receiver);
+//            if (sRow == null) { sender.sendMessage(ChatColor.RED + "Тебя нет в базе."); con.rollback(); return; }
+//            if (rRow == null) { sender.sendMessage(ChatColor.RED + "Получатель не найден."); con.rollback(); return; }
+//
+//            double sMoney = (sRow.money != null) ? sRow.money : 0.0;
+//            double rMoney = (rRow.money != null) ? rRow.money : 0.0;
+//            if (sMoney < amount) { sender.sendMessage(ChatColor.RED + "Недостаточно средств."); con.rollback(); return; }
+//
+//            double toReceiver = Math.max(0.0, amount * (1.0 - feeFraction));
+//
+//            writeUserMoney(con, senderName, sMoney - amount);
+//            writeUserMoney(con, receiver,   rMoney + toReceiver);
+//
+//            con.commit();
+//
+//            Player rp = Bukkit.getPlayerExact(receiver);
+//            if (rp != null) {
+//                rp.sendMessage("Получено " + ChatColor.GREEN + String.format("%.2f", toReceiver) + ChatColor.RESET +
+//                        " от " + senderName + " (комиссия: " + String.format("%.2f", feeFraction * 100) + "%).");
+//            }
+//            sender.sendMessage("Отправлено " + ChatColor.GREEN + String.format("%.2f", amount) + "Ⓕ" + ChatColor.RESET +
+//                    " игроку " + receiver + ". Получит: " + String.format("%.2f", toReceiver) +
+//                    "Ⓕ (комиссия: " + String.format("%.2f", feeFraction * 100) + "%).");
+//
+//        } catch (Exception e) {
+//            sender.sendMessage(ChatColor.RED + "Ошибка платежа.");
+//            Bukkit.getLogger().warning("[UnityCommands] pay: " + e);
+//        }
+//    }
+//
+//    /** /countrybalance add|withdraw <сумма> */
+//    public void CountryMoney(@NotNull CommandSender sender, boolean deposit, double amount) {
+//        if (amount <= 0) { sender.sendMessage(ChatColor.RED + "Сумма должна быть > 0."); return; }
+//        final String player = sender.getName();
+//        CountryRegistryJdbc reg = registry();
+//        String country = reg.getCountryOfPlayer(player);
+//        if (country == null || country.isBlank()) { sender.sendMessage(ChatColor.RED + "Вы не состоите в стране."); return; }
+//        boolean isLeader = reg.isCountryLeaderCached(player);
+//
+//        try (Connection con = DBConnect()) {
+//            if (con == null) { sender.sendMessage(ChatColor.RED + "База недоступна."); return; }
+//            con.setAutoCommit(false);
+//
+//            UserJsonRow u = lockAndReadUserMoney(con, player);
+//            if (u == null) { sender.sendMessage(ChatColor.RED + "Игрок не найден в БД."); con.rollback(); return; }
+//            double userMoney = (u.money != null) ? u.money : 0.0;
+//
+//            Double cMoney = lockAndReadCountryMoney(con, country);
+//            double countryMoney = (cMoney != null) ? cMoney : 0.0;
+//
+//            if (deposit) {
+//                if (userMoney < amount) { sender.sendMessage(ChatColor.RED + "Недостаточно средств."); con.rollback(); return; }
+//                writeUserMoney(con, player, userMoney - amount);
+//                writeCountryMoney(con, country, countryMoney + amount);
+//                con.commit();
+//                sender.sendMessage(ChatColor.GREEN + "В казну зачислено " + String.format("%.2f", amount) + "Ⓕ.");
+//            } else {
+//                if (!isLeader) { sender.sendMessage(ChatColor.RED + "Выводить из казны может только лидер."); con.rollback(); return; }
+//                if (countryMoney < amount) { sender.sendMessage(ChatColor.RED + "В казне недостаточно средств."); con.rollback(); return; }
+//                writeCountryMoney(con, country, countryMoney - amount);
+//                writeUserMoney(con, player, userMoney + amount);
+//                con.commit();
+//                sender.sendMessage(ChatColor.GREEN + "Из казны выведено " + String.format("%.2f", amount) + "Ⓕ.");
+//            }
+//        } catch (Exception e) {
+//            sender.sendMessage(ChatColor.RED + "Ошибка операции.");
+//            Bukkit.getLogger().warning("[UnityCommands] CountryMoney: " + e);
+//        }
+//    }
+
+    /** /bal — читает JSON-баланс и печатает его. */
+    public double getMoney(@NotNull CommandSender sender) {
+        double bal = 0.0;
+        try (Connection con = DBConnect()) {
+            if (con == null) { sender.sendMessage(ChatColor.RED + "База недоступна."); return 0.0; }
+            String sql = "SELECT JSON_EXTRACT(GeneralData,'$.money') AS m FROM Users WHERE Name=? LIMIT 1";
+            try (PreparedStatement ps = con.prepareStatement(sql)) {
+                ps.setString(1, sender.getName());
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        String s = rs.getString("m");
+                        Double v = parseJsonNumber(s);
+                        if (v != null) bal = v;
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Bukkit.getLogger().warning("[UnityCommands] getMoney: " + e);
+        }
+        sender.sendMessage("Ваш баланс: " + ChatColor.GREEN + String.format("%.2f", bal) + ChatColor.RESET + "Ⓕ");
+        return bal;
+    }
+
+    /** /country — по новой логике: страна из CountryRegistryJdbc, лидер оттуда, казна из JSON. */
+    public void getCountry(@NotNull CommandSender sender) {
+        String me = sender.getName();
+        CountryRegistryJdbc reg = registry();
+        String country = reg.getCountryOfPlayer(me);
+        if (country == null || country.isBlank()) {
+            sender.sendMessage(ChatColor.RED + "Вы не состоите ни в одной стране.");
+            return;
+        }
+        String leader = reg.getLeaderOfCountry(country);
+        Double money = 0.0;
+        try (Connection con = DBConnect()) {
+            if (con != null) {
+                String sql = "SELECT JSON_EXTRACT(CountryInfo,'$.Money') AS m FROM Countries WHERE Name=? LIMIT 1";
+                try (PreparedStatement ps = con.prepareStatement(sql)) {
+                    ps.setString(1, country);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) money = parseJsonNumber(rs.getString("m"));
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Bukkit.getLogger().warning("[UnityCommands] getCountry: " + e);
+        }
+        sender.sendMessage("Государство: " + ChatColor.GOLD + country + ChatColor.RESET);
+        sender.sendMessage("Лидер: " + ChatColor.AQUA + (leader != null ? leader : "—"));
+        sender.sendMessage("Казна: " + ChatColor.GREEN + String.format("%.2f", (money != null ? money : 0.0)) + ChatColor.RESET + "Ⓕ");
+    }
+
+//    /** /rcode — берём GeneralData.regCode (как в твоём дампе). */
+//    public void rCode(@NotNull CommandSender sender) {
+//        try (Connection con = DBConnect()) {
+//            if (con == null) { sender.sendMessage(ChatColor.RED + "База недоступна."); return; }
+//            String sql = "SELECT JSON_EXTRACT(GeneralData,'$.regCode') AS rc FROM Users WHERE Name=? LIMIT 1";
+//            try (PreparedStatement ps = con.prepareStatement(sql)) {
+//                ps.setString(1, sender.getName());
+//                try (ResultSet rs = ps.executeQuery()) {
+//                    if (rs.next()) {
+//                        String raw = rs.getString("rc");
+//                        String code = parseJsonString(raw);
+//                        if (code == null || code.equals("0") || code.isBlank()) {
+//                            sender.sendMessage(ChatColor.RED + "Сначала зарегистрируйтесь в FarLands клиенте.");
+//                        } else {
+//                            sender.sendMessage("Твой код регистрации: " + ChatColor.GREEN + code);
+//                        }
+//                    } else {
+//                        sender.sendMessage(ChatColor.RED + "Тебя нет в базе данных.");
+//                    }
+//                }
+//            }
+//        } catch (Exception e) {
+//            sender.sendMessage(ChatColor.RED + "Ошибка запроса к базе.");
+//            Bukkit.getLogger().warning("[UnityCommands] rCode: " + e);
+//        }
+//    }
+
+    // ==== AUTH: /ul login <pass>  и  /ul reg <pass> ====
+    public void login(@NotNull CommandSender sender, String pass) {
+        if (!(sender instanceof org.bukkit.entity.Player p)) {
+            sender.sendMessage(ChatColor.RED + "Эта команда доступна только игрокам.");
+            return;
+        }
+        if (pass == null || pass.isBlank()) {
+            sender.sendMessage(ChatColor.YELLOW + "Использование: /ul login <пароль>");
+            return;
+        }
+
+        var auth = UnityLauncher.getInstance().getAuthService();
+        var listener = UnityLauncher.getInstance().getAuthListener();
+
+        // уже авторизован?
+        if (listener != null && listener.isAuthenticated(p)) {
+            sender.sendMessage(ChatColor.GREEN + "Ты уже вошёл.");
+            return;
+        }
+
+        // зарегистрирован ли игрок?
+        boolean hasPass = auth.isRegisteredFast(p.getName());
+        if (!hasPass) {
+            sender.sendMessage(ChatColor.RED + "Ты не зарегистрирован. Используй /ul reg <пароль>.");
+            return;
+        }
+
+        // проверяем пароль
+        boolean ok = auth.checkPassword(p.getName(), pass.toCharArray());
+        if (!ok) {
+            sender.sendMessage(ChatColor.RED + "Неверный пароль.");
+            return;
+        }
+
+        // отметим сессию
+        String ip = (p.getAddress() != null) ? p.getAddress().getAddress().getHostAddress() : null;
+        auth.markSession(p.getName(), ip);
+        auth.updateCacheAfterSession(p.getName(), System.currentTimeMillis(), ip);
+
+        // снимем все блокировки/боссбар
+        if (listener != null) listener.completeLogin(p);
+    }
+
+    public void register(@NotNull CommandSender sender, String pass) {
+        if (!(sender instanceof org.bukkit.entity.Player p)) {
+            sender.sendMessage(ChatColor.RED + "Эта команда доступна только игрокам.");
+            return;
+        }
+        if (pass == null || pass.isBlank()) {
+            sender.sendMessage(ChatColor.YELLOW + "Использование: /ul reg <пароль>");
+            return;
+        }
+        if (pass.length() < 4) {
+            sender.sendMessage(ChatColor.RED + "Пароль слишком короткий (мин. 4 символа).");
+            return;
+        }
+
+        var auth = UnityLauncher.getInstance().getAuthService();
+        var listener = UnityLauncher.getInstance().getAuthListener();
+
+        // уже есть пароль?
+        if (auth.isRegisteredFast(p.getName())) {
+            sender.sendMessage(ChatColor.RED + "Ты уже зарегистрирован. Используй /ul login <пароль>.");
+            return;
+        }
+
+        // пишем пароль в БД
+        boolean saved = auth.setNewPassword(p.getName(), pass.toCharArray());
+        if (!saved) {
+            sender.sendMessage(ChatColor.RED + "Ошибка при сохранении пароля.");
+            return;
+        }
+        // обновим кэш после записи пароля
+        var rec = auth.getCached(p.getName().toLowerCase(java.util.Locale.ROOT));
+        if (rec == null || rec.phcHash() == null) {
+            // перезагрузим из БД, либо просто отметим кэш:
+            // простой путь — попросить сервис обновить кэш:
+            auth.updateCacheAfterPasswordSet(p.getName(), "<set>");
+        }
+
+        // сразу активируем сессию
+        String ip = (p.getAddress() != null) ? p.getAddress().getAddress().getHostAddress() : null;
+        auth.markSession(p.getName(), ip);
+        auth.updateCacheAfterSession(p.getName(), System.currentTimeMillis(), ip);
+
+        if (listener != null) listener.completeRegister(p);
+    }
+
+    /* ===================== Заглушки (временно отключено / легаси) ===================== */
+
+    public void getNotifications(@NotNull CommandSender sender) {
+        sender.sendMessage(ChatColor.YELLOW + "Система уведомлений временно отключена.");
+    }
+
+    public void toggleNotifications(@NotNull CommandSender sender, String toggle) {
+        sender.sendMessage(ChatColor.YELLOW + "Система уведомлений временно отключена.");
+    }
+
+    public void createOrder(String sellerName, String customerName, String spriteName,
+                            Double price, Integer quantity, org.bukkit.Location location,
+                            Map<org.bukkit.enchantments.Enchantment, Integer> enchantments) {
+        Bukkit.getLogger().info("[UnityCommands] Orders временно отключены.");
+    }
+
+    public void dayDeal(@NotNull CommandSender sender, String code) {
+        sender.sendMessage(ChatColor.YELLOW + "Ежедневные задания временно отключены.");
+    }
+
+    public void getGroups(@NotNull CommandSender sender) {
+        sender.sendMessage(ChatColor.YELLOW + "Группы страны управляются через LuckPerms/JSON. Команда устарела.");
+    }
+
+    public void setGroup(@NotNull CommandSender sender, String nickname, String group) {
+        sender.sendMessage(ChatColor.YELLOW + "Назначение групп через эту команду отключено. Используйте актуальные механики.");
+    }
+
+    public void setPrefix(@NotNull CommandSender sender, String group, String prefix) {
+        sender.sendMessage(ChatColor.YELLOW + "Префиксы управляются через текущую систему ролей. Команда устарела.");
+    }
+
+    public void changePass(@NotNull CommandSender sender, String oldPass, String newPass) {
+        if (!(sender instanceof Player p)) {
+            sender.sendMessage(ChatColor.RED + "Только для игроков.");
+            return;
+        }
+        var auth = UnityLauncher.getInstance().getAuthService();
+        if (auth == null) {
+            sender.sendMessage(ChatColor.RED + "Auth недоступен.");
+            return;
+        }
+        if (newPass == null || newPass.length() < 4) {
+            sender.sendMessage(ChatColor.RED + "Новый пароль слишком короткий (мин. 4).");
+            return;
+        }
+        boolean ok = auth.checkPassword(p.getName(), oldPass.toCharArray());
+        if (!ok) {
+            sender.sendMessage(ChatColor.RED + "Старый пароль неверен.");
+            return;
+        }
+        boolean upd = auth.setNewPassword(p.getName(), newPass.toCharArray());
+        if (!upd) {
+            sender.sendMessage(ChatColor.RED + "Не удалось сохранить новый пароль.");
+            return;
+        }
+        // Обновим сессию, чтобы не просило логин
+        String ip = (p.getAddress()!=null) ? p.getAddress().getAddress().getHostAddress() : null;
+        auth.markSession(p.getName(), ip);
+        sender.sendMessage(ChatColor.GREEN + "Пароль изменён.");
+    }
+
+    public void setFrame(@NotNull CommandSender sender, String nickname, String frameID) {
+        sender.sendMessage(ChatColor.YELLOW + "Frames не используются.");
+    }
+
+    public void getTop(@NotNull CommandSender sender, String category) {
+        sender.sendMessage(ChatColor.YELLOW + "Таблица лидеров временно отключена.");
+    }
+
+    /* ===================== Внутренние JSON/SQL утилиты ===================== */
+
+    private static class UserJsonRow { Double money; }
+    private static UserJsonRow lockAndReadUserMoney(Connection con, String player) throws Exception {
+        String sql = "SELECT JSON_EXTRACT(GeneralData,'$.money') AS m FROM Users WHERE Name=? FOR UPDATE";
+        try (PreparedStatement ps = con.prepareStatement(sql)) {
+            ps.setString(1, player);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                UserJsonRow row = new UserJsonRow();
+                row.money = parseJsonNumber(rs.getString("m"));
+                return row;
+            }
+        }
+    }
+
+    private static void writeUserMoney(Connection con, String player, double newMoney) throws Exception {
+        String up = "UPDATE Users SET GeneralData = JSON_SET(GeneralData, '$.money', ?) WHERE Name=?";
+        try (PreparedStatement ps = con.prepareStatement(up)) {
+            ps.setDouble(1, newMoney);
+            ps.setString(2, player);
+            ps.executeUpdate();
+        }
+    }
+
+    private static void writeCountryMoney(Connection con, String countryName, double newMoney) throws Exception {
+        String up = "UPDATE Countries SET CountryInfo = JSON_SET(CountryInfo, '$.Money', ?) WHERE Name=?";
+        try (PreparedStatement ps = con.prepareStatement(up)) {
+            ps.setDouble(1, newMoney);
+            ps.setString(2, countryName);
+            ps.executeUpdate();
+        }
+    }
+
+    private static Double lockAndReadCountryMoney(Connection con, String countryName) throws Exception {
+        String sql = "SELECT JSON_EXTRACT(CountryInfo,'$.Money') AS m FROM Countries WHERE Name=? FOR UPDATE";
+        try (PreparedStatement ps = con.prepareStatement(sql)) {
+            ps.setString(1, countryName);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return null;
+                return parseJsonNumber(rs.getString("m"));
+            }
+        }
+    }
+
+    private static Double parseJsonNumber(String s) {
+        if (s == null) return null;
+        s = s.trim();
+        if (s.startsWith("\"") && s.endsWith("\"")) s = s.substring(1, s.length() - 1);
+        if ("null".equalsIgnoreCase(s) || s.isEmpty()) return null;
+        try { return Double.valueOf(s); } catch (Exception ignore) { return null; }
+    }
+
+    private static String parseJsonString(String s) {
+        if (s == null) return null;
+        s = s.trim();
+        if (s.startsWith("\"") && s.endsWith("\"")) return s.substring(1, s.length() - 1);
+        if ("null".equalsIgnoreCase(s) || s.isEmpty()) return null;
+        return s;
+    }
+
+    /**
+     * Площадь многоугольника в плоскости XZ (в блоках^2).
+     * - Использует координаты X и Z из Bukkit Location, Y игнорируется.
+     * - Если последняя точка совпадает с первой — дублированную последнюю убираем.
+     * - Удаляем подряд идущие дубликаты точек.
+     * - Возвращает абсолютное значение площади (ориентация контура не важна).
+     */
+    public static double calculateSurfaceArea(java.util.List<org.bukkit.Location> points) {
+        if (points == null) return 0.0;
+
+        // 1) скопируем и почистим «на лету»
+        java.util.ArrayList<org.bukkit.Location> pts = new java.util.ArrayList<>();
+        org.bukkit.Location prev = null;
+        for (org.bukkit.Location l : points) {
+            if (l == null) continue;
+            if (prev != null && l.getBlockX() == prev.getBlockX() && l.getBlockZ() == prev.getBlockZ()) {
+                // подряд дубликат — пропускаем
+                continue;
+            }
+            pts.add(l);
+            prev = l;
+        }
+        // если последняя точка замыкает контур — удалим её как дубликат первой
+        if (pts.size() >= 2) {
+            org.bukkit.Location first = pts.getFirst();
+            org.bukkit.Location last  = pts.getLast();
+            if (first.getBlockX() == last.getBlockX() && first.getBlockZ() == last.getBlockZ()) {
+                pts.removeLast();
+            }
+        }
+
+        if (pts.size() < 3) return 0.0;
+
+        // 2) шнурковая формула в XZ
+        double sum = 0.0;
+        final int n = pts.size();
+        for (int i = 0; i < n; i++) {
+            org.bukkit.Location a = pts.get(i);
+            org.bukkit.Location b = pts.get((i + 1) % n);
+            double ax = a.getX(), az = a.getZ();
+            double bx = b.getX(), bz = b.getZ();
+            sum += (ax * bz) - (az * bx);
+        }
+
+        double area = Math.abs(sum) * 0.5;
+
+        // по желанию округлим до двух знаков (как было раньше)
+        return Math.round(area * 100.0) / 100.0;
+    }
+
+    // ==== JSON getters (с кэшем Users) ====
     public Map<String, Object> getJsonFieldValues(String table,
                                                   String jsonColumn,
                                                   String keyColumn,
                                                   String keyValue,
                                                   java.util.List<String> keys) {
         Map<String, Object> resultMap = new java.util.HashMap<>();
+        if (table == null || jsonColumn == null || keyColumn == null || keyValue == null || keys == null || keys.isEmpty())
+            return resultMap;
 
+        // Оптимизация: если читаем Users по Name — попробуем из кэша
         boolean canUseCache = "Users".equalsIgnoreCase(table) && "Name".equalsIgnoreCase(keyColumn);
         if (canUseCache) {
             CachedPlayerRow row = getOrLoadCachedPlayer(keyValue);
             if (row != null) {
-                com.google.gson.JsonObject col;
-                switch (jsonColumn) {
-                    case "CustomizationData" -> col = row.customization;
-                    case "SocialData"        -> col = row.social;
-                    case "GeneralData"       -> col = row.general;
-                    case "StatsData"         -> col = row.stats;
-                    default -> col = null;
-                }
+                com.google.gson.JsonObject col = switch (jsonColumn) {
+                    case "CustomizationData" -> row.customization;
+                    case "SocialData"        -> row.social;
+                    case "GeneralData"       -> row.general;
+                    case "StatsData"         -> row.stats;
+                    default -> null;
+                };
                 if (col != null) {
                     for (String k : keys) {
                         if (col.has(k)) resultMap.put(k, jsonElementToJava(col.get(k)));
@@ -189,12 +700,11 @@ public class UnityCommands {
                     return resultMap;
                 }
             }
-            // при промахе — пойдём в БД
+            // промах — пойдём в БД
         }
 
         try (java.sql.Connection con = DBConnect()) {
             if (con == null) return resultMap;
-
             String sql = "SELECT " + jsonColumn + " FROM " + table + " WHERE " + keyColumn + " = ? LIMIT 1;";
             try (java.sql.PreparedStatement ps = con.prepareStatement(sql)) {
                 ps.setString(1, keyValue);
@@ -209,724 +719,98 @@ public class UnityCommands {
                 }
             }
         } catch (Exception e) {
-            System.err.println("Ошибка чтения JSON: " + e.getMessage());
+            System.err.println("[UnityCommands] getJsonFieldValues error: " + e.getMessage());
             e.printStackTrace();
         }
         return resultMap;
     }
 
-    public void mergeAndUpdatePlayerData(String playerName, String column, java.util.Map<String, Object> updates) {
-        java.util.List<String> validColumns = java.util.List.of("CustomizationData", "SocialData", "GeneralData", "StatsData");
-        if (!validColumns.contains(column)) {
-            System.err.println("Недопустимая колонка: " + column);
-            return;
-        }
-
-        try (java.sql.Connection con = DBConnect()) {
-            if (con == null) return;
-
-            com.google.gson.JsonObject current;
-            CachedPlayerRow cached = playerCache.get(playerName);
-            if (cached != null && !cached.isExpired(System.currentTimeMillis())) {
-                switch (column) {
-                    case "CustomizationData" -> current = cached.customization.deepCopy();
-                    case "SocialData"        -> current = cached.social.deepCopy();
-                    case "GeneralData"       -> current = cached.general.deepCopy();
-                    case "StatsData"         -> current = cached.stats.deepCopy();
-                    default -> current = new com.google.gson.JsonObject();
-                }
-            } else {
-                String select = "SELECT " + column + " FROM Users WHERE Name = ? LIMIT 1;";
-                try (java.sql.PreparedStatement ps = con.prepareStatement(select)) {
-                    ps.setString(1, playerName);
-                    try (java.sql.ResultSet rs = ps.executeQuery()) {
-                        if (rs.next()) {
-                            current = safeParseObject(new com.google.gson.JsonParser(), rs.getString(1));
-                        } else {
-                            current = new com.google.gson.JsonObject();
-                        }
-                    }
-                }
-            }
-
-            com.google.gson.Gson gson = new com.google.gson.Gson();
-            for (var e : updates.entrySet()) {
-                current.add(e.getKey(), gson.toJsonTree(e.getValue()));
-            }
-
-            String update = "UPDATE Users SET " + column + " = ? WHERE Name = ?;";
-            try (java.sql.PreparedStatement ps = con.prepareStatement(update)) {
-                ps.setString(1, current.toString());
-                ps.setString(2, playerName);
-                ps.executeUpdate();
-            }
-
-            upsertCacheAfterUpdate(playerName, column, current);
-        } catch (Exception e) {
-            System.err.println("Ошибка обновления JSON: " + e.getMessage());
-            e.printStackTrace();
-        }
-    }
-
-    public void getGroups(@NotNull CommandSender sender) {
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                String query = "SELECT PermissionGroups FROM Countries WHERE Players LIKE '%" + sender.getName() + "%';";
-                Statement st = con.createStatement();
-                ResultSet rs = st.executeQuery(query);
-                if (rs.next()) {
-                    if (rs.getString("PermissionGroups").isEmpty()) {
-                        sender.sendMessage(ChatColor.RED + "Ты не состоишь ни в одной стране! Будь осторожнее!");
-                        return;
-                    }
-                    String[] list = rs.getString("PermissionGroups").split("¦");
-                    StringBuilder groups = new StringBuilder();
-                    for (String row : list) {
-                        String[] elem = row.split("¶");
-                        groups.append(elem[0]).append(" ");
-                    }
-                    sender.sendMessage("Группы в твоей стране: " + groups);
-                } else {
-                    sender.sendMessage(ChatColor.RED + "У вас нет групп!");
-                    return;
-                }
-                rs.close();
-            } catch (Exception e) {
-                onError("getGroup", (Player) sender);
-            }
-        }
-    }
-
-    public void setGroup(@NotNull CommandSender sender, String nickname, String group) {
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                String query = "SELECT Mayor, PermissionGroups FROM Countries WHERE Players LIKE '%" + sender.getName() + "%';";
-                Statement st = con.createStatement();
-                ResultSet rs = st.executeQuery(query);
-                if (rs.next()) {
-                    if (rs.getString("Mayor").isEmpty()) {
-                        sender.sendMessage(ChatColor.RED + "Ты не состоишь ни в одной стране! Будь осторожнее!");
-                        return;
-                    } else if (!rs.getString("Mayor").equals(sender.getName())) {
-                        sender.sendMessage(ChatColor.RED + "Недостаточно прав!");
-                        return;
-                    }
-                    boolean check = false;
-                    String[] list = rs.getString("PermissionGroups").split("¦");
-                    for (String row : list) {
-                        String[] elem = row.split("¶");
-                        if (elem[0].contains(group)) {
-                            check = true;
-                            break;
-                        }
-                    }
-                    if (!check) return;
-                } else {
-                    sender.sendMessage(ChatColor.RED + "Вы не в стране!");
-                    return;
-                }
-                rs.close();
-                String query2 = "UPDATE Users SET CountryPermissions='" + group + "' WHERE Name='" + nickname + "';";
-                Statement st2 = con.createStatement();
-                st2.executeUpdate(query2);
-            } catch (Exception e) {
-                onError("setGroup", (Player) sender);
-            }
-        }
-    }
-
-    public void setPrefix(@NotNull CommandSender sender, String group, String prefix) {
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                String query = "SELECT Mayor, PermissionGroups FROM Countries WHERE Players LIKE '%" + sender.getName() + "%';";
-                Statement st = con.createStatement();
-                ResultSet rs = st.executeQuery(query);
-                if (rs.next()) {
-                    if (rs.getString("Mayor").isEmpty()) {
-                        sender.sendMessage(ChatColor.RED + "Ты не состоишь ни в одной стране! Будь осторожнее!");
-                        return;
-                    } else if (!rs.getString("Mayor").equals(sender.getName())) {
-                        sender.sendMessage(ChatColor.RED + "Недостаточно прав!");
-                        return;
-                    }
-                    if (rs.getString("PermissionGroups").isEmpty()) return;
-                    String[] list = rs.getString("PermissionGroups").split("¦");
-                    StringBuilder fin = new StringBuilder();
-                    for (String row : list) {
-                        String[] elem = row.split("¶");
-                        if (elem[0].contains(group)) {
-                            elem[1] = prefix;
-                            fin.append(elem[0]).append("¶").append(elem[1]).append("¶").append(elem[2]).append("¶").append(elem[3]).append("¦");
-                            break;
-                        } else {
-                            fin.append(row).append("¦");
-                        }
-                    }
-                    fin = new StringBuilder(fin.substring(0, fin.length() - 1));
-                    String query2 = "UPDATE Countries SET PermissionGroups='" + fin + "' WHERE Name='" + sender.getName() + "';";
-                    Statement st2 = con.createStatement();
-                    st2.executeUpdate(query2);
-                } else {
-                    sender.sendMessage(ChatColor.RED + "Ты не состоишь ни в одной стране!");
-                    return;
-                }
-                rs.close();
-            } catch (Exception e) {
-                onError("setPrefix", (Player) sender);
-            }
-        }
-    }
-
-    public void dayDeal(@NotNull CommandSender sender, String code) {
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                String query = "SELECT DayDealCode, Money FROM Users WHERE Name='" + sender.getName() + "';";
-                Statement st = con.createStatement();
-                ResultSet rs = st.executeQuery(query);
-                if (rs.next()) {
-                    Bukkit.getConsoleSender().sendMessage(rs.getString("DayDealCode"));
-                    if (rs.getString("DayDealCode").equals("0")) {
-                        sender.sendMessage(ChatColor.RED + "Задание ещё не было получено. Для этого зайди в FarLands клиент.");
-                        return;
-                    }
-                    String[] tableCode = rs.getString("DayDealCode").split(";");
-                    if (tableCode[0].equals(code)) {
-                        Player p = (Player) sender;
-                        Bukkit.getConsoleSender().sendMessage(p.getInventory().getItemInMainHand().getType().toString());
-                        if (p.getInventory().getItemInMainHand().getAmount() >= Integer.parseInt(tableCode[2]) &&
-                                p.getInventory().getItemInMainHand().getType().toString().contains(tableCode[1].replaceAll(" ", "_").toUpperCase())) {
-                            p.getInventory().getItemInMainHand().setAmount(p.getInventory().getItemInMainHand().getAmount() - Integer.parseInt(tableCode[2]));
-                        } else {
-                            sender.sendMessage(ChatColor.RED + "Предметы не совпадают!");
-                            return;
-                        }
-                        double money = Double.parseDouble(tableCode[3].replaceAll(",",".")) * Integer.parseInt(tableCode[2]) + rs.getInt("Money");
-                        String updCode = "0;" + tableCode[1] + ";" + tableCode[2] + ";" + tableCode[3];
-                        String query2 = "Update Users SET DayDealCode='" + updCode + "', Money=" + money + " WHERE Name='" + sender.getName() + "';";
-                        Statement st2 = con.createStatement();
-                        st2.executeUpdate(query2);
-                        sender.sendMessage(ChatColor.GREEN + "Вы выполнили задание!" + ChatColor.RESET + " Возвращайтесь завтра.");
-                    } else {
-                        sender.sendMessage(ChatColor.RED + "Такого кода не существует!");
-                    }
-                } else {
-                    sender.sendMessage(ChatColor.RED + "Вас нет в базе!");
-                    return;
-                }
-                rs.close();
-            } catch (Exception e) {
-                onError("dayDeal", (Player) sender);
-            }
-        }
-    }
-
-    public void CountryMoney(@NotNull CommandSender sender, boolean action, double money) {
-        if (money <= 0) {
-            sender.sendMessage(ChatColor.RED + "Не стоит!");
-            return;
-        }
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                String query = "SELECT Mayor, Money FROM Countries WHERE Players LIKE '%" + sender.getName() + "%';";
-                Statement st = con.createStatement();
-                ResultSet rs = st.executeQuery(query);
-                double CountryMoney;
-                boolean isMayor;
-                if (rs.next()) {
-                    CountryMoney = rs.getDouble("Money");
-                    isMayor = rs.getString("Mayor").equals(sender.getName());
-                } else {
-                    sender.sendMessage(ChatColor.RED + "Вы не в стране!");
-                    return;
-                }
-                rs.close();
-                String query2 = "SELECT Money FROM Users WHERE Name='" + sender.getName() + "';";
-                Statement st2 = con.createStatement();
-                ResultSet rs2 = st2.executeQuery(query2);
-                double SenderMoney;
-                if (rs2.next())
-                    SenderMoney = rs2.getDouble("Money");
-                else {
-                    sender.sendMessage(ChatColor.RED + "Вы не в базе!");
-                    return;
-                }
-                rs2.close();
-                if (action) {
-                    if (SenderMoney < money) {
-                        sender.sendMessage(ChatColor.RED + "Недостаточно средств!");
-                        return;
-                    }
-                    CountryMoney+=money;
-                    SenderMoney-=money;
-                } else {
-                    if (isMayor) {
-                        if (CountryMoney < money) {
-                            sender.sendMessage(ChatColor.RED + "Недостаточно средств!");
-                            return;
-                        }
-                    } else sender.sendMessage(ChatColor.RED + "Недостаточно полномочий!");
-                    CountryMoney-=money;
-                    SenderMoney+=money;
-                }
-                String query3 = "UPDATE Users SET Money=" + SenderMoney +" WHERE Name='" + sender.getName() + "';";
-                Statement st3 = con.createStatement();
-                st3.executeUpdate(query3);
-
-                String query4 = "UPDATE Countries SET Money=" + CountryMoney + " WHERE Players LIKE '%" + sender.getName() + "%';";
-                Statement st4 = con.createStatement();
-                st4.executeUpdate(query4);
-                if (action)
-                    sender.sendMessage("Деньги были зачислены");
-                else
-                    sender.sendMessage("Деньги были выведены");
-            } catch (Exception e) {
-                onError("money", (Player) sender);
-            }
-        }
-    }
-
-    public void changePass(@NotNull CommandSender sender, String old, String password) {
-        Connection con = DBConnect();
-        if (con != null && password != null) {
-            try {
-                String querySelect = "SELECT Name, Password FROM Users WHERE Name='" + sender.getName() + "';";
-                Statement stSelect = con.createStatement();
-                ResultSet rs = stSelect.executeQuery(querySelect);
-                if (rs.next()) {
-                    if (!Objects.equals(old, rs.getString("Password"))) {
-                        sender.sendMessage(ChatColor.RED + "Неверный текущий пароль");
-                        return;
-                    }
-                } else {
-                    sender.sendMessage(ChatColor.RED + "Сначала зарегистрируйтесь в FarLands клиенте");
-                    return;
-                }
-                rs.close();
-                String queryUpdate = "UPDATE Users SET Password = '"+password+"' WHERE Name = '"+sender.getName()+"';";
-                Statement st = con.createStatement();
-                st.executeUpdate(queryUpdate);
-                sender.sendMessage("Пароль успешно изменен");
-            } catch (Exception e) {
-                onError("passCh", (Player) sender);
-            }
-        }
-    }
-
-    public Double getMoney(@NotNull CommandSender sender) {
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                String query = "SELECT Money FROM Users WHERE Name='" + sender.getName() + "';";
-                Statement st = con.createStatement();
-                ResultSet rs = st.executeQuery(query);
-                Double result = null;
-
-                if (rs.next()) {
-                    String money = rs.getString(1);
-                    if (money == null || money.equals("0")) {
-                        sender.sendMessage(ChatColor.RED + "Твои карманы пусты, странник!");
-                    } else {
-                        sender.sendMessage("У тебя " + ChatColor.GREEN + money + ChatColor.RESET + " шекелей!");
-                        result = Double.valueOf(money);
-                    }
-                } else {
-                    sender.sendMessage(ChatColor.RED + "Вас нет в базе!");
-                }
-
-                rs.close();
-                st.close();
-                con.close();
-
-                return result;
-            } catch (Exception e) {
-                onError("getMoney", (Player) sender);
-            }
-        }
-        return null;
-    }
-
-    public void setShops(@NotNull CommandSender sender, int shopCount) {
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                String query = "UPDATE Users SET AvailableShopPlaces='"+ shopCount +"' WHERE Name='"+sender.getName()+"';";
-                Statement st = con.createStatement();
-                st.executeUpdate(query);
-
-            } catch (Exception e) {
-                onError("getShops", (Player) sender);
-            }
-        }
-    }
-
+    // ==== Shop spots (Users.GeneralData.shopSpots) ====
     public int getShops(@NotNull CommandSender sender) {
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                String query = "SELECT AvailableShopPlaces FROM Users WHERE Name='"+sender.getName()+"';";
-                Statement st = con.createStatement();
-                ResultSet rs = st.executeQuery(query);
-                if (rs.next()) {
-                    String shopPlaces = rs.getString(1);
-                    if (shopPlaces == null || shopPlaces.equals("0")) {
-                        sender.sendMessage(ChatColor.RED + "Твой лимит точек продажи истрачен. Чтобы создать магазин, необходимо приобрести лицензию или закрыть предыдущий.");
-                        return 0;
-                    } else {
-                        rs.close();
-                        return Integer.parseInt(shopPlaces);
+        // сначала пробуем из кэша
+        CachedPlayerRow cached = getOrLoadCachedPlayer(sender.getName());
+        if (cached != null && cached.general != null && cached.general.has("shopSpots")) {
+            try { return cached.general.get("shopSpots").getAsInt(); } catch (Exception ignored) {}
+        }
+
+        // иначе — быстро из БД JSON_EXTRACT
+        try (Connection con = DBConnect()) {
+            if (con == null) return 0;
+            String q = "SELECT JSON_EXTRACT(GeneralData,'$.shopSpots') FROM Users WHERE Name=? LIMIT 1;";
+            try (PreparedStatement ps = con.prepareStatement(q)) {
+                ps.setString(1, sender.getName());
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        String raw = rs.getString(1);
+                        if (raw == null || "null".equalsIgnoreCase(raw)) return 0;
+                        // может прийти как число или строка
+                        try { return Integer.parseInt(raw.replace("\"","").trim()); } catch (Exception ignored) {}
                     }
-                } else {
-                    sender.sendMessage(ChatColor.RED + "Чел..а тебя то нет в базе!");
-                    rs.close();
-                    return 0;
                 }
-            } catch (Exception e) {
-                onError("getShops", (Player) sender);
             }
+        } catch (Exception e) {
+            System.err.println("[UnityCommands] getShops error: " + e.getMessage());
         }
         return 0;
     }
 
-    public void getTop(@NotNull CommandSender sender, String category) {
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                String order = "";
-                if (category.equalsIgnoreCase("Balance") || category.equalsIgnoreCase("Bal")) {
-                    category = "Money";
-                    order = "Money";
-                }
-                if (category.equalsIgnoreCase("Playtime")) {
-                    category = "AllPlayTime, PlayTime";
-                    order = "AllPlayTime";
-                }
-                if (category.equalsIgnoreCase("Events")) {
-                    order = category;
-                }
-                String query = "SELECT Name, " + category + " FROM Users ORDER BY " + order + " DESC LIMIT 5;";
-                Statement st = con.createStatement();
-                ResultSet rs = st.executeQuery(query);
-                if (category.equals("Money"))  sender.sendMessage(ChatColor.BOLD + "Топ миллиардеров:");
-                if (category.equals("Events"))  sender.sendMessage(ChatColor.BOLD + "Топ победителей эвентов:");
-                if (category.equals("AllPlayTime, PlayTime"))  sender.sendMessage(ChatColor.BOLD + "Топ задротов:");
-
-                TableGenerator tg = new TableGenerator(TableGenerator.Alignment.RIGHT, TableGenerator.Alignment.LEFT, TableGenerator.Alignment.LEFT);
-                int i = 1;
-                while (rs.next())
-                    if (rs.getString(1) != null) {
-                        double filler;
-                        if (category.equalsIgnoreCase("AllPlayTime, PlayTime")) {
-                            filler = rs.getInt("Playtime") + rs.getInt("AllPlayTime");
-                        } else {
-                            filler = rs.getDouble(category);
-                        }
-                        tg.addRow(String.valueOf(i++), rs.getString(1), String.valueOf(filler));
-                    }
-                rs.close();
-                for (String line : tg.generate(TableGenerator.Receiver.CLIENT, true, true))
-                    sender.sendMessage(line);
-            } catch (Exception e) {
-                onError("getTop", (Player) sender);
+    public void setShops(@NotNull CommandSender sender, int shopCount) {
+        if (shopCount < 0) shopCount = 0;
+        try (Connection con = DBConnect()) {
+            if (con == null) return;
+            String up = "UPDATE Users SET GeneralData = JSON_SET(GeneralData, '$.shopSpots', ?) WHERE Name=?;";
+            try (PreparedStatement ps = con.prepareStatement(up)) {
+                ps.setInt(1, shopCount);
+                ps.setString(2, sender.getName());
+                ps.executeUpdate();
             }
-        }
-    }
-
-    public void getCountry(@NotNull CommandSender sender) {
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                String query = "SELECT * FROM Countries WHERE Players LIKE '%" + sender.getName() + "%';";
-                Statement st = con.createStatement();
-                ResultSet rs = st.executeQuery(query);
-                if (rs.next()) {
-                    if (rs.getString("Name").isEmpty()) {
-                        sender.sendMessage(ChatColor.RED + "Ты не состоишь ни в одной стране! Будь осторожнее!");
-                        return;
-                    } else {
-                        String country = rs.getString("Name");
-                        sender.sendMessage("Ты живешь в: " + ChatColor.GREEN + country + ChatColor.RESET);
-                        sender.sendMessage("Президент: " + ChatColor.GREEN + rs.getString("Mayor") + ChatColor.RESET);
-                        sender.sendMessage("Капитал: " + ChatColor.GREEN + rs.getInt("Money") + ChatColor.RESET);
-                        sender.sendMessage("Жители: " + ChatColor.GREEN + rs.getString("Players").substring(0, rs.getString("Players").length() - 2) + ChatColor.RESET);
-                    }
-                } else {
-                    sender.sendMessage(ChatColor.RED + "Ты не состоишь ни в одной стране!");
-                    return;
-                }
-                rs.close();
-            } catch (Exception e) {
-                onError("getCountry", (Player) sender);
+            // обновим кэш
+            CachedPlayerRow cached = getOrLoadCachedPlayer(sender.getName());
+            if (cached != null && cached.general != null) {
+                com.google.gson.JsonObject newGen = cached.general.deepCopy();
+                newGen.addProperty("shopSpots", shopCount);
+                upsertCacheAfterUpdate(sender.getName(), "GeneralData", newGen);
             }
+        } catch (Exception e) {
+            System.err.println("[UnityCommands] setShops error: " + e.getMessage());
         }
     }
 
-    public void rCode(@NotNull CommandSender sender) {
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                String query = "SELECT regCode FROM Users WHERE Name='" + sender.getName() + "';";
-                Statement st = con.createStatement();
-                ResultSet rs = st.executeQuery(query);
-                boolean isEmpty = true;
-                if (rs.next()) {
-                    isEmpty = false;
-                    String rCode = rs.getString(1);
-                    if (rCode.equals("0")) {
-                        sender.sendMessage(ChatColor.RED + "Ты уже зарегистрирован!");
-                    } else sender.sendMessage("Твой код регистрации: " + ChatColor.GREEN + rCode);
-                } else {
-                    sender.sendMessage(ChatColor.RED + "Тебя нет в базе данных");
-                }
-                if (isEmpty) sender.sendMessage(ChatColor.RED + "Сначала зарегистрируйся в лаунчере!");
-                rs.close();
-            } catch (Exception e) {
-                onError("rCode", (Player) sender);
+    /** Безопасно конвертирует JsonElement в обычный Java Object (Map/List/String/Number/Boolean/null). */
+    private static Object jsonElementToJava(com.google.gson.JsonElement el) {
+        if (el == null || el.isJsonNull()) return null;
+        if (el.isJsonPrimitive()) {
+            var p = el.getAsJsonPrimitive();
+            if (p.isBoolean()) return p.getAsBoolean();
+            if (p.isNumber()) return p.getAsDouble();
+            if (p.isString()) return p.getAsString();
+            return p.toString();
+        }
+        if (el.isJsonObject()) {
+            Map<String, Object> map = new java.util.LinkedHashMap<>();
+            for (var e : el.getAsJsonObject().entrySet()) {
+                map.put(e.getKey(), jsonElementToJava(e.getValue()));
             }
+            return map;
         }
+        if (el.isJsonArray()) {
+            java.util.List<Object> list = new java.util.ArrayList<>();
+            for (var e : el.getAsJsonArray()) list.add(jsonElementToJava(e));
+            return list;
+        }
+        return el.toString();
     }
 
-    public void getNotifications(@NotNull CommandSender sender) {
-        getNotified(sender);
-    }
-
-    public void getPlayerInfo(String playerName, java.util.function.Consumer<PlayerData> callback) {
-        org.bukkit.Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
-            try {
-                CachedPlayerRow row = getOrLoadCachedPlayer(playerName);
-                if (row == null) { callback.accept(null); return; }
-
-                PlayerData pd = new PlayerData();
-
-                // money из GeneralData
-                if (row.general.has("money") && row.general.get("money").isJsonPrimitive()) {
-                    try { pd.money = row.general.get("money").getAsDouble(); } catch (Exception ignored) {}
-                }
-
-                // countryName из SocialData (несколько возможных ключей, чтобы не отвалиться)
-                String c = null;
-                if (row.social.has("countryName")) c = safeGetString(row.social.get("countryName"));
-                if (c == null && row.social.has("country")) c = safeGetString(row.social.get("country"));
-                if (c == null && row.social.has("nation"))  c = safeGetString(row.social.get("nation"));
-                pd.countryName = c;
-
-                callback.accept(pd);
-            } catch (Exception e) {
-                e.printStackTrace();
-                callback.accept(null);
+    /** Безопасно парсит JSON-строку в JsonObject, возвращает пустой при ошибке. */
+    private static com.google.gson.JsonObject safeParseObject(com.google.gson.JsonParser parser, String json) {
+        if (json == null || json.isBlank()) return new com.google.gson.JsonObject();
+        try {
+            com.google.gson.JsonElement root = parser.parse(json);
+            if (root != null && root.isJsonObject()) {
+                return root.getAsJsonObject();
             }
-        });
+        } catch (Exception ignored) {}
+        return new com.google.gson.JsonObject();
     }
 
-    private static String safeGetString(com.google.gson.JsonElement el) {
-        try { return el != null && el.isJsonPrimitive() ? el.getAsString() : null; }
-        catch (Exception ignored) { return null; }
-    }
-
-    public static void getNotified(@NotNull CommandSender sender) {
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                String query = "SELECT * FROM Notifications;";
-                Statement st = con.createStatement();
-                ResultSet rs = st.executeQuery(query);
-                boolean isEmpty = true;
-                while (rs.next()) {
-                    switch (rs.getString("Reason")) {
-                        case "Defence":
-                            if (rs.getString("Receiver").contains(sender.getName())) {
-                                sender.sendMessage("★ Вы будете атакованы игроком " + rs.getString("Addresser") + " в " + rs.getString("Time"));
-                                isEmpty = false;
-                            }
-                            break;
-                        case "Attack":
-                            if (rs.getString("Addresser").contains(sender.getName())) {
-                                sender.sendMessage("★ Мы планируем атаковать " + rs.getString("Receiver") + " в " + rs.getString("Time"));
-                                isEmpty = false;
-                            }
-                            break;
-                        case "Sold":
-                            if (rs.getString("Receiver").contains(sender.getName())) {
-                                sender.sendMessage("★ Ваш предмет был продан");
-                                isEmpty = false;
-                            }
-                            break;
-                    }
-                    if (rs.getString("Reason").contains("CountryInvite") && sender.getName().equals(rs.getString("Receiver"))) {
-                        if (rs.getString("Reason").length() > 15)
-                            sender.sendMessage("★ Вы были приглашены игроком " + rs.getString("Addresser") + " в страну " + rs.getString("Reason").substring(14));
-                        isEmpty = false;
-                    }
-                }
-                if (isEmpty) sender.sendMessage("★ У вас нет уведомлений! ★");
-                rs.close();
-            } catch (Exception e) {
-                onError("notifications", (Player) sender);
-            }
-        }
-    }
-
-    public void toggleNotifications(@NotNull CommandSender sender, String toggle) {
-        int n = 0;
-        if (toggle.equals("on")) n = 1;
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                String queryUpdate = "UPDATE Users SET NotificationToggle = '" + n + "' WHERE Name = '" + sender.getName() + "';";
-                Statement st = con.createStatement();
-                st.executeUpdate(queryUpdate);
-                if (n == 1) sender.sendMessage("Уведомления при входе включены!");
-                else sender.sendMessage("Уведомления при входе отключены!");
-            } catch (Exception e) {
-                onError("notificationsToggle", (Player) sender);
-            }
-        }
-    }
-
-    public void createOrder(String sellerName, String customerName, String spriteName, Double price, Integer quantity, Location location, Map<Enchantment, Integer> enchantments /*, String customerName, ..., другие параметры */) {
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                // Пример с одной колонкой Seller — добавь остальные по аналогии
-                String insertQuery = "INSERT INTO Orders (Seller, Customer, SpriteName, Price, Quantity, Description, IsFinished, Enchantments) VALUES (?,?,?,?,?,?,?,?);";
-
-                PreparedStatement st = con.prepareStatement(insertQuery);
-                st.setString(1, sellerName); // Заполняем колонку Seller
-                st.setString(2, customerName);
-                st.setString(3, spriteName);
-                st.setString(4, price.toString());
-                st.setString(5, quantity.toString());
-                st.setString(6, "Покупка в магазине (" + location.getX() + ", " + location.getY() + ", " + location.getZ() + ")");
-                st.setString(7, "Yes");
-                st.setString(8, ""); // СЮДА ЗАЧАРОВАНИЯ НУЖНО
-                int rowsAffected = st.executeUpdate();
-                if (rowsAffected > 0) {
-                    System.out.println("Новый заказ успешно создан!");
-                } else {
-                    System.err.println("Не удалось создать заказ.");
-                }
-
-                st.close();
-                con.close();
-            } catch (Exception e) {
-                System.err.println("Ошибка при создании заказа: " + e.getMessage());
-                e.printStackTrace();
-            }
-        }
-    }
-
-    public void pay(@NotNull CommandSender sender, String receiver, double money, double customFee) {
-        if (sender.getName().equals(receiver)) {
-            sender.sendMessage(ChatColor.RED + "Отправлять деньги себе запрещено.");
-            return;
-        }
-        Connection con = DBConnect();
-        if (money <= 0) {
-            sender.sendMessage(ChatColor.RED + "Самый умный?");
-            return;
-        }
-        if (con != null) {
-            try {
-                String query = "SELECT Name, Money FROM Users WHERE Name='" + sender.getName() + "' OR Name='" + receiver + "';";
-                Statement st = con.createStatement();
-                ResultSet rs = st.executeQuery(query);
-                double SenderMoney = -1.0, ReceiverMoney = -1.0;
-                while (rs.next()) {
-                    if (rs.getString("Name").equals(sender.getName())) SenderMoney = rs.getDouble("Money");
-                    if (rs.getString("Name").equals(receiver)) ReceiverMoney = rs.getDouble("Money");
-                }
-                rs.close();
-                if (ReceiverMoney == -1) {
-                    sender.sendMessage(ChatColor.RED + "Такого игрока не существует.");
-                    return;
-                } else if (SenderMoney < money) {
-                    sender.sendMessage(ChatColor.RED + "На твоём счету недостаточно денег.");
-                    return;
-                }
-                else {
-                    String query2 = "SELECT TransferFee FROM Countries WHERE Name='" + sender.getName() + "' OR Name='" + receiver + "';";
-                    Statement st2 = con.createStatement();
-                    ResultSet rs2 = st2.executeQuery(query2);
-                    double fee;
-                    if (customFee == -1) {
-                        if (rs2.next()) {
-                            fee = 1 - rs2.getInt("TransferFee");
-                        } else {
-                            fee = 0.92;
-                        }
-                    } else {
-                        fee = 1 - customFee;
-                    }
-
-                    SenderMoney -= money;
-                    ReceiverMoney += (money * fee);
-                    String query3 = "UPDATE Users SET Money=" + SenderMoney + " WHERE Name='" + sender.getName() + "';";
-                    Statement st3 = con.createStatement();
-                    st3.executeUpdate(query3);
-                    String query4 = "UPDATE Users SET Money=" + ReceiverMoney + " WHERE Name='" + receiver + "';";
-                    Statement st4 = con.createStatement();
-                    st4.executeUpdate(query4);
-                }
-                Player receiverPlayer = Bukkit.getServer().getPlayer(receiver);
-                if (receiverPlayer != null) {
-                    receiverPlayer.sendMessage("Получено " + money + " от игрока " + sender + ".");
-                }
-                sender.sendMessage("Вы отправили " + money + "F игроку " +  receiver + ".");
-            } catch (Exception e) {
-                onError("pay", (Player) sender);
-            }
-        }
-    }
-
-    public void setFrame(@NotNull CommandSender sender, String nickname, String FrameID) {
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                String query = "SELECT Users FROM Frames WHERE FrameID ='" + FrameID + "';";
-                Statement st = con.createStatement();
-                ResultSet rs = st.executeQuery(query);
-                String users = "";
-                if (rs.next()) {
-                    users = rs.getString("Users");
-                    if (rs.getString("Users").isEmpty()) return;
-                }
-                rs.close();
-                String query2 = "UPDATE Frames SET Users='" + users + nickname + ",' WHERE FrameID='" + FrameID + "';";
-                Statement st2 = con.createStatement();
-                st2.executeUpdate(query2);
-            } catch (Exception e) {
-                onError("setGroup", (Player) sender);
-            }
-        }
-    }
-
-    public static double calculateSurfaceArea(List<Location> points) {
-        if (points.size() < 3) return 0;
-
-        double area = 0;
-        int n = points.size();
-
-        // Применяем формулу площади многоугольника (формула "Шу")
-        for (int i = 0; i < n; i++) {
-            Location current = points.get(i);
-            Location next = points.get((i + 1) % n); // Следующая точка, для замыкания контура
-
-            area += current.getX() * next.getZ() - current.getZ() * next.getX();
-        }
-
-        return Math.round(Math.abs(area / 2.0) * 100.0) / 100.0; // Площадь должна быть положительной
-    }
-
-    public boolean hasPermissionContaining(Player player, String permission) {
-        for (PermissionAttachmentInfo permInfo : player.getEffectivePermissions()) {
-            if (permInfo.getPermission().contains(permission)) {
-                return true; // Игрок имеет право, содержащее "head"
-            }
-        }
-        return false; // Игрок не имеет права, содержащего "head"
-    }
 }

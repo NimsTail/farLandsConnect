@@ -22,10 +22,8 @@ import org.locationtech.jts.geom.GeometryFactory;
 import org.locationtech.jts.geom.LinearRing;
 import org.locationtech.jts.geom.Polygon;
 
-import java.io.File;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.IOException;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -55,7 +53,11 @@ public class BlueMapIntegration {
             for (BlueMapMap map : api.getMaps()) {
                 Map<String, MarkerSet> sets = map.getMarkerSets();
                 if (sets == null) continue;
-                sets.computeIfAbsent(setId, k -> new MarkerSet(setId));
+                sets.computeIfAbsent(setId, k -> {
+                    MarkerSet s = new MarkerSet("Markers");
+                    s.setLabel("Markers");
+                    return s;
+                });
             }
         });
     }
@@ -75,8 +77,12 @@ public class BlueMapIntegration {
         }
         if (extrude.size() < 3) return;
 
-        // setID "zones_shop" — тот же, что и в LazyBlueMapLoader.initializeBlueMapMarkerStorage(...)
-        addBlueMapMarker(z.getMarkerID(), base, "zones_shop", z.getName(), "extrude", extrude, null);
+        String cleanName = ChatColor.stripColor(z.getName() == null ? "" : z.getName()).trim();
+        if (cleanName.isEmpty()) cleanName = z.getID();
+        String setIdByType = "zones_" + z.getType().name().toLowerCase(Locale.ROOT);
+
+        addBlueMapMarker(z.getMarkerID(), base, setIdByType, cleanName, "extrude", extrude, null);
+
     }
 
     /** Ставит простой POI-маркер для таблички в отдельном наборе. Совместим с текущей сигнатурой POIMarker. */
@@ -89,7 +95,8 @@ public class BlueMapIntegration {
 
             final String setId = "zones_signs";
             final String setLabel = "Signs";
-            MarkerSet set = sets.computeIfAbsent(setId, k -> new MarkerSet(setLabel));
+            MarkerSet set = sets.computeIfAbsent(setId, k -> new MarkerSet("Markers"));
+            set.setLabel(setLabel);
 
             final String id = "sign_" + loc.getBlockX() + "_" + loc.getBlockY() + "_" + loc.getBlockZ();
             Vector3d pos = new Vector3d(loc.getX(), loc.getY(), loc.getZ());
@@ -116,7 +123,12 @@ public class BlueMapIntegration {
                 return;
             }
 
-            MarkerSet markerSet = markerSets.computeIfAbsent(setID, k -> new MarkerSet(setLabel));
+            MarkerSet markerSet = markerSets.computeIfAbsent(setID, k -> {
+                return new MarkerSet("Markers");
+            });
+            // человекочитаемый label набора
+            markerSet.setLabel((setLabel != null && !setLabel.isEmpty()) ? setLabel : setID);
+
             if (markerSet.getMarkers() == null) {
                 Bukkit.getLogger().warning("Markers map is null for setID: " + setID);
                 return;
@@ -135,9 +147,10 @@ public class BlueMapIntegration {
                             .collect(Collectors.toList());
                     Shape newShape = new Shape(basePoints);
 
-                    // Высоты Y (фолбэк на 42..152)
-                    double minY = extrudePoints.stream().mapToDouble(Vector3d::getY).min().orElse(42);
-                    double maxY = extrudePoints.stream().mapToDouble(Vector3d::getY).max().orElse(152);
+                    // Высоты Y (умолчания как в зонах): -64..255
+                    double minY = extrudePoints.stream().mapToDouble(Vector3d::getY).min().orElse(-64);
+                    double maxY = extrudePoints.stream().mapToDouble(Vector3d::getY).max().orElse(255);
+
                     if (minY > maxY) { double t = minY; minY = maxY; maxY = t; }
 
                     // Проверяем пересечения со всеми существующими ExtrudeMarker в этом наборе
@@ -154,8 +167,9 @@ public class BlueMapIntegration {
 
                     // Добавляем новый полигон
                     ExtrudeMarker extrudeMarker = new ExtrudeMarker(id, newShape, (float) minY, (float) maxY);
-                    // Лейбл лучше человекочитаемый (setLabel), но id у тебя был логикой по умолчанию
-                    extrudeMarker.setLabel(setLabel != null && !setLabel.isEmpty() ? setLabel : id);
+                    String label = (setLabel != null && !setLabel.isEmpty()) ? setLabel : id;
+                    label = ChatColor.stripColor(label);
+                    extrudeMarker.setLabel(label);
                     markerSet.getMarkers().put(id, extrudeMarker);
 
                     if (p != null) p.sendMessage(ChatColor.GREEN + "Торговая точка успешно создана!");
@@ -214,7 +228,8 @@ public class BlueMapIntegration {
                 }
             }
 
-            try (FileWriter writer = new FileWriter(markerFile)) {
+            try (OutputStreamWriter writer = new OutputStreamWriter(
+                    new FileOutputStream(markerFile), StandardCharsets.UTF_8)) {
                 MarkerGson.INSTANCE.toJson(markerSet, writer);
             } catch (IOException ex) {
                 getLogger().severe("Ошибка при сохранении маркеров BlueMap.");
@@ -236,14 +251,19 @@ public class BlueMapIntegration {
             if (markerFiles == null) return;
 
             for (File markerFile : markerFiles) {
-                try (FileReader reader = new FileReader(markerFile)) {
+                try (InputStreamReader reader = new InputStreamReader(
+                        new FileInputStream(markerFile), StandardCharsets.UTF_8)) {
                     MarkerSet markerSet = MarkerGson.INSTANCE.fromJson(reader, MarkerSet.class);
                     String markerSetName = markerFile.getName().replace(".json", "");
+                    if (markerSet.getLabel() == null || markerSet.getLabel().isEmpty()) {
+                        markerSet.setLabel(markerSetName);
+                    }
                     map.getMarkerSets().put(markerSetName, markerSet);
                 } catch (IOException ex) {
                     getLogger().severe("Ошибка при загрузке маркеров BlueMap из файла: " + markerFile.getName());
                     ex.printStackTrace();
                 }
+
             }
         }));
     }

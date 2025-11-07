@@ -6,7 +6,6 @@ import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
 import com.frammy.unitylauncher.signs.ItemData;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.signs.SignVariables;
-import com.frammy.unitylauncher.zones.countryrelations.CountryRelationshipDao;
 import com.flowpowered.math.vector.Vector2d;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import de.bluecolored.bluemap.api.markers.ExtrudeMarker;
@@ -48,9 +47,6 @@ public class ZoneManager {
     public SignManager signManager;
     public BlueMapIntegration blueMapIntegration;
     public ActivityTracker activityTracker;
-
-    private CountryRelationshipDao countryRelationshipDao;
-    public CountryRelationshipDao getCountryRelationshipDao() { return countryRelationshipDao; }
 
     private final File zonesFile;
     private YamlConfiguration zonesConfig;
@@ -115,20 +111,18 @@ public class ZoneManager {
 
     public final Map<ZoneType, ZoneTypeData> zoneLimits = new HashMap<>() {{
         // displayName, areaLimit, index(приоритет), baseCost, allowOverlap, areaMultiplier, minSize, perm
-        put(ZoneType.SHOP,       new ZoneTypeData("Торговая точка",     500.0,  2,   3.0,  true,  1.0,  10, "unityLauncher.createZone.shop"));
+        put(ZoneType.COUNTRY,    new ZoneTypeData("Государство",      30000.0, 10, 100.0,  false, 0.70,  0, "unityLauncher.createZone.country"));
+        put(ZoneType.COLONY,     new ZoneTypeData("Колония",          10000.0,  5,  80.0,  false, 0.85,  0, "unityLauncher.createZone.colony"));
+
         put(ZoneType.BANK,       new ZoneTypeData("Банк",               300.0,  3,  20.0,  false, 1.0, 150, "unityLauncher.createZone.bank"));
         put(ZoneType.HOSPITAL,   new ZoneTypeData("Госпиталь",          700.0,  3,  15.0,  false, 1.0, 200, "unityLauncher.createZone.hospital"));
         put(ZoneType.INDUSTRIAL, new ZoneTypeData("Промышленная зона", 1000.0,  3,  20.0,  false, 1.15, 50, "unityLauncher.createZone.industrial"));
-        put(ZoneType.REGION,     new ZoneTypeData("Регион",           10000.0,  3, 300.0,  false, 0.85,  0, "unityLauncher.createZone.region"));
-        put(ZoneType.COUNTRY,    new ZoneTypeData("Государство",      30000.0, 10, 100.0,  false, 0.70,  0, "unityLauncher.createZone.country"));
-
-        // Новые типы, «только в стране или колонии»
+        put(ZoneType.PARK,     new ZoneTypeData("Парк",           1000.0,  3, 30.0,  false, 0.85,  0, "unityLauncher.createZone.region"));
         put(ZoneType.CHURCH,     new ZoneTypeData("Церковь",            500.0,  3,  10.0,  false, 1.0,  20, "unityLauncher.createZone.church"));
         put(ZoneType.LIBRARY,    new ZoneTypeData("Библиотека",         500.0,  3,  10.0,  false, 1.0,  20, "unityLauncher.createZone.library"));
-        put(ZoneType.PARK,       new ZoneTypeData("Парк",               900.0,  3,   5.0,  false, 1.0,  20, "unityLauncher.createZone.park"));
+        put(ZoneType.GREENHOUSE,       new ZoneTypeData("Теплица",               900.0,  3,   5.0,  false, 1.0,  20, "unityLauncher.createZone.greenhouse"));
 
-        // COLONY — «мини-государство»: создаёт правитель, любое измерение, внутри при создании ничего
-        put(ZoneType.COLONY,     new ZoneTypeData("Колония",          10000.0,  5,  80.0,  false, 0.85,  0, "unityLauncher.createZone.colony"));
+        put(ZoneType.SHOP,       new ZoneTypeData("Торговая точка",     500.0,  2,   3.0,  true,  1.0,  10, "unityLauncher.createZone.shop"));
     }};
 
     // ==== Lifecycle / IO ====
@@ -359,7 +353,7 @@ public class ZoneManager {
     /** true, если создаваемая область pts содержит внутри себя хоть одну существующую зону (любой тип) ИЛИ пересекается с ней */
     private boolean areaHasAnyZonesInsideOrIntersecting(List<Location> pts, String ignoreMarkerId) {
         // построим JTS-полигон создаваемой зоны
-        ZoneInfo tmp = new ZoneInfo(ZoneType.REGION, "tmp", "tmp", "tmp_marker", pts, "tmp_owner", org.bukkit.Color.WHITE);
+        ZoneInfo tmp = new ZoneInfo(ZoneType.PARK, "tmp", "tmp", "tmp_marker", pts, "tmp_owner", org.bukkit.Color.WHITE);
         var newPoly = toJtsPolygon(tmp);
         if (newPoly == null) return true;
 
@@ -388,7 +382,7 @@ public class ZoneManager {
     public boolean playerHasCountryZone(String owner) {
         if (owner == null || owner.isBlank()) return false;
         for (ZoneInfo z : zoneList.values()) {
-            if (z.getType() == ZoneType.COUNTRY && owner.equals(z.getOwner())) return true;
+            if (z.getType() == ZoneType.COUNTRY && NameUtil.eqCi(owner, z.getOwner())) return true;
         }
         return false;
     }
@@ -527,6 +521,10 @@ public class ZoneManager {
         );
         created.setOwnerCountry(playerCountry);
 
+        // === CountryInfo: площадь страны и стартовые деньги ===
+        double areaCountry = calculateSurfaceArea(pts);
+        ul.countryRegistryJdbc.setCountryAreaPreserveMoney(playerCountry, areaCountry);
+
         // сохраним в YAML
         zonesConfig.set("COUNTRY." + p.getName() + "." + zoneID + ".name", playerCountry);
         zonesConfig.set("COUNTRY." + p.getName() + "." + zoneID + ".ownerCountry", playerCountry);
@@ -580,12 +578,11 @@ public class ZoneManager {
             return;
         }
 
-        // страна игрока (может быть null, если игрок ни в одной стране)
+        // страна игрока (может быть null)
         String playerCountry = ul.countryRegistryJdbc.getCountryOfPlayer(p.getName());
 
-        // особый случай: COLONY
+        // === COLONY (как и было): лидер, не пересекаться, можно в любом мире
         if (type == ZoneType.COLONY) {
-            // только лидер страны может сделать колонию
             if (playerCountry == null || playerCountry.isBlank()) {
                 p.sendMessage(ChatColor.RED + "Нельзя создать Колонию: вы не состоите ни в одной стране.");
                 return;
@@ -594,23 +591,51 @@ public class ZoneManager {
                 p.sendMessage(ChatColor.RED + "Недостаточно прав: только лидер страны может создавать Колонию.");
                 return;
             }
-            // внутри при создании не должно быть других зон
             if (areaHasAnyZonesInsideOrIntersecting(pts, null)) {
                 p.sendMessage(ChatColor.RED + "Нельзя создать Колонию: внутри/по границе уже есть другие зоны.");
                 return;
             }
-            // Колония разрешена в любом мире (Overworld / Nether / End) по твоему текущему правилу.
         }
 
         // типы, которые обязаны быть внутри страны или колонии
         boolean mustBeInsideCountryOrColony =
-                (type == ZoneType.BANK ||
-                        type == ZoneType.HOSPITAL ||
-                        type == ZoneType.REGION ||
-                        type == ZoneType.CHURCH ||
-                        type == ZoneType.LIBRARY ||
-                        type == ZoneType.PARK ||
-                        type == ZoneType.INDUSTRIAL);
+                (type != ZoneType.SHOP && type != ZoneType.COUNTRY && type != ZoneType.COLONY);
+
+        // === ВНУТРЕННИЕ типы: все, кроме SHOP/COUNTRY/COLONY
+        if (mustBeInsideCountryOrColony) {
+            ZoneInfo parent = findSingleContainingZoneOfTypes(pts, Set.of(ZoneType.COUNTRY, ZoneType.COLONY));
+            if (parent == null) {
+                p.sendMessage(ChatColor.RED + "Зона " + type + " должна полностью находиться внутри Государства или Колонии.");
+                return;
+            }
+            // страна игрока должна совпадать со страной родителя
+            String parentCountry = zoneCountry(parent);
+            if (playerCountry == null || playerCountry.isBlank() ||
+                    !Objects.equals(normCountry(playerCountry), normCountry(parentCountry))) {
+                p.sendMessage(ChatColor.RED + "Эта зона может быть создана только в пределах вашей страны/колонии.");
+                return;
+            }
+        }
+
+        // === SHOP: везде можно, кроме чужой страны/колонии (и не на границе)
+        if (type == ZoneType.SHOP) {
+            ZoneInfo parent = findSingleContainingZoneOfTypes(pts, Set.of(ZoneType.COUNTRY, ZoneType.COLONY));
+            if (parent != null) {
+                String parentCountry = zoneCountry(parent);
+                // если у игрока нет страны или страна не совпадает с той, внутри которой строит магазин — запрет
+                if (playerCountry == null || playerCountry.isBlank() ||
+                        !Objects.equals(normCountry(playerCountry), normCountry(parentCountry))) {
+                    p.sendMessage(ChatColor.RED + "Магазин нельзя строить в чужой стране/колонии.");
+                    return;
+                }
+            } else {
+                // не внутри никакой — тогда ещё запретим пересечение по границе с любыми странами/колониями
+                if (areaIntersectsAnyOfTypes(pts, Set.of(ZoneType.COUNTRY, ZoneType.COLONY))) {
+                    p.sendMessage(ChatColor.RED + "Магазин не должен пересекать границы стран/колоний.");
+                    return;
+                }
+            }
+        }
 
         ZoneInfo parentZoneForChildren;
         if (mustBeInsideCountryOrColony) {
@@ -627,7 +652,7 @@ public class ZoneManager {
             // колония тоже получает ownerCountry страны
             parentCountry = parentZoneForChildren.getCountryName(); // должен быть setOwnerCountry на стране
 
-            if (playerCountry == null || playerCountry.isBlank()) {
+            if (playerCountry.isBlank()) {
                 p.sendMessage(ChatColor.RED + "Нельзя создать зону: вы не состоите ни в одной стране.");
                 return;
             }
@@ -706,6 +731,14 @@ public class ZoneManager {
         p.sendMessage(ChatColor.GREEN + "Зона \"" + zoneName + "\" создана!");
 
         zonePoints.remove(p.getUniqueId());
+
+        // === Если это колония — добавляем её площадь в CountryInfo.Area родительской страны ===
+        if (type == ZoneType.COLONY) {
+            double colonyArea = calculateSurfaceArea(pts);
+            // playerCountry у нас проверен выше и совпадает со страной родителя
+            ul.countryRegistryJdbc.addCountryArea(playerCountry, colonyArea);
+        }
+
         saveZonesToConfig();
     }
 
@@ -719,7 +752,7 @@ public class ZoneManager {
             if (ignoreMarkerId != null && ignoreMarkerId.equals(z.getMarkerID())) continue;
 
             // 2) по желанию: игнорируем зоны того же владельца того же типа
-            if (Objects.equals(z.getOwner(), owner) && z.getType() == currentType) continue;
+            if (NameUtil.eqCi(z.getOwner(), owner) && z.getType() == currentType) continue;
 
             if (!worldOk(z.getCorners(), loc.getWorld())) continue;
             if (pointInZone(loc, z.getCorners())) return z;
@@ -781,9 +814,37 @@ public class ZoneManager {
                     if (hasSelfIntersections(poly2D(tmp))) { p.sendMessage(ChatColor.GRAY + "Фигура самопересекается."); return; }
                     if (!areaOk(tmp, zoneLimits.get(zi.getType()))) { p.sendMessage(ChatColor.GRAY + "Площадь превышает лимит."); return; }
 
+                    // типы, которые обязаны оставаться внутри
+                    if (zi.getType() != ZoneType.SHOP && zi.getType() != ZoneType.COUNTRY && zi.getType() != ZoneType.COLONY) {
+                        if (!polygonInsideSingleZoneOfTypes(tmp, Set.of(ZoneType.COUNTRY, ZoneType.COLONY))) {
+                            p.sendMessage(ChatColor.RED + "Эта зона должна целиком оставаться внутри Государства или Колонии.");
+                            return;
+                        }
+                    }
+
+                    // SHOP: нельзя оказаться внутри чужой страны/колонии и нельзя пересекать границы стран/колоний
+                    if (zi.getType() == ZoneType.SHOP) {
+                        ZoneInfo parent = findSingleContainingZoneOfTypes(tmp, Set.of(ZoneType.COUNTRY, ZoneType.COLONY));
+                        String playerCountry = ul.countryRegistryJdbc.getCountryOfPlayer(p.getName());
+
+                        if (parent != null) {
+                            String parentCountry = zoneCountry(parent);
+                            if (playerCountry == null || playerCountry.isBlank() ||
+                                    !Objects.equals(normCountry(playerCountry), normCountry(parentCountry))) {
+                                p.sendMessage(ChatColor.RED + "Магазин нельзя перемещать внутрь чужой страны/колонии.");
+                                return;
+                            }
+                        } else {
+                            if (areaIntersectsAnyOfTypes(tmp, Set.of(ZoneType.COUNTRY, ZoneType.COLONY))) {
+                                p.sendMessage(ChatColor.RED + "Магазин не должен пересекать границы стран/колоний.");
+                                return;
+                            }
+                        }
+                    }
+
                     // Специфика для типов «только внутри страны/колонии»
-                    if (zi.getType() == ZoneType.BANK || zi.getType() == ZoneType.HOSPITAL || zi.getType() == ZoneType.REGION
-                            || zi.getType() == ZoneType.CHURCH || zi.getType() == ZoneType.LIBRARY || zi.getType() == ZoneType.PARK
+                    if (zi.getType() == ZoneType.BANK || zi.getType() == ZoneType.HOSPITAL || zi.getType() == ZoneType.PARK
+                            || zi.getType() == ZoneType.CHURCH || zi.getType() == ZoneType.LIBRARY || zi.getType() == ZoneType.GREENHOUSE
                             || zi.getType() == ZoneType.INDUSTRIAL) {
                         if (!polygonInsideSingleZoneOfTypes(tmp, Set.of(ZoneType.COUNTRY, ZoneType.COLONY))) {
                             p.sendMessage(ChatColor.RED + "Эта зона должна целиком оставаться внутри Государства или Колонии.");
@@ -811,6 +872,34 @@ public class ZoneManager {
                         if (areaHasAnyZonesInsideOrIntersecting(tmp, zi.getMarkerID())) {
                             p.sendMessage(ChatColor.RED + "Нельзя менять границы: внутри/по границе окажутся другие зоны.");
                             return;
+                        }
+                    }
+
+                    // типы, которые обязаны оставаться внутри
+                    if (zi.getType() != ZoneType.SHOP && zi.getType() != ZoneType.COUNTRY && zi.getType() != ZoneType.COLONY) {
+                        if (!polygonInsideSingleZoneOfTypes(tmp, Set.of(ZoneType.COUNTRY, ZoneType.COLONY))) {
+                            p.sendMessage(ChatColor.RED + "Эта зона должна целиком оставаться внутри Государства или Колонии.");
+                            return;
+                        }
+                    }
+
+                    // SHOP: нельзя оказаться внутри чужой страны/колонии и нельзя пересекать границы стран/колоний
+                    if (zi.getType() == ZoneType.SHOP) {
+                        ZoneInfo parent = findSingleContainingZoneOfTypes(tmp, Set.of(ZoneType.COUNTRY, ZoneType.COLONY));
+                        String playerCountry = ul.countryRegistryJdbc.getCountryOfPlayer(p.getName());
+
+                        if (parent != null) {
+                            String parentCountry = zoneCountry(parent);
+                            if (playerCountry == null || playerCountry.isBlank() ||
+                                    !Objects.equals(normCountry(playerCountry), normCountry(parentCountry))) {
+                                p.sendMessage(ChatColor.RED + "Магазин нельзя перемещать внутрь чужой страны/колонии.");
+                                return;
+                            }
+                        } else {
+                            if (areaIntersectsAnyOfTypes(tmp, Set.of(ZoneType.COUNTRY, ZoneType.COLONY))) {
+                                p.sendMessage(ChatColor.RED + "Магазин не должен пересекать границы стран/колоний.");
+                                return;
+                            }
                         }
                     }
 
@@ -929,31 +1018,19 @@ public class ZoneManager {
                     if (conn == null) {
                         throw new RuntimeException("DBConnect() вернул null");
                     }
-
                     try {
                         conn.setAutoCommit(false);
-
                         // 1. Чистим отношения дипломатии для этой страны, если DAO есть
                         if (UnityLauncher.getInstance().countryRelationshipDao != null) {
                             UnityLauncher.getInstance().countryRelationshipDao.deleteByCountryTx(conn, zi.getName());
                         }
-
                         // 2. Удаляем страну из таблицы Countries + чистим локальный кэш CountryRegistryJdbc
                         UnityLauncher.getInstance().countryRegistryJdbc.deleteCountryTx(conn, zi.getName());
-
-                        // 3. Пример: сюда можно добавить удаление записей из atm_quota и т.д.
-                        // try (PreparedStatement ps = conn.prepareStatement(
-                        //        "DELETE FROM atm_quota WHERE country = ?")) {
-                        //     ps.setString(1, zi.getName());
-                        //     ps.executeUpdate();
-                        // }
-
                         conn.commit();
                     } catch (Exception inner) {
                         try { conn.rollback(); } catch (Exception ignore) {}
                         throw inner;
                     }
-
                     // сообщим в лог на главном потоке
                     Bukkit.getScheduler().runTask(ul, () ->
                             Bukkit.getLogger().info("[Zones] Страна \"" + zi.getName() + "\" удалена из БД (TX ok).")
@@ -1198,7 +1275,7 @@ public class ZoneManager {
         ZoneInfo zi = playerLastZone.get(p.getUniqueId());
         if (zi != null) return zi;
         for (ZoneInfo z : zoneList.values()) {
-            if (!Objects.equals(z.getOwner(), p.getName())) continue;
+            if (!NameUtil.eqCi(z.getOwner(), p.getName())) continue;
             if (pointInZone(p.getLocation(), z.getCorners())) return z;
         }
         return null;
@@ -1265,12 +1342,12 @@ public class ZoneManager {
     private static boolean isChildType(ZoneInfo z) {
         ZoneType t = z.getType();
         return t == ZoneType.INDUSTRIAL
-                || t == ZoneType.REGION
+                || t == ZoneType.PARK
                 || t == ZoneType.BANK
                 || t == ZoneType.HOSPITAL
                 || t == ZoneType.CHURCH
                 || t == ZoneType.LIBRARY
-                || t == ZoneType.PARK
+                || t == ZoneType.GREENHOUSE
                 || t == ZoneType.SHOP;
     }
 
@@ -1311,6 +1388,30 @@ public class ZoneManager {
         String t = s.trim().toLowerCase(Locale.ROOT);
         t = t.replace(' ', '_');
         return t.replaceAll("[^a-z0-9_\\-.]", "");
+    }
+
+    /** Страна зоны: сначала ownerCountry, для COUNTRY — fallback к имени зоны */
+    private static String zoneCountry(ZoneInfo z) {
+        if (z == null) return null;
+        String c = z.getCountryName();
+        if (c != null && !c.isBlank()) return c;
+        return (z.getType() == ZoneType.COUNTRY) ? z.getName() : null;
+    }
+
+    /** true, если многоугольник pts пересекает (границей/площадью) хоть одну зону из allowedTypes */
+    private boolean areaIntersectsAnyOfTypes(List<Location> pts, Set<ZoneType> allowedTypes) {
+        var newPoly = toJtsPolygon(new ZoneInfo(ZoneType.PARK, "tmp", "tmp", "tmp", pts, "tmp", org.bukkit.Color.WHITE));
+        if (newPoly == null) return true;
+        World w0 = pts.getFirst().getWorld();
+
+        for (ZoneInfo z : zoneList.values()) {
+            if (!allowedTypes.contains(z.getType())) continue;
+            if (!worldOk(z.getCorners(), w0)) continue;
+            var ex = toJtsPolygon(z);
+            if (ex == null) continue;
+            try { if (newPoly.intersects(ex)) return true; } catch (Throwable t) { return true; }
+        }
+        return false;
     }
 
     /**
@@ -1362,6 +1463,15 @@ public class ZoneManager {
         if (!shell.isValid()) return null;
 
         return new Polygon(shell, null, GF);
+    }
+
+    public static final class NameUtil {
+        public static String canon(String s) {
+            return s == null ? null : s.toLowerCase(java.util.Locale.ROOT);
+        }
+        public static boolean eqCi(String a, String b) {
+            return a != null && a.equalsIgnoreCase(b);
+        }
     }
 
 }

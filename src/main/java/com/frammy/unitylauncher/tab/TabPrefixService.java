@@ -22,16 +22,11 @@ public final class TabPrefixService implements Listener {
     private final Function<UUID, String[]> prefixProvider;
     private final Plugin plugin;
 
-    private final TabDatabaseSync tabDb;
-
     private LuckPermsPrefixService lpService;
 
-    public TabPrefixService(Plugin plugin,
-                            Function<UUID, String[]> prefixProvider,
-                            TabDatabaseSync tabDb) {
+    public TabPrefixService(Plugin plugin, Function<UUID, String[]> prefixProvider) {
         this.plugin = plugin;
         this.prefixProvider = prefixProvider;
-        this.tabDb = tabDb;
 
         Bukkit.getPluginManager().registerEvents(this, plugin);
 
@@ -68,12 +63,7 @@ public final class TabPrefixService implements Listener {
             player.displayName(buildDisplayName(player.getName(), prefix, suffix));
 
             if (lpService != null) {
-                // синхронизируем для LP/чата
                 lpService.applyOrClear(player.getUniqueId(), prefix);
-            }
-
-            if (tabDb != null) {
-                tabDb.upsertPlayerPrefixAsync(player.getUniqueId(), prefix, suffix);
             }
         } catch (Throwable t) {
             Bukkit.getLogger().warning("[UnityLauncher] TAB apply failed for " + player.getName() + ": " + t.getMessage());

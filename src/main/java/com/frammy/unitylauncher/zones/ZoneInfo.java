@@ -3,9 +3,11 @@ package com.frammy.unitylauncher.zones;
 import org.bukkit.Color;
 import org.bukkit.Location;
 import org.bukkit.World;
+import org.bukkit.util.BoundingBox;
 
 import java.time.LocalDate;
 import java.util.*;
+import java.util.concurrent.ThreadLocalRandom;
 
 /** Минимальная и удобная модель зоны. */
 public class ZoneInfo {
@@ -161,4 +163,53 @@ public class ZoneInfo {
                 "', owner='" + owner + "', country='" + ownerCountry +
                 "', corners=" + corners.size() + '}';
     }
+
+    // Быстрый AABB по XZ для текущих углов зоны.
+    public BoundingBox getBoundingBoxXZ() {
+        if (corners.isEmpty()) {
+            // пустая зона — нулевая рамка
+            return new BoundingBox(0, 0, 0, 0, 0, 0);
+        }
+
+        double minX = Double.POSITIVE_INFINITY, minZ = Double.POSITIVE_INFINITY;
+        double maxX = Double.NEGATIVE_INFINITY, maxZ = Double.NEGATIVE_INFINITY;
+        World w = null;
+
+        for (Location loc : corners) {
+            if (loc == null) continue;
+            if (w == null) w = loc.getWorld();
+            double x = loc.getX();
+            double z = loc.getZ();
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (z < minZ) minZ = z;
+            if (z > maxZ) maxZ = z;
+        }
+
+        // если вдруг все loc == null
+        if (Double.isInfinite(minX) || Double.isInfinite(minZ)) {
+            return new BoundingBox(0, 0, 0, 0, 0, 0);
+        }
+
+        int maxY = (w != null) ? w.getMaxHeight() : 256;
+        return new BoundingBox(minX, 0, minZ, maxX, maxY, maxZ);
+    }
+
+    public Location randomPointInBox(ThreadLocalRandom rnd) {
+        BoundingBox bb = getBoundingBoxXZ();
+        World w = getWorld();
+        if (w == null || bb == null) return null;
+
+        int minX = (int) Math.floor(bb.getMinX());
+        int maxX = (int) Math.floor(bb.getMaxX());
+        int minZ = (int) Math.floor(bb.getMinZ());
+        int maxZ = (int) Math.floor(bb.getMaxZ());
+        if (minX > maxX || minZ > maxZ) return null;
+
+        int x = rnd.nextInt(minX, maxX + 1);
+        int z = rnd.nextInt(minZ, maxZ + 1);
+        int y = w.getHighestBlockYAt(x, z);
+        return new Location(w, x, y, z);
+    }
+
 }

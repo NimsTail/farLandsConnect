@@ -75,44 +75,13 @@ public class CountryRelationshipDao {
         if (countryName == null || countryName.isEmpty()) return;
         final String json = toJson(map);
 
-        // Вариант 1: попытаться UPSERT-ом. Важно: указать все NOT NULL без дефолтов.
-        final String upsert =
-                "INSERT INTO `Countries` " +
-                        "(`Name`, `Relationship`, `Players`, `Permissions`, `Upgrades`, `CountryInfo`, `isVerified`) " +
-                        "VALUES (?, ?, JSON_ARRAY(), JSON_OBJECT(), '{}', JSON_OBJECT(), 0) " +
-                        "ON DUPLICATE KEY UPDATE `Relationship` = VALUES(`Relationship`)";
+        final String upd = "UPDATE `Countries` SET `Relationship` = ? WHERE `Name` = ?";
 
         try (Connection con = DBConnect()) {
             if (con == null) {
                 warnOnce("saveRelationsFor: DBConnect() == null");
                 return;
             }
-            try (PreparedStatement ps = con.prepareStatement(upsert)) {
-                ps.setString(1, countryName);
-                ps.setString(2, json);
-                ps.executeUpdate();
-            }
-            return;
-        } catch (SQLException e) {
-            logSql("saveRelationsFor(UPSERT " + countryName + ")", e);
-        } catch (Throwable t) {
-            logOther("saveRelationsFor(UPSERT " + countryName + ")", t);
-        }
-
-        // Вариант 2 (fallback): UPDATE -> если 0 строк, то INSERT с полным набором полей.
-        final String upd = "UPDATE `Countries` SET `Relationship` = ? WHERE `Name` = ?";
-        final String ins =
-                "INSERT INTO `Countries` " +
-                        "(`Name`, `Relationship`, `Players`, `Permissions`, `Upgrades`, `CountryInfo`, `isVerified`) " +
-                        "VALUES (?, ?, JSON_ARRAY(), JSON_OBJECT(), '{}', JSON_OBJECT(), 0)";
-
-        try (Connection con = DBConnect()) {
-            if (con == null) {
-                warnOnce("saveRelationsFor(fallback): DBConnect() == null");
-                return;
-            }
-            boolean oldAuto = con.getAutoCommit();
-            con.setAutoCommit(false);
             int updated;
             try (PreparedStatement psUpd = con.prepareStatement(upd)) {
                 psUpd.setString(1, json);
@@ -120,23 +89,20 @@ public class CountryRelationshipDao {
                 updated = psUpd.executeUpdate();
             }
             if (updated == 0) {
-                try (PreparedStatement psIns = con.prepareStatement(ins)) {
-                    psIns.setString(1, countryName);
-                    psIns.setString(2, json);
-                    psIns.executeUpdate();
-                }
+                // Мягкое предупреждение: страны нет — не создаём новую строку,
+                // чтобы не множить дубликаты. Страну должен создавать регистр стран.
+                Bukkit.getLogger().warning("[UnityLauncher] saveRelationsFor: country not found: " + countryName
+                        + " — skipped INSERT to avoid duplicates");
             }
-            con.commit();
-            con.setAutoCommit(oldAuto);
         } catch (SQLException e) {
-            logSql("saveRelationsFor(fallback " + countryName + ")", e);
+            logSql("saveRelationsFor(UPDATE " + countryName + ")", e);
         } catch (Throwable t) {
-            logOther("saveRelationsFor(fallback " + countryName + ")", t);
+            logOther("saveRelationsFor(UPDATE " + countryName + ")", t);
         }
     }
 
     public void deleteByCountryTx(Connection conn, String countryName) throws SQLException {
-        try (PreparedStatement ps = conn.prepareStatement("DELETE FROM CountryRelations WHERE country = ?")) {
+        try (PreparedStatement ps = conn.prepareStatement("DELETE FROM atm_quota WHERE country = ?")) {
             ps.setString(1, countryName);
             ps.executeUpdate();
         }

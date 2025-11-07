@@ -37,6 +37,7 @@ public class CountryRegistryJdbc {
 
     private final Map<String, String> playerToCountry = new ConcurrentHashMap<>();
     private final Map<String, String> countryToLeader = new ConcurrentHashMap<>();
+    private final Map<String, Double> countryToTransferFeePct = new ConcurrentHashMap<>();
 
     private final JavaPlugin plugin;
 
@@ -58,6 +59,13 @@ public class CountryRegistryJdbc {
      * @param prefix как "§o§d❉Президент" или "&f"
      */ // простая структура одной роли
         public record RoleInfo(int id, String name, String prefix) {
+    }
+
+    /** Комиссия страны (проценты, напр. 1.25 = 1.25%). Если нет — вернёт fallbackPct. */
+    public double getCountryTransferFeePctOr(String countryName, double fallbackPct) {
+        if (countryName == null || countryName.isBlank()) return fallbackPct;
+        refreshCacheIfExpired();
+        return countryToTransferFeePct.getOrDefault(countryName.toLowerCase(Locale.ROOT), fallbackPct);
     }
 
     /* ===================== ПУБЛИЧНОЕ API ===================== */
@@ -107,6 +115,7 @@ public class CountryRegistryJdbc {
         // выбрасываем страну из кэша
         String lower = countryName.toLowerCase(Locale.ROOT);
         countryToLeader.remove(lower);
+        countryToTransferFeePct.remove(lower);
         playerToCountry.entrySet().removeIf(e -> e.getValue().equalsIgnoreCase(countryName));
 
         touchCacheNow();
@@ -136,6 +145,7 @@ public class CountryRegistryJdbc {
             Bukkit.getScheduler().runTask(plugin, () -> {
                 String lower = countryName.toLowerCase(Locale.ROOT);
                 countryToLeader.remove(lower);
+                countryToTransferFeePct.remove(lower);
                 playerToCountry.entrySet().removeIf(e -> e.getValue().equalsIgnoreCase(countryName));
                 touchCacheNow();
             });
@@ -213,6 +223,7 @@ public class CountryRegistryJdbc {
         Map<String, Integer> newPlayerToRoleId = new HashMap<>();
         Map<String, String> newCountryToLeader = new HashMap<>();
         Map<String, Map<Integer, RoleInfo>> newCountryRoleMeta = new HashMap<>();
+        Map<String, Double> newCountryToTransferFeePct = new HashMap<>();
 
         try (Connection con = DBConnect()) {
             if (con == null) {
@@ -220,7 +231,7 @@ public class CountryRegistryJdbc {
                 return;
             }
 
-            String sql = "SELECT Name, Players, Permissions FROM Countries";
+            String sql = "SELECT Name, Players, Permissions, CountryInfo FROM Countries";
             try (PreparedStatement ps = con.prepareStatement(sql);
                  ResultSet rs = ps.executeQuery()) {
 
@@ -249,7 +260,7 @@ public class CountryRegistryJdbc {
 
                     newCountryRoleMeta.put(countryLower, rolesMap);
 
-                    int leaderRoleId = findLeaderRoleIdFromRoles(rolesMap);
+                    Integer leaderRoleId = findLeaderRoleIdFromRoles(rolesMap); // <- теперь Integer
                     String leaderFound = null;
 
                     // --- 2. распарсили игроков
@@ -265,9 +276,7 @@ public class CountryRegistryJdbc {
                             newPlayerToRoleId.put(playerLower, roleId);
                         }
 
-                        if (leaderRoleId != 0 && roleId != null
-                                && roleId == leaderRoleId
-                                && leaderFound == null) {
+                        if (roleId != null && Objects.equals(roleId, leaderRoleId) && leaderFound == null) {
                             leaderFound = playerLower;
                         }
                     }
@@ -275,6 +284,29 @@ public class CountryRegistryJdbc {
                     if (leaderFound != null && !leaderFound.isBlank()) {
                         newCountryToLeader.put(countryLower, leaderFound);
                     }
+                    String countryInfo = rs.getString("CountryInfo");
+                    // --- 3. TransferFee из CountryInfo
+                    try {
+                        if (countryInfo != null && !countryInfo.isBlank()) {
+                            JsonElement ciRoot = JsonParser.parseString(countryInfo);
+                            if (ciRoot.isJsonObject()) {
+                                JsonObject ci = ciRoot.getAsJsonObject();
+                                if (ci.has("TransferFee") && !ci.get("TransferFee").isJsonNull()) {
+                                    Double tf = null;
+                                    try {
+                                        if (ci.get("TransferFee").isJsonPrimitive() && ci.get("TransferFee").getAsJsonPrimitive().isNumber()) {
+                                            tf = ci.get("TransferFee").getAsDouble();
+                                        } else if (ci.get("TransferFee").isJsonPrimitive() && ci.get("TransferFee").getAsJsonPrimitive().isString()) {
+                                            tf = Double.parseDouble(ci.get("TransferFee").getAsString().trim());
+                                        }
+                                    } catch (Exception ignored) {}
+                                    if (tf != null) {
+                                        newCountryToTransferFeePct.put(countryLower, tf);
+                                    }
+                                }
+                            }
+                        }
+                    } catch (Throwable ignored) {}
                 }
             }
         } catch (Throwable t) {
@@ -294,6 +326,9 @@ public class CountryRegistryJdbc {
 
         countryRoleMeta.clear();
         countryRoleMeta.putAll(newCountryRoleMeta);
+
+        countryToTransferFeePct.clear();
+        countryToTransferFeePct.putAll(newCountryToTransferFeePct);
 
         cacheLoadedOnce = true;
         lastRefresh = Instant.now();
@@ -334,24 +369,44 @@ public class CountryRegistryJdbc {
         return out;
     }
 
-    // Разобрать Permissions JSON страны в карту roleId -> RoleInfo
+    // где-нибудь рядом с полями класса:
+    private static final Set<String> WARNED_EMPTY_PERMS = ConcurrentHashMap.newKeySet();
+
+    // замени метод parseRoles целиком:
     private static Map<Integer, RoleInfo> parseRoles(String permsJsonRaw) {
         Map<Integer, RoleInfo> out = new HashMap<>();
-        if (permsJsonRaw == null || permsJsonRaw.isBlank()) return out;
+        if (permsJsonRaw == null) return out;
+
+        String trimmed = permsJsonRaw.trim();
+        // Нормальные «пустые» варианты — не логируем
+        if (trimmed.isEmpty() || "{}".equals(trimmed) || "[]".equals(trimmed)) return out;
+
         try {
             JsonElement root = JsonParser.parseString(permsJsonRaw);
             if (root.isJsonPrimitive() && root.getAsJsonPrimitive().isString()) {
                 String inner = root.getAsString();
-                root = JsonParser.parseString(inner);
+                if (inner != null) {
+                    String innerTrim = inner.trim();
+                    if (innerTrim.isEmpty() || "{}".equals(innerTrim) || "[]".equals(innerTrim)) {
+                        return out; // тоже валидная пустота — без варна
+                    }
+                    root = JsonParser.parseString(inner);
+                }
             }
             fillRolesFromRoot(out, root);
+
+            // Если реально не смогли извлечь ничего — варним только один раз на такой payload
             if (out.isEmpty()) {
-                Bukkit.getLogger().warning("[CountryRegistryJdbc] parseRoles: empty after parse, raw=" +
-                        (permsJsonRaw.length()>128 ? permsJsonRaw.substring(0,128)+"..." : permsJsonRaw));
+                String key = Integer.toHexString(trimmed.hashCode());
+                if (WARNED_EMPTY_PERMS.add(key)) {
+                    Bukkit.getLogger().warning("[CountryRegistryJdbc] parseRoles: empty after parse, raw="
+                            + (trimmed.length() > 128 ? trimmed.substring(0, 128) + "..." : trimmed));
+                }
             }
         } catch (Throwable ignored) {}
         return out;
     }
+
 
 
     // попытка извлечь роли из уже распарсенного JsonElement root
@@ -426,14 +481,14 @@ public class CountryRegistryJdbc {
         return new RoleInfo(id, name, prefix);
     }
 
-    private static int findLeaderRoleIdFromRoles(Map<Integer, RoleInfo> rolesMap) {
-        if (rolesMap == null || rolesMap.isEmpty()) return 0;
+    private static Integer findLeaderRoleIdFromRoles(Map<Integer, RoleInfo> rolesMap) {
+        if (rolesMap == null || rolesMap.isEmpty()) return null;
         for (RoleInfo ri : rolesMap.values()) {
             if (ri.name != null && ri.name.equalsIgnoreCase("Leader")) {
-                return ri.id;
+                return ri.id; // может быть 0 — это ок!
             }
         }
-        return 0;
+        return null;
     }
 
     private static Integer getInt(JsonObject o, String key) {
@@ -456,6 +511,62 @@ public class CountryRegistryJdbc {
             return o.get(key).getAsString();
         } catch (Exception ignored) {}
         return null;
+    }
+
+    /** Обновить только площадь в CountryInfo, деньги не трогаем.
+     *  Если Money отсутствует — создадим его = 0 (идемпотентно).
+     */
+    public void setCountryAreaPreserveMoney(String countryName, double area) {
+        if (countryName == null || countryName.isBlank()) return;
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            final String sql = """
+            UPDATE Countries
+            SET CountryInfo = JSON_SET(
+                COALESCE(CountryInfo, JSON_OBJECT()),
+                '$.Area',  CAST(? AS JSON),
+                '$.Money', COALESCE(JSON_EXTRACT(CountryInfo,'$.Money'), CAST('0' AS JSON))
+            )
+            WHERE Name = ?
+            """;
+            try (Connection con = DBConnect()) {
+                if (con == null) { logDb("setCountryAreaPreserveMoney", "DBConnect()==null"); return; }
+                try (PreparedStatement ps = con.prepareStatement(sql)) {
+                    ps.setDouble(1, area);
+                    ps.setString(2, countryName);
+                    ps.executeUpdate();
+                }
+            } catch (Throwable t) {
+                logDb("setCountryAreaPreserveMoney", t);
+            }
+        });
+    }
+
+    /** Добавить к площади страны deltaArea (например, при создании колонии). Инициализирует поле, если его не было. */
+    public void addCountryArea(String countryName, double deltaArea) {
+        if (countryName == null || countryName.isBlank() || deltaArea == 0.0) return;
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            final String sql = """
+                UPDATE Countries
+                SET CountryInfo = JSON_SET(
+                    COALESCE(CountryInfo, JSON_OBJECT()),
+                    '$.Area',
+                    CAST( (COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(CountryInfo,'$.Area')) AS DECIMAL(20,3)), 0) + ?) AS JSON ),
+                    '$.Money',
+                    COALESCE(JSON_EXTRACT(CountryInfo,'$.Money'), CAST('0' AS JSON))
+                )
+                WHERE Name = ?
+                """;
+            try (Connection con = DBConnect()) {
+                if (con == null) { logDb("addCountryArea", "DBConnect()==null"); return; }
+                try (PreparedStatement ps = con.prepareStatement(sql)) {
+                    ps.setDouble(1, deltaArea);
+                    ps.setString(2, countryName);
+                    ps.executeUpdate();
+                }
+            } catch (Throwable t) {
+                logDb("addCountryArea", t);
+            }
+        });
     }
 
     /* ===================== LOG ===================== */

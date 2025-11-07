@@ -4,6 +4,8 @@ import com.flowpowered.math.vector.Vector2d;
 import com.frammy.unitylauncher.BlueMapIntegration;
 import com.frammy.unitylauncher.UnityCommands;
 import com.frammy.unitylauncher.UnityLauncher;
+import com.frammy.unitylauncher.upgrades.UpgradesConfig;
+import com.frammy.unitylauncher.upgrades.UpgradesListener;
 import com.frammy.unitylauncher.zones.ZoneManager;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import de.bluecolored.bluemap.api.BlueMapMap;
@@ -11,16 +13,11 @@ import de.bluecolored.bluemap.api.markers.ExtrudeMarker;
 import de.bluecolored.bluemap.api.markers.Marker;
 import de.bluecolored.bluemap.api.markers.MarkerSet;
 import de.bluecolored.bluemap.api.math.Shape;
-import org.apache.commons.lang3.text.WordUtils;
 import org.bukkit.*;
-import org.bukkit.block.Block;
-import org.bukkit.block.BlockFace;
-import org.bukkit.block.Container;
-import org.bukkit.block.Sign;
+import org.bukkit.block.*;
 import org.bukkit.configuration.ConfigurationSection;
-import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
-import org.bukkit.enchantments.Enchantment;
+import org.bukkit.entity.HumanEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -34,7 +31,6 @@ import org.bukkit.event.player.PlayerItemHeldEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
-import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
 import org.yaml.snakeyaml.LoaderOptions;
@@ -48,6 +44,8 @@ import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
+
+import static com.frammy.unitylauncher.upgrades.UpgradeCondition.countryMaxLevel;
 
 public class SignManager implements Listener {
     private final UnityLauncher unityLauncher;
@@ -63,15 +61,17 @@ public class SignManager implements Listener {
     private final Map<Location, Map<Integer, BukkitTask>> activeScrolls = new HashMap<>();
     Map<Location, List<ItemData>> signItemData = new HashMap<>();
     private final ZoneManager zoneManager;
-    private final UnityCommands unityCommands;
     private final BlueMapIntegration blueMapIntegration;
+    private final Map<Location, Location> containerToSourceSign = new HashMap<>();
+    private static UpgradesConfig C;
 
     public SignManager(UnityLauncher unityLauncher, File dataFolder, ZoneManager zoneManager, BlueMapIntegration blueMapIntegration, UnityCommands unityCommands) {
         this.unityLauncher = unityLauncher;
         this.dataFolder = dataFolder;
         this.zoneManager = zoneManager;
         this.blueMapIntegration = blueMapIntegration;
-        this.unityCommands = unityCommands;
+
+        if (C == null) C = UpgradesConfig.load(unityLauncher);
     }
 
     private final File dataFolder;
@@ -83,6 +83,58 @@ public class SignManager implements Listener {
     }
     private File signsFile() {
         return new File(getDataFolder(), "signs.yml"); // либо твой фактический путь
+    }
+
+    // === ATM квоты ===
+    private final Map<String, Integer> atmExtraCache = new HashMap<>(); // countryCanonical -> extra
+    private long atmExtraCacheLoadedAt = 0L;
+
+    private int getBaseAtmLimitForCountry(String countryCanonical) {
+        return countryMaxLevel(countryCanonical, C.atmPerm, 40);
+    }
+
+    private void reloadAtmExtraIfNeeded() {
+        long now = System.currentTimeMillis();
+        if ((now - atmExtraCacheLoadedAt) < 10_000L) return; // анти-спам: не чаще раз в 10 сек
+
+        atmExtraCache.clear();
+        File f = new File(getDataFolder(), C.atmFile);
+        if (!f.exists()) { atmExtraCacheLoadedAt = now; return; }
+
+        try {
+            org.bukkit.configuration.file.YamlConfiguration yc =
+                    org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(f);
+            org.bukkit.configuration.ConfigurationSection sec = yc.getConfigurationSection("countries");
+            if (sec != null) {
+                for (String k : sec.getKeys(false)) {
+                    int extra = sec.getInt(k, 0);
+                    atmExtraCache.put(k.toLowerCase(java.util.Locale.ROOT), Math.max(0, extra));
+                }
+            }
+        } catch (Throwable t) {
+            getPlugin().getLogger().severe("[SignManager] Ошибка чтения " + f.getName() + ": " + t.getMessage());
+        }
+        atmExtraCacheLoadedAt = now;
+    }
+
+    private int getAllowedAtm(String countryCanonical) {
+        reloadAtmExtraIfNeeded();
+        int base = getBaseAtmLimitForCountry(countryCanonical);
+        int extra = atmExtraCache.getOrDefault(countryCanonical == null ? "" : countryCanonical.toLowerCase(java.util.Locale.ROOT), 0);
+        return Math.max(0, base + extra);
+    }
+
+    private int countExistingAtmForCountry(String countryCanonical) {
+        if (countryCanonical == null || countryCanonical.isBlank()) return 0;
+        int n = 0;
+        for (Map.Entry<Location, SignVariables> e : genericSignList.entrySet()) {
+            SignVariables sv = e.getValue();
+            if (sv.getSignCategory() != SignCategory.ATM) continue;
+            String owner = sv.getOwnerName();
+            String pc = com.frammy.unitylauncher.upgrades.UpgradeCondition.playerCountryCanonical(owner);
+            if (countryCanonical.equals(pc)) n++;
+        }
+        return n;
     }
 
     @EventHandler
@@ -102,7 +154,7 @@ public class SignManager implements Listener {
         }
 
         if (!e.getBlock().getType().toString().contains("HANGING")) {
-            if (genericSignList.get(sign.getLocation()) != null) {
+            if (genericSignList.containsKey(sign.getLocation())) {
                 resumeScrolling(sign.getLocation());
             }
             if (genericSignList.containsKey(sign.getLocation())) {
@@ -113,18 +165,19 @@ public class SignManager implements Listener {
                         return;
                     }
                 } else {
-                    p.sendMessage(ChatColor.RED + "Ты не являешься владельцем этого магазина!");
+                    sendPrefixed(p, C.errNotOwner);
                     return;
                 }
             }
 
             if (Objects.requireNonNull(e.getLine(0)).equalsIgnoreCase("shop") || Objects.requireNonNull(e.getLine(0)).equalsIgnoreCase("магазин")) {
                 ExtrudeMarker marker = isSignWithinMarker(sign.getLocation(), "zones_shop");
-                String label = marker.getLabel();
-                if (label.isEmpty()) {
+                if (marker == null) {
                     e.setCancelled(true);
-                    p.sendMessage(ChatColor.RED + "Табличку о продаже можно ставить только в пределах магазина!");
+                    p.sendMessage(ChatColor.RED + "Таблички магазина можно ставить только внутри зоны магазина.");
+                    return;
                 } else {
+                    String label = marker.getLabel();
                     //  if (zoneManager.getZoneOwner("shop", marker.get)) {}
                     String line0 = "Торговая точка [ " + label + " ]";
                     e.setLine(0, line0);
@@ -182,7 +235,7 @@ public class SignManager implements Listener {
                             // ⏳ ОТЛОЖЕННО обновляем список товаров, чтобы успела сохраниться табличка
                             Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> updateAllRelatedShopListSigns(sign.getLocation()));
 
-                            p.sendMessage(ChatColor.GREEN + "Список товаров обновлён. Используйте колёсико мыши для прокрутки.");
+                            sendPrefixed(p, C.msgSignUpdatedAll);
                             break;
 
                         case "help":
@@ -198,46 +251,76 @@ public class SignManager implements Listener {
                 }
             }
             if (Objects.requireNonNull(e.getLine(0)).equalsIgnoreCase("ATM")) {
-                if (unityCommands.hasPermissionContaining(p, "0")) {
-                    UnityCommands.getInstance().getPlayerInfo(p.getName(), data -> {
-                        if (data == null) {
-                            p.sendMessage(ChatColor.RED + "Данные не найдены.");
-                        }
-                        new BukkitRunnable() {
-                            @Override
-                            public void run() {
-                                assert data != null;
-                                String line0 = "ATM [" + data.countryName + "]";
-                                Map<Integer, String> linesToScroll = new HashMap<>();
-                                linesToScroll.put(0, line0);
-
-                                sign.setLine(0, line0);
-                                sign.setLine(1, "Коснитесь,");
-                                sign.setLine(2, "чтобы начать");
-                                sign.setLine(3, "");
-                                sign.update();
-
-                                makeSignScrollingLines(e.getBlock().getLocation(), linesToScroll, 6, 13);
-
-                                p.sendMessage("АТМ установлен.");
-                                String markerID = "marker_" + UUID.randomUUID();
-                                genericSignList.put(sign.getLocation(),
-                                        new SignVariables(p.getName(),
-                                                Arrays.asList(line0, "Коснитесь,", "чтобы начать", ""),
-                                                List.of(0),
-                                                false,
-                                                false,
-                                                SignCategory.ATM,
-                                                null,
-                                                markerID));
-                                blueMapIntegration.addBlueMapMarker(markerID, sign.getLocation(), "services", "Сервисы", "point_atm", null, p);
-                            }
-                        }.runTask(UnityLauncher.getInstance());
-                    });
-                } else {
-                    p.sendMessage(ChatColor.RED  +"Недостаточно прав.");
+                // Свисающие таблички нельзя — оставляем твою проверку выше
+                if (e.getBlock().getType().toString().contains("HANGING")) {
+                    p.sendMessage(ChatColor.RED + "Свисающие таблички нельзя использовать в качестве банковского автомата!");
+                    return;
                 }
+
+                // Кто владелец страны?
+                String pc = com.frammy.unitylauncher.upgrades.UpgradeCondition.playerCountryCanonical(p.getName());
+                if (pc == null || pc.isBlank()) {
+                    e.setCancelled(true);
+                    p.sendMessage(ChatColor.RED + "ATM можно ставить только будучи в составе страны.");
+                    return;
+                }
+
+                // Квота
+                int allowed = getAllowedAtm(pc);
+                int have = countExistingAtmForCountry(pc);
+                if (have >= allowed) {
+                    e.setCancelled(true);
+                    p.sendMessage(ChatColor.RED + "Достигнут лимит ATM для страны [" + pc + "]: " + have + "/" + allowed
+                            + ChatColor.GRAY + ". Купите расширение или повысите уровень.");
+                    return;
+                }
+                Bukkit.getLogger().info("[ATM] pc=" + pc
+                        + " allowed=" + getAllowedAtm(pc)
+                        + " have=" + countExistingAtmForCountry(pc)
+                        + " base=" + C.atmPerm);
+
+                // Создаём ATM
+                UnityCommands.getInstance().getPlayerInfo(p.getName(), data -> {
+                    if (data == null) {
+                        new BukkitRunnable(){ @Override public void run(){
+                            p.sendMessage(ChatColor.RED + "Данные не найдены.");
+                        }}.runTask(UnityLauncher.getInstance());
+                        return;
+                    }
+                    new BukkitRunnable() {
+                        @Override public void run() {
+                            String line0 = "ATM [" + data.countryName + "]";
+                            Map<Integer, String> linesToScroll = new HashMap<>();
+                            linesToScroll.put(0, line0);
+
+                            sign.setLine(0, line0);
+                            sign.setLine(1, "Коснитесь,");
+                            sign.setLine(2, "чтобы начать");
+                            sign.setLine(3, "");
+                            sign.update();
+
+                            makeSignScrollingLines(e.getBlock().getLocation(), linesToScroll, 6, 13);
+
+                            sendPrefixed(p, C.msgSignBankCreated + ChatColor.GRAY + " (" + (have + 1) + "/" + allowed + ")");
+
+                            String markerID = "marker_" + UUID.randomUUID();
+                            SignVariables vars = new SignVariables(
+                                    p.getName(),
+                                    Arrays.asList(line0, "Коснитесь,", "чтобы начать", ""),
+                                    List.of(0),
+                                    false,
+                                    false,
+                                    SignCategory.ATM,
+                                    SignState.ATM_MENU,
+                                    markerID
+                            );
+                            genericSignList.put(sign.getLocation(), vars);
+                            blueMapIntegration.addBlueMapMarker(markerID, sign.getLocation(), "services", "Сервисы", "point_atm", null, p);
+                        }
+                    }.runTask(UnityLauncher.getInstance());
+                });
             }
+
         } else {
             if (Objects.requireNonNull(e.getLine(0)).equalsIgnoreCase("ATM")) {
                 p.sendMessage(ChatColor.RED + "Свисающие таблички нельзя использовать в качестве банковского автомата!");
@@ -264,6 +347,7 @@ public class SignManager implements Listener {
             }
         }
     }
+
     public void updateAllRelatedShopListSigns(Location containerLocation) {
         ExtrudeMarker marker = isSignWithinMarker(containerLocation, "zones_shop");
         if (marker == null) return;
@@ -328,18 +412,13 @@ public class SignManager implements Listener {
             signPages.put(signLoc, itemLines);
             signItemData.put(signLoc, allItems);
 
-            SignVariables signVars = genericSignList.get(signLoc);
-            if (signVars != null) {
-                UUID playerId = Bukkit.getOfflinePlayer(signVars.getOwnerName()).getUniqueId();
-                playerScrollIndex.put(playerId, 0);
-            }
-
             Block block = signLoc.getBlock();
             if (block.getState() instanceof Sign sign) {
                 updateSignView(sign, itemLines, 0); // Показываем первые 3 строки
             }
         }
     }
+
     private Location parseContainerLocation(SignVariables vars, World world) {
         if (vars.getSignText().size() < 2) return null;
         String[] coords = vars.getSignText().get(1).split(" ");
@@ -354,6 +433,7 @@ public class SignManager implements Listener {
             return null;
         }
     }
+
     @EventHandler
     public void onPlayerInteract(PlayerInteractEvent e) {
         Action action = e.getAction();
@@ -364,11 +444,42 @@ public class SignManager implements Listener {
 
         Location loc = sign.getLocation();
 
+        // Только наши таблички
+        SignVariables sv0 = genericSignList.get(loc);
+        if (sv0 == null) return;
+
+        // Магазинные таблички редактирует ТОЛЬКО владелец
+        if (sv0.getSignCategory() == SignCategory.SHOP_SOURCE || sv0.getSignCategory() == SignCategory.SHOP_LIST) {
+            // редактирование/привязка только владельцу
+            boolean isOwner = sv0.getOwnerName().equalsIgnoreCase(p.getName());
+
+            // SHIFT+ПКМ — выбрать сундук
+            if (action == Action.RIGHT_CLICK_BLOCK && p.isSneaking()) {
+                if (!isOwner) { sendPrefixed(p, C.errNotOwner); e.setCancelled(true); return; }
+                if (sv0.getSignCategory() == SignCategory.SHOP_SOURCE) {
+                    // включаем режим выбора сундука
+                    signSelectionMap.put(p, b);
+                    p.sendMessage(ChatColor.YELLOW + "Открой нужное хранилище для привязки.");
+                    e.setCancelled(true);
+                    return;
+                }
+            }
+
+            // ПКМ без шифта — редактирование 2 и 3 строки владельцем
+            if (action == Action.RIGHT_CLICK_BLOCK && !p.isSneaking()) {
+                if (!isOwner) { sendPrefixed(p, C.errNotOwner); e.setCancelled(true); return; }
+                // просто ставим паузу прокрутки — как у тебя, редактировать игрок будет руками строки 2 и 3
+                pauseScrolling(loc);
+                return;
+            }
+        }
+
+
         if (e.getAction() == Action.LEFT_CLICK_BLOCK && b.getState() instanceof Sign) {
             SignVariables signVariables = genericSignList.get(sign.getLocation());
 
             if (signVariables == null) return;
-            if (!e.getPlayer().getInventory().getItemInMainHand().equals(new ItemStack(Material.AIR))) return;
+            if (e.getPlayer().getInventory().getItemInMainHand().getType() != Material.AIR) return;
 
             if (signVariables.getSignCategory() == SignCategory.SHOP_LIST) {
                 if (!signPages.containsKey(loc)) return;
@@ -402,7 +513,7 @@ public class SignManager implements Listener {
                     if (p.isSneaking()) {
                         if (!sign.getLine(2).isEmpty() && !sign.getLine(3).isEmpty()) {
                             if (getContainerLocation(sign) == null) {
-                                p.sendMessage(ChatColor.RED + "Вторая строка не содержит координаты хранилища!");
+                                sendPrefixed(p, C.errInvalidFormat);
                                 return;
                             }
                             double price;
@@ -412,7 +523,7 @@ public class SignManager implements Listener {
                                 price = Double.parseDouble(ChatColor.stripColor(sign.getLine(3)));
 
                             } catch (NumberFormatException exc) {
-                                p.sendMessage(ChatColor.RED + "3 и 4 строки должны быть числами.");
+                                sendPrefixed(p, C.errInvalidFormat);
                                 sign.setLine(2, "<Количество>");
                                 sign.setLine(3, "<Цена>");
                                 sign.update();
@@ -450,6 +561,7 @@ public class SignManager implements Listener {
             }
             if (signVariables.getSignState() == SignState.SHOP_DEFINED && signVariables.getSignCategory().equals(SignCategory.SHOP_SOURCE)) {
                 if (p.isSneaking()) {
+                    // Владелец может вернуть в режим редактирования — оставляем твою логику
                     if (genericSignList.get(loc).getOwnerName().equalsIgnoreCase(p.getName())) {
                         List<String> text = signVariables.getSignText();
                         String line2 = text.get(2).replace("Кол-во: " + ChatColor.YELLOW, ChatColor.RESET + "");
@@ -458,106 +570,115 @@ public class SignManager implements Listener {
                         sign.setLine(2, line2);
                         sign.setLine(3, line3);
                         sign.update();
-
                         p.sendMessage(ChatColor.GRAY + "Табличка переключена в режим редактирования.");
                         genericSignList.get(loc).setSignState(SignState.SHOP_UNDEFINED);
                     }
-                } else {
-                    String sellerNickname = signVariables.getOwnerName();
-                    if (sellerNickname.equalsIgnoreCase(p.getName())) return;
-
-                    Double price = Double.parseDouble(signVariables.getSignText().get(3).replace("Цена: " + ChatColor.GREEN, ""));
-                    Integer quantity = Integer.parseInt(signVariables.getSignText().get(2).replace("Кол-во: " + ChatColor.YELLOW, ""));
-                    p.sendMessage(ChatColor.GRAY + "Обработка транзакции..");
-
-                    new BukkitRunnable() {
-                        @Override
-                        public void run() {
-                            // Работа с БД в фоновом потоке
-                            List<String> keys = List.of("money");
-                            Map<String, Object> result = UnityCommands.getInstance().getJsonFieldValues("Users", "GeneralData", "Name", p.getName(), keys);
-                            Double money = result.get("money") instanceof Number ? ((Number) result.get("money")).doubleValue() : null;
-
-                            UnityCommands.getInstance().getPlayerInfo(sellerNickname, data -> {
-                                if (data == null) {
-                                    // Возвращаемся на основной поток
-                                    new BukkitRunnable() {
-                                        @Override
-                                        public void run() {
-                                            p.sendMessage(ChatColor.RED + "Данные о продавце не найдены.");
-                                        }
-                                    }.runTask(UnityLauncher.getInstance());
-                                    return;
-                                }
-
-                                if (money == null || money < price) {
-                                    new BukkitRunnable() {
-                                        @Override
-                                        public void run() {
-                                            p.sendMessage(ChatColor.RED + "Недостаточно средств.");
-                                        }
-                                    }.runTask(UnityLauncher.getInstance());
-                                    return;
-                                }
-
-                                // Переход на основной поток: Bukkit-операции
-                                new BukkitRunnable() {
-                                    @Override
-                                    public void run() {
-                                        try {
-                                            Location chestLocation;
-                                            String[] parts = signVariables.getSignText().get(1).trim().split(" ");
-                                            if (parts.length != 3) throw new IllegalArgumentException("Ожидается 3 координаты");
-
-                                            int x = Integer.parseInt(parts[0]);
-                                            int y = Integer.parseInt(parts[1]);
-                                            int z = Integer.parseInt(parts[2]);
-                                            chestLocation = new Location(sign.getWorld(), x, y, z);
-
-                                            Container container = (Container) chestLocation.getBlock().getState();
-                                            int slot = getFirstOccupiedSlot(container.getInventory());
-
-                                            if (slot == -1) {
-                                                p.sendMessage(ChatColor.RED + "Контейнер пуст, транзакция отменена.");
-                                                return;
-                                            }
-
-                                            ItemStack item = container.getInventory().getItem(slot);
-                                            assert item != null;
-                                            ItemMeta itemMeta = item.getItemMeta();
-                                            String itemName;
-                                            itemName = WordUtils.capitalizeFully(item.getType().name().toLowerCase().replace("_", " "));
-
-                                            Map<Enchantment, Integer> enchantments = itemMeta.getEnchants();
-                                            p.sendMessage(ChatColor.GREEN + "Покупка успешна. " + itemName);
-                                            // БД-обновления можно снова вынести в фоновый поток, если нужно
-                                            new BukkitRunnable() {
-                                                @Override
-                                                public void run() {
-                                                    UnityCommands uc = UnityCommands.getInstance();
-
-                                                    Map<String, Object> sellerUpdates = new HashMap<>();
-                                                    sellerUpdates.put("money", price + data.money);
-                                                    uc.mergeAndUpdatePlayerData(sellerNickname, "GeneralData", sellerUpdates);
-
-                                                    Map<String, Object> buyerUpdates = new HashMap<>();
-                                                    buyerUpdates.put("money", money - price);
-                                                    uc.mergeAndUpdatePlayerData(p.getName(), "GeneralData", buyerUpdates);
-
-                                                    uc.createOrder(sellerNickname, p.getName(), itemName, price, quantity, sign.getLocation(), enchantments);
-                                                }
-                                            }.runTaskAsynchronously(UnityLauncher.getInstance());
-
-                                        } catch (Exception e) {
-                                            p.sendMessage(ChatColor.RED + "Ошибка транзакции: " + e.getMessage());
-                                            e.printStackTrace();
-                                        }
-                                    }
-                                }.runTask(UnityLauncher.getInstance());
-                            });
-                        }
-                    }.runTaskAsynchronously(UnityLauncher.getInstance());
+                    return;
                 }
+
+                String seller = signVariables.getOwnerName();
+                // нормализуем имя (снимем цвета и пробелы, берём "официальный" ник, если возможно)
+                try {
+                    String clean = org.bukkit.ChatColor.stripColor(seller).trim();
+                    java.util.UUID suid = Bukkit.getOfflinePlayer(clean).getUniqueId();
+                    String exact = Bukkit.getOfflinePlayer(suid).getName();
+                    if (exact != null) seller = exact;
+                } catch (Throwable ignore) {}
+                if (seller.equalsIgnoreCase(p.getName())) return; // сам у себя — не покупаем
+
+                double price = Double.parseDouble(signVariables.getSignText().get(3).replace("Цена: " + ChatColor.GREEN, ""));
+                int quantity = Integer.parseInt(signVariables.getSignText().get(2).replace("Кол-во: " + ChatColor.YELLOW, ""));
+
+                p.sendMessage(ChatColor.GRAY + "Обработка транзакции...");
+
+                // Фон: достаём деньги покупателя и инфу продавца
+                String finalSeller = seller;
+                String finalSeller1 = seller;
+                String finalSeller2 = seller;
+                new BukkitRunnable() {
+                    @Override public void run() {
+                        // 1) баланс покупателя
+                        List<String> keys = List.of("money");
+                        Map<String, Object> buyerMap = UnityCommands.getInstance()
+                                .getJsonFieldValues("Users", "GeneralData", "Name", p.getName(), keys);
+                        Double buyerMoney = buyerMap.get("money") instanceof Number ? ((Number) buyerMap.get("money")).doubleValue() : 0.0;
+
+                        if (buyerMoney < price) {
+                            new BukkitRunnable(){ @Override public void run(){
+                                p.sendMessage(ChatColor.RED + "Недостаточно средств.");
+                            }}.runTask(UnityLauncher.getInstance());
+                            return;
+                        }
+
+                        // 2) баланс продавца (может не существовать → 0.0)
+                        Map<String, Object> sellerMap = UnityCommands.getInstance()
+                                .getJsonFieldValues("Users", "GeneralData", "Name", finalSeller2, keys);
+                        Double sellerMoney = sellerMap.get("money") instanceof Number ? ((Number) sellerMap.get("money")).doubleValue() : 0.0;
+
+                        // 3) Дальше — основной поток: предмет/контейнер
+                        new BukkitRunnable(){
+                            @Override public void run() {
+                                try {
+                                    Location chestLoc = getContainerLocation((Sign) b.getState());
+                                    if (chestLoc == null) { p.sendMessage(ChatColor.RED + "Хранилище не привязано."); return; }
+                                    Block cb = chestLoc.getBlock();
+                                    if (!(cb.getState() instanceof Container container)) {
+                                        p.sendMessage(ChatColor.RED + "Хранилище повреждено."); return;
+                                    }
+                                    int slot = getFirstOccupiedSlot(container.getInventory());
+                                    if (slot == -1) { p.sendMessage(ChatColor.RED + "Контейнер пуст."); return; }
+
+                                    ItemStack stack = container.getInventory().getItem(slot);
+                                    if (stack == null || stack.getType().isAir() || stack.getAmount() < quantity) {
+                                        p.sendMessage(ChatColor.RED + "Недостаточно товара в слоте."); return;
+                                    }
+
+                                    ItemStack toGive = stack.clone(); toGive.setAmount(quantity);
+                                    HashMap<Integer, ItemStack> leftovers = p.getInventory().addItem(toGive);
+                                    if (!leftovers.isEmpty()) { p.sendMessage(ChatColor.RED + "Нет места в инвентаре."); return; }
+
+                                    int newAmt = stack.getAmount() - quantity;
+                                    if (newAmt <= 0) container.getInventory().setItem(slot, null);
+                                    else {
+                                        ItemStack newStack = stack.clone(); newStack.setAmount(newAmt);
+                                        container.getInventory().setItem(slot, newStack);
+                                    }
+
+                                    String itemName = org.apache.commons.lang3.text.WordUtils.capitalizeFully(
+                                            toGive.getType().name().toLowerCase().replace("_", " ")
+                                    );
+
+                                    p.sendMessage(ChatColor.GREEN + "Покупка успешна: " + itemName + " ×" + quantity
+                                            + ChatColor.GRAY + " (за " + ChatColor.YELLOW + price + " Ⓕ" + ChatColor.GRAY + ")");
+
+                                    // 4) Обновляем деньги — в фоне (без зависимости от getPlayerInfo(seller))
+                                    new BukkitRunnable(){ @Override public void run(){
+                                        UnityCommands uc = UnityCommands.getInstance();
+
+                                        Map<String, Object> updSeller = new HashMap<>();
+                                        updSeller.put("money", round2(sellerMoney + price));
+                                        uc.mergeAndUpdatePlayerData(finalSeller2, "GeneralData", updSeller);
+
+                                        Map<String, Object> updBuyer = new HashMap<>();
+                                        updBuyer.put("money", round2(buyerMoney - price));
+                                        uc.mergeAndUpdatePlayerData(p.getName(), "GeneralData", updBuyer);
+
+                                        // лог заказа
+                                        uc.createOrder(finalSeller2, p.getName(), itemName, price, quantity, sign.getLocation(),
+                                                (stack.hasItemMeta() ? stack.getItemMeta().getEnchants() : java.util.Map.of()));
+                                    }}.runTaskAsynchronously(UnityLauncher.getInstance());
+
+                                    // 5) Обновим списки
+                                    updateAllRelatedShopListSigns(chestLoc);
+
+                                } catch (Throwable ex) {
+                                    p.sendMessage(ChatColor.RED + "Ошибка транзакции: " + ex.getMessage());
+                                    ex.printStackTrace();
+                                }
+                            }
+                        }.runTask(UnityLauncher.getInstance());
+                    }
+                }.runTaskAsynchronously(UnityLauncher.getInstance());
             }
         }
 
@@ -572,7 +693,7 @@ public class SignManager implements Listener {
         if (action != Action.LEFT_CLICK_BLOCK) return;
 
         // Если табличка в режиме "Коснитесь, чтобы начать"
-        if (sign.getLine(1).equals("Коснитесь,") && genericSignList.containsKey(loc)) {
+        if (ChatColor.stripColor(sign.getLine(1)).equals("Коснитесь,") && genericSignList.containsKey(loc)) {
             p.getItemInHand();
             if (p.getItemInHand().getType() == Material.AIR) {
                 e.setCancelled(true);
@@ -625,6 +746,7 @@ public class SignManager implements Listener {
             scheduleSignReset(loc);
         }
     }
+
     private String formatLocation(Location loc) {
         return String.format("X: %d Y: %d Z: %d", loc.getBlockX(), loc.getBlockY(), loc.getBlockZ());
     }
@@ -640,121 +762,216 @@ public class SignManager implements Listener {
         }
         return -1; // если нет ни одного занятого слота
     }
+
     @EventHandler
     public void onInventoryOpen(InventoryOpenEvent e) {
-        Player p = (Player) e.getPlayer();
+        Inventory inv = e.getInventory();
+        if (!(inv.getHolder() instanceof Container container)) return;
 
-        if (signSelectionMap.containsKey(p)) {
+        final Location containerLoc = container.getBlock().getLocation();
+        final HumanEntity he = e.getPlayer();
+        final Player p = (he instanceof Player) ? (Player) he : null;
+        final String opener = (p != null) ? p.getName() : null;
+
+        // === DEBUG-флаг из конфига (если есть)
+        final boolean DEBUG = (C != null && C.DEBUG);
+
+        // === 1) РЕЖИМ ПРИВЯЗКИ (включён ранее Shift+ПКМ по SHOP_SOURCE)
+        if (p != null && signSelectionMap.containsKey(p)) {
             Block signBlock = signSelectionMap.get(p);
-            Location containerLoc = Objects.requireNonNull(e.getInventory().getHolder()).getInventory().getLocation();
-            Sign sign = (Sign) signBlock.getState();
 
-            if (containerLoc == null) {
-                p.sendMessage(ChatColor.RED + "Ошибка: не удалось получить координаты хранилища.");
-                return;
-            }
-            if (isSignWithinMarker(containerLoc, "zones_shop") == null) {
-                p.sendMessage(ChatColor.RED + "Хранилище находится вне зоны.");
-                return;}
-
-            if (isSignWithinMarker(containerLoc, "zones_shop").equals(isSignWithinMarker(sign.getLocation(), "zones_shop"))) {
-                List<String> text = genericSignList.get(sign.getLocation()).getSignText();
-                genericSignList.get(sign.getLocation()).setSignText(Arrays.asList(text.get(0), containerLoc.getBlockX() + " " + containerLoc.getBlockY() + " " + containerLoc.getBlockZ(), text.get(2), text.get(3)));
-                sign.setLine(1, containerLoc.getBlockX() + " " + containerLoc.getBlockY() + " " + containerLoc.getBlockZ());
-                sign.update();
-
-                p.sendMessage(ChatColor.GREEN + "Новое хранилище выбрано: " +
-                        containerLoc.getBlockX() + " " + containerLoc.getBlockY() + " " + containerLoc.getBlockZ());
+            // Если блока уже нет или это не табличка — снимем режим
+            if (!(signBlock != null && signBlock.getState() instanceof Sign sign)) {
                 signSelectionMap.remove(p);
             } else {
-                p.sendMessage(ChatColor.RED + "Хранилище находится в другой зоне.");
+                // Проверка одинаковой "магазинной" зоны для таблички и контейнера
+                ExtrudeMarker sm = isSignWithinMarker(sign.getLocation(), "zones_shop");
+                ExtrudeMarker cm = isSignWithinMarker(containerLoc, "zones_shop");
+
+                if (sm == null || cm == null || !Objects.equals(sm.getLabel(), cm.getLabel())) {
+                    p.sendMessage(ChatColor.RED + "Хранилище должно быть в той же зоне магазина, что и табличка.");
+                    e.setCancelled(true);
+                    // Режим оставим включённым: игрок сможет открыть корректное хранилище без повторного включения
+                    return;
+                }
+
+                // Привязка координат контейнера ко 2-й строке таблички
+                SignVariables vars = genericSignList.get(sign.getLocation());
+                if (vars != null && vars.getSignCategory() == SignCategory.SHOP_SOURCE) {
+                    List<String> text = new ArrayList<>(vars.getSignText() == null ? List.of() : vars.getSignText());
+                    while (text.size() < 4) text.add("");
+                    String coords = containerLoc.getBlockX() + " " + containerLoc.getBlockY() + " " + containerLoc.getBlockZ();
+                    text.set(1, coords);
+                    vars.setSignText(text);
+
+                    sign.setLine(1, coords);
+                    sign.update();
+
+                    containerToSourceSign.entrySet().stream()
+                            .filter(en -> en.getValue().equals(sign.getLocation()))
+                            .map(Map.Entry::getKey).findFirst().ifPresent(containerToSourceSign::remove);
+
+                    containerToSourceSign.put(containerLoc, sign.getLocation());
+
+                    p.sendMessage(ChatColor.GREEN + "Привязано хранилище: " + formatLocation(containerLoc));
+
+                    // Автообновление связанных SHOP_LIST в этой же зоне
+                    try {
+                        updateAllRelatedShopListSigns(containerLoc);
+                    } catch (Throwable t) {
+                        if (DEBUG) Bukkit.getLogger().warning("[SignManager] updateAllRelatedShopListSigns error: " + t.getMessage());
+                    }
+
+                    // Владелец может сразу работать с контейнером — событие не отменяем.
+                    signSelectionMap.remove(p);
+                } else {
+                    // На всякий случай: режим очистим
+                    signSelectionMap.remove(p);
+                }
             }
         }
+
+        // === 2) ДОСТУП К ПРИВЯЗАННОМУ КОНТЕЙНЕРУ — только владелец SHOP_SOURCE
+        // Линейный проход по нашим табличкам (нормально, их немного; при желании можно проиндексировать)
+        for (Map.Entry<Location, SignVariables> entry : genericSignList.entrySet()) {
+            SignVariables sv = entry.getValue();
+            if (sv == null || sv.getSignCategory() != SignCategory.SHOP_SOURCE) continue;
+
+            Location stored = parseContainerLocation(sv, containerLoc.getWorld());
+            if (stored == null) continue;
+
+            // Нашли ровно тот контейнер, который привязан к табличке
+            if (stored.equals(containerLoc)) {
+                // Не владелец — не пускаем
+                if (!sv.getOwnerName().equalsIgnoreCase(opener)) {
+                    e.setCancelled(true);
+                    if (he instanceof Player pp) {
+                        pp.sendMessage(ChatColor.RED + "Этот сундук связан с магазином. Открывать может только владелец.");
+                    }
+                } else {
+                    // Владелец открыл — мягко обновим списки (без отмены события)
+                    try {
+                        updateAllRelatedShopListSigns(stored);
+                    } catch (Throwable t) {
+                        if (DEBUG) Bukkit.getLogger().warning("[SignManager] updateAllRelatedShopListSigns error: " + t.getMessage());
+                    }
+                }
+                return; // контейнер идентифицирован — дальше искать не нужно
+            }
+        }
+
+        // === 3) Контейнер не привязан ни к одной нашей SHOP_SOURCE — ничего не делаем
     }
 
     @EventHandler
     public void onBlockBreak(BlockBreakEvent event) {
-        Block brokenBlock = event.getBlock();
-        Player player = event.getPlayer();
+        final Block brokenBlock = event.getBlock();
+        final Player player = event.getPlayer();
 
-        // Проверка на случай, если сам блок является табличкой или hanging sign
-        if (brokenBlock.getType().toString().contains("SIGN")) {
-            if (brokenBlock.getState() instanceof Sign sign) {
-                Location loc = sign.getLocation();
-                if (genericSignList.containsKey(loc)) {
-                    if (!genericSignList.get(loc).getOwnerName().equals(player.getName())) {
-                        player.sendMessage(ChatColor.RED + "Вы не можете сломать эту табличку, так как её установил другой игрок.");
-                        event.setCancelled(true);
-                    } else {
-                        String markerId = genericSignList.get(loc).getMarkerID();
-                        if (markerId != null) {
-                            blueMapIntegration.removeBlueMapMarker(markerId, loc.getWorld().getName(), "services");
-                        }
+        // === 0) DEBUG флаг (необязательно)
+        final boolean DEBUG = (C != null && C.DEBUG);
 
-                        genericSignList.remove(loc);
-                        stopScrollingTask(loc);
-
-                        signPages.remove(loc);
-                        playerScrollIndex.remove(Bukkit.getOfflinePlayer(genericSignList.get(loc).getOwnerName()).getUniqueId());
-                    }
-                }
-            }
-        } else {
-            // Проверка на наличие прикрепленной таблички у разрушенного блока
-            boolean hasAttachedSign = false;
-
-            // Проверяем соседние блоки на наличие табличек (включая hanging signs), которые могут зависеть от этого блока
-            for (Map.Entry<Location, SignVariables> entry : genericSignList.entrySet()) {
-                Location signLocation = entry.getKey();
-                Block signBlock = signLocation.getBlock();
-
-                // Если табличка прикреплена к разрушенному блоку
-                if (isAttachedToBlock(signBlock, brokenBlock)) {
-                    hasAttachedSign = true;
-                    // Проверяем, совпадает ли ник игрока с ником, который установил табличку
-                    if (!entry.getValue().getOwnerName().equals(player.getName())) {
-                        player.sendMessage(ChatColor.RED + "Вы не можете сломать эту табличку, так как её установил другой игрок.");
+        // === 1) Если ломают саму табличку (включая hanging sign)
+        if (brokenBlock.getState() instanceof Container) {
+            Location signLoc = containerToSourceSign.get(brokenBlock.getLocation());
+            if (signLoc != null) {
+                SignVariables sv = genericSignList.get(signLoc);
+                if (sv != null && sv.getSignCategory() == SignCategory.SHOP_SOURCE) {
+                    // только владелец таблички может ломать привязанный контейнер
+                    if (!sv.getOwnerName().equalsIgnoreCase(player.getName())) {
+                        player.sendMessage(ChatColor.RED + "Этот контейнер привязан к магазинной табличке. Ломать может только владелец (" + sv.getOwnerName() + ").");
                         event.setCancelled(true);
                         return;
                     }
-                    //atmSignData.remove(idToRemove);
-                    String markerId = genericSignList.get(signLocation).getMarkerID();
-                    if (markerId != null) {
-                        blueMapIntegration.removeBlueMapMarker(markerId, signLocation.getWorld().getName(), "services");
-                    }
-                    genericSignList.remove(signLocation);
-                    stopScrollingTask(signLocation);
+                    // владелец ломает — разрешаем и чистим индексы
+                    containerToSourceSign.remove(brokenBlock.getLocation());
+                    sv.setSignState(SignState.SHOP_UNDEFINED);
+                    List<String> text = new ArrayList<>(sv.getSignText() == null ? List.of("", "", "", "") : sv.getSignText());
+                    while (text.size() < 4) text.add("");
+                    String line2 = text.get(2).replace("Кол-во: " + ChatColor.YELLOW, ChatColor.RESET + "");
+                    String line3 = text.get(3).replace("Цена: "    + ChatColor.GREEN, ChatColor.RESET + "");
+                    sv.setSignText(Arrays.asList(text.get(0), ChatColor.RED + "Разрушено", line2, line3));
 
-                    signPages.remove(signLocation);
-                    playerScrollIndex.remove(Bukkit.getOfflinePlayer(genericSignList.get(signLocation).getOwnerName()).getUniqueId());
-                    break;
+                    Block signBlock = signLoc.getBlock();
+                    if (signBlock.getState() instanceof Sign srcSign) {
+                        srcSign.setLine(1, ChatColor.RED + "Разрушено");
+                        srcSign.setLine(2, line2);
+                        srcSign.setLine(3, line3);
+                        srcSign.update();
+                    }
                 }
             }
-            if (!hasAttachedSign) {
+        }
+
+        // === 2) Если ломают НЕ табличку. Проверяем соседние 6 блоков на наличие табличек,
+        // прикреплённых к ЭТОМУ блоку (вместо сканирования ВСЕГО genericSignList)
+        final BlockFace[] faces = { BlockFace.NORTH, BlockFace.SOUTH, BlockFace.EAST, BlockFace.WEST, BlockFace.UP, BlockFace.DOWN };
+        boolean hadAttachedSign = false;
+
+        for (BlockFace f : faces) {
+            final Block nb = brokenBlock.getRelative(f);
+            if (!(nb.getState() instanceof Sign neighborSign)) continue;
+
+            final Location signLoc = nb.getLocation();
+            final SignVariables sv = genericSignList.get(signLoc);
+            if (sv == null) continue; // не наша
+
+            if (!isAttachedToBlock(nb, brokenBlock)) continue; // табличка не висит на этом блоке
+
+            // Право на удаление
+            if (!sv.getOwnerName().equalsIgnoreCase(player.getName())) {
+                player.sendMessage(ChatColor.RED + "Вы не можете сломать эту табличку, так как её установил другой игрок.");
+                event.setCancelled(true);
                 return;
             }
-            if (brokenBlock.getState() instanceof Container) {
-                for (Location loc : genericSignList.keySet()) {
-                    Block block = loc.getBlock();
-                    Sign sign = (Sign) block.getState();
-                    if (genericSignList.get(loc).getSignCategory().equals(SignCategory.SHOP_SOURCE)) {
-                        if (brokenBlock.getLocation().equals(getContainerLocation(sign))) {
-                            SignVariables sv = genericSignList.get(loc);
-                            sv.setSignState(SignState.SHOP_UNDEFINED);
-                            List<String> text = sv.getSignText();
-                            String line2 = text.get(2).replace("Кол-во: " + ChatColor.YELLOW , ChatColor.RESET + "");
-                            String line3 = text.get(3).replace( "Цена: " + ChatColor.GREEN, ChatColor.RESET + "");
-                            sv.setSignText(Arrays.asList(text.get(0), ChatColor.RED + "Разрушено", line2, line3));
-                            sign.setLine(1, ChatColor.RED + "Разрушено");
-                            sign.setLine(2, line2);
-                            sign.setLine(3, line3);
-                            sign.update();
-                        }
+
+            // BlueMap
+            final String markerId = sv.getMarkerID();
+            if (markerId != null) {
+                blueMapIntegration.removeBlueMapMarker(markerId, signLoc.getWorld().getName(), "services");
+            }
+
+            // Если это SHOP_SOURCE — снимем привязку контейнера из индекса
+            Location stored = parseContainerLocation(sv, signLoc.getWorld());
+            if (stored != null) {
+                containerToSourceSign.remove(stored);
+            }
+
+            // Чистим структуры
+            genericSignList.remove(signLoc);
+            stopScrollingTask(signLoc);
+            signPages.remove(signLoc);
+            UUID uid = null;
+            try { uid = Bukkit.getOfflinePlayer(sv.getOwnerName()).getUniqueId(); } catch (Throwable ignore) {}
+            if (uid != null) playerScrollIndex.remove(uid);
+        }
+
+        // === 3) Если ломают КОНТЕЙНЕР: найдём его в индексе за O(1)
+        if (brokenBlock.getState() instanceof Container) {
+            Location signLoc = containerToSourceSign.remove(brokenBlock.getLocation());
+            if (signLoc != null) {
+                Block signBlock = signLoc.getBlock();
+                if (signBlock.getState() instanceof Sign srcSign) {
+                    SignVariables sv = genericSignList.get(signLoc);
+                    if (sv != null && sv.getSignCategory() == SignCategory.SHOP_SOURCE) {
+                        sv.setSignState(SignState.SHOP_UNDEFINED);
+                        List<String> text = new ArrayList<>(sv.getSignText() == null ? List.of("", "", "", "") : sv.getSignText());
+                        while (text.size() < 4) text.add("");
+
+                        String line2 = text.get(2).replace("Кол-во: " + ChatColor.YELLOW, ChatColor.RESET + "");
+                        String line3 = text.get(3).replace("Цена: "    + ChatColor.GREEN, ChatColor.RESET + "");
+                        sv.setSignText(Arrays.asList(text.get(0), ChatColor.RED + "Разрушено", line2, line3));
+
+                        srcSign.setLine(1, ChatColor.RED + "Разрушено");
+                        srcSign.setLine(2, line2);
+                        srcSign.setLine(3, line3);
+                        srcSign.update();
                     }
                 }
             }
         }
     }
+
     public Location getContainerLocation(Sign sign) {
 
         String[] coords = sign.getLine(1).split(" ");
@@ -814,6 +1031,7 @@ public class SignManager implements Listener {
         // Показываем срез из 3 элементов, начиная с newIndex
         stopHorizontalScroll(loc, 2);
         String selectedText = updateSignView(sign, items, newIndex);
+        if (!genericSignList.containsKey(loc)) return; // запись могли удалить в процессе
 
         // Если выбранный текст длиннее 15, запускаем прокрутку
         if (selectedText != null && ChatColor.stripColor(selectedText).length() > 15) {
@@ -910,19 +1128,83 @@ public class SignManager implements Listener {
             sign.setLine(3, "<Сумма>");
             sign.update();
             genericSignList.get(loc).setSignState(SignState.ATM_ACTION_READY);
+
             signClickActions.put(sign.getLocation(), () -> {
                 Sign updatedSign = (Sign) sign.getBlock().getState();
+                String targetName = ChatColor.stripColor(updatedSign.getLine(2)).trim();
                 double amount;
+
                 try {
-                    amount = Double.parseDouble(updatedSign.getLine(3));
+                    amount = Double.parseDouble(ChatColor.stripColor(updatedSign.getLine(3)).replace(',', '.'));
                 } catch (NumberFormatException ex) {
                     p.sendMessage(ChatColor.RED + "Введите корректную сумму.");
-                    return; // прерываем выполнение, если ввод некорректный
+                    return;
                 }
+
+                if (targetName.isEmpty() || amount <= 0) {
+                    p.sendMessage(ChatColor.RED + "Укажи ник и сумму > 0.");
+                    return;
+                }
+                if (targetName.equalsIgnoreCase(p.getName())) {
+                    p.sendMessage(ChatColor.RED + "Нельзя перевести самому себе.");
+                    return;
+                }
+
+                p.sendMessage(ChatColor.GRAY + "Проверяем данные и выполняем перевод...");
+
+                new BukkitRunnable() {
+                    @Override public void run() {
+                        List<String> keys = List.of("money");
+                        Map<String, Object> senderMap = UnityCommands.getInstance()
+                                .getJsonFieldValues("Users", "GeneralData", "Name", p.getName(), keys);
+                        Double senderMoney = senderMap.get("money") instanceof Number ? ((Number) senderMap.get("money")).doubleValue() : null;
+
+                        // 2) Ищем получателя
+                        UnityCommands.getInstance().getPlayerInfo(targetName, targetData -> {
+                            if (senderMoney == null) {
+                                new BukkitRunnable(){ @Override public void run(){
+                                    p.sendMessage(ChatColor.RED + "Не удалось получить твой баланс.");
+                                }}.runTask(UnityLauncher.getInstance());
+                                return;
+                            }
+                            if (targetData == null) {
+                                new BukkitRunnable(){ @Override public void run(){
+                                    p.sendMessage(ChatColor.RED + "Игрок '" + targetName + "' не найден.");
+                                }}.runTask(UnityLauncher.getInstance());
+                                return;
+                            }
+                            if (senderMoney < amount) {
+                                new BukkitRunnable(){ @Override public void run(){
+                                    p.sendMessage(ChatColor.RED + "Недостаточно средств. Доступно: " + ChatColor.YELLOW + senderMoney + ChatColor.RED + " Ⓕ.");
+                                }}.runTask(UnityLauncher.getInstance());
+                                return;
+                            }
+
+                            // 3) Атомично (для нас) применяем обе стороны
+                            new BukkitRunnable(){ @Override public void run(){
+                                UnityCommands uc = UnityCommands.getInstance();
+
+                                Map<String, Object> updSender = new HashMap<>();
+                                updSender.put("money", round2(senderMoney - amount));
+                                uc.mergeAndUpdatePlayerData(p.getName(), "GeneralData", updSender);
+
+                                Map<String, Object> updTarget = new HashMap<>();
+                                updTarget.put("money", round2(targetData.money + amount));
+                                uc.mergeAndUpdatePlayerData(targetName, "GeneralData", updTarget);
+
+                                new BukkitRunnable(){ @Override public void run(){
+                                    p.sendMessage(ChatColor.GREEN + "Перевод выполнен: " + ChatColor.YELLOW + amount + " Ⓕ"
+                                            + ChatColor.GREEN + " → " + ChatColor.RESET + targetName);
+                                }}.runTask(UnityLauncher.getInstance());
+                            }}.runTaskAsynchronously(UnityLauncher.getInstance());
+                        });
+                    }
+                }.runTaskAsynchronously(UnityLauncher.getInstance());
 
                 genericSignList.get(loc).setSignState(SignState.ATM_ACTION_READY);
             });
         });
+
         actions.put("Перевод стране", () -> {
             sign.setLine(1, "Укажите данные:");
             sign.setLine(2, "<Сумма>");
@@ -941,6 +1223,10 @@ public class SignManager implements Listener {
         if (block.getState() instanceof Sign) {
             updateSignView((Sign) block.getState(), options, 0);
         }
+    }
+
+    private double round2(double v) {
+        return Math.round(v * 100.0) / 100.0;
     }
 
     // Обновление таблички
@@ -988,6 +1274,7 @@ public class SignManager implements Listener {
         sign.update();
         return highlighted;
     }
+
     private String truncateToVisible(String text) {return (text.length() > 15) ? text.substring(0, 15) : text;}
 
     public void startSignTextScroll(Sign sign, int lineIndex, String fullText, ChatColor color, int visibleWidth, int durationTicks, int intervalTicks, Runnable onComplete) {
@@ -1038,19 +1325,11 @@ public class SignManager implements Listener {
     }
 
     public void stopHorizontalScroll(Location signLocation, int lineIndex) {
-        Map<Integer, BukkitTask> tasksForSign = activeScrolls.get(signLocation);
-        if (tasksForSign != null) {
-            BukkitTask task = tasksForSign.get(lineIndex);
-            if (task != null) {
-                resumeScrolling(signLocation);
-                task.cancel();
-                activeScrolls.remove(signLocation);
-            }
-            if (tasksForSign.isEmpty()) {
-                resumeScrolling(signLocation);
-                activeScrolls.remove(signLocation);
-            }
-        }
+        Map<Integer, BukkitTask> tasks = activeScrolls.get(signLocation);
+        if (tasks == null) return;
+        BukkitTask task = tasks.remove(lineIndex);
+        if (task != null) task.cancel();
+        if (tasks.isEmpty()) activeScrolls.remove(signLocation);
     }
 
     public void saveSignData() {
@@ -1159,15 +1438,21 @@ public class SignManager implements Listener {
             if (category == SignCategory.SHOP_LIST) {
                 Bukkit.getScheduler().runTaskLater(unityLauncher, () -> updateAllRelatedShopListSigns(loc), 20L * 5);
             }
+            if (category == SignCategory.SHOP_SOURCE) {
+                Location stored = parseContainerLocation(vars, world);
+                if (stored != null) containerToSourceSign.put(stored, loc);
+            }
+
         }
     }
 
     public void pauseScrolling(Location location) {
-        genericSignList.get(location).setPaused(true);
+        SignVariables v = genericSignList.get(location);
+        if (v != null) v.setPaused(true);
     }
-
     public void resumeScrolling(Location location) {
-        genericSignList.get(location).setPaused(false);
+        SignVariables v = genericSignList.get(location);
+        if (v != null) v.setPaused(false);
     }
 
     public void makeSignScrollingLines(Location signLocation, Map<Integer, String> originalLines, int intervalTicks, int maxLength) {
@@ -1199,15 +1484,21 @@ public class SignManager implements Listener {
         }
 
         BukkitTask task = Bukkit.getScheduler().runTaskTimer(unityLauncher, () -> {
-            if (!(signLocation.getBlock().getState() instanceof Sign currentSign)) {
-                scrollingTasks.remove(signLocation);
-                genericSignList.get(signLocation).setPaused(false);
+            // === ВСТАВИТЬ САМЫМ ПЕРВЫМ ===
+            SignVariables vars = genericSignList.get(signLocation);
+            if (vars == null) {
+                stopScrollingTask(signLocation); // аккуратно снимает задачу, если есть
                 return;
             }
-            if (genericSignList.get(signLocation) == null) {
-                return;
+            if (vars.getPaused()) {
+                return; // пауза — просто пропускаем тик
             }
-            if (genericSignList.get(signLocation).getPaused()) {
+            // === КОНЕЦ ВСТАВКИ ===
+
+            // Табличка ещё существует?
+            BlockState state = signLocation.getBlock().getState();
+            if (!(state instanceof Sign currentSign)) {
+                stopScrollingTask(signLocation);
                 return;
             }
 
@@ -1234,69 +1525,6 @@ public class SignManager implements Listener {
         scrollingTasks.put(signLocation, task);
     }
 
-    public void restoreScrollingSignsFromFile(FileConfiguration config) {
-        ConfigurationSection signsSection = config.getConfigurationSection("signs");
-        if (signsSection == null) return;
-
-        for (String key : signsSection.getKeys(false)) {
-            ConfigurationSection signSection = signsSection.getConfigurationSection(key);
-            if (signSection == null) continue;
-
-            // Получаем координаты
-            String worldName = signSection.getString("location.world");
-            int x = signSection.getInt("location.x");
-            int y = signSection.getInt("location.y");
-            int z = signSection.getInt("location.z");
-
-            assert worldName != null;
-            World world = Bukkit.getWorld(worldName);
-            if (world == null) continue;
-
-            Location loc = new Location(world, x, y, z);
-            Block block = loc.getBlock();
-            if (!(block.getState() instanceof Sign)) continue;
-
-            // Чтение сохранённых данных
-            List<String> signText = signSection.getStringList("text");
-            List<Integer> scrollLines = signSection.getIntegerList("scrollLines");
-            String owner = signSection.getString("owner", "unknown");
-            boolean isConfigurable = signSection.getBoolean("configurable", false);
-            boolean isPaused = signSection.getBoolean("paused", false);
-            String markerId = signSection.getString("markerId");
-            String categoryRaw = signSection.getString("category", "SHOP_SOURCE");
-            String stateRaw = signSection.getString("state", "SHOP_DEFINED");
-
-            // Преобразуем строковые значения в enum'ы
-            SignCategory category = SignCategory.valueOf(categoryRaw);
-            SignState state = SignState.valueOf(stateRaw);
-
-            // Восстанавливаем объект SignVariables
-            SignVariables vars = new SignVariables(
-                    owner,
-                    signText,
-                    scrollLines,
-                    isConfigurable,
-                    isPaused,
-                    category,
-                    state,
-                    markerId
-            );
-
-            genericSignList.put(loc, vars);
-
-            // Запускаем скролл, если есть
-            Map<Integer, String> scrollMap = new HashMap<>();
-            for (int lineIndex : scrollLines) {
-                if (lineIndex >= 0 && lineIndex <= 3 && lineIndex < signText.size()) {
-                    scrollMap.put(lineIndex, signText.get(lineIndex));
-                }
-            }
-
-            if (!scrollMap.isEmpty()) {
-                makeSignScrollingLines(loc, scrollMap, 8, 13);
-            }
-        }
-    }
     public void stopScrollingTask(Location loc) {
         BukkitTask task = scrollingTasks.remove(loc);
         if (task != null) {
@@ -1306,40 +1534,28 @@ public class SignManager implements Listener {
 
     public void scheduleSignReset(Location loc) {
         // Отменим предыдущую задачу, если была
-        if (resetTasks.containsKey(loc)) {
-            resetTasks.get(loc).cancel();
-        }
+        BukkitTask prev = resetTasks.remove(loc);
+        if (prev != null) prev.cancel();
 
         BukkitTask task = Bukkit.getScheduler().runTaskLater(unityLauncher, () -> {
-            if (genericSignList.get(loc) == null) {
-                resetTasks.remove(loc);
-                return; // табличка больше не отслеживается
-            }
+            // Если запись уже исчезла — ничего не делаем
+            SignVariables sv = genericSignList.get(loc);
+            if (sv == null) { resetTasks.remove(loc); return; }
 
-            // Если сброс сейчас в паузе — повторно планируем задачу
-            if (genericSignList.get(loc).getPaused()) {
-                scheduleSignReset(loc); // запускаем таймер заново
-                return;
-            }
+            // Если сейчас на паузе — перепланируем
+            if (sv.getPaused()) { scheduleSignReset(loc); return; }
 
-            Block block = loc.getBlock();
-            if (!(block.getState() instanceof Sign sign)) {
-                resetTasks.remove(loc);
-                return;
-            }
+            BlockState st = loc.getBlock().getState();
+            if (!(st instanceof Sign sign)) { resetTasks.remove(loc); return; }
 
             String[] lines = originalSignTexts.get(loc);
-            if (lines == null) {
-                resetTasks.remove(loc);
-                return;
+            if (lines != null) {
+                for (int i = 0; i < Math.min(4, lines.length); i++) {
+                    sign.setLine(i, lines[i]);
+                }
+                sign.update();
             }
-
-            for (int i = 0; i < Math.min(4, lines.length); i++) {
-                sign.setLine(i, lines[i]);
-            }
-            sign.update();
-
-            resetTasks.remove(loc); // удаляем завершённую задачу
+            resetTasks.remove(loc);
         }, 20 * 10L); // 10 секунд
 
         resetTasks.put(loc, task);
@@ -1349,7 +1565,7 @@ public class SignManager implements Listener {
         World world = origin.getWorld();
         Block nearest = null;
         double minDistanceSquared = Double.MAX_VALUE;
-
+        boolean badZoneFound = false;
         for (int x = -5; x <= 5; x++) {
             for (int y = -5; y <= 5; y++) {
                 for (int z = -5; z <= 5; z++) {
@@ -1361,7 +1577,7 @@ public class SignManager implements Listener {
                                 minDistanceSquared = distanceSquared;
                                 nearest = block;
                             } else {
-                                p.sendMessage(ChatColor.RED + "Хранилище должно находится внутри той же зоны торговой точки.");
+                                badZoneFound = true;
                             }
 
                         }
@@ -1369,24 +1585,10 @@ public class SignManager implements Listener {
                 }
             }
         }
-        return nearest;
-    }
-
-    public boolean hasPlayerShopBrand(String shopNaming, String owner) {
-        File shopFile = new File(getDataFolder().getParentFile(), "UnityLauncher/signData.yml");
-        FileConfiguration config = YamlConfiguration.loadConfiguration(shopFile);
-
-        ConfigurationSection brandSection = config.getConfigurationSection("shops." + shopNaming);
-        if (brandSection == null) return false;
-
-        for (String shopId : brandSection.getKeys(false)) {
-            ConfigurationSection shopSection = brandSection.getConfigurationSection(shopId);
-            if (shopSection != null && owner.equalsIgnoreCase(shopSection.getString("owner"))) {
-                return true;
-            }
+        if (nearest == null && badZoneFound) {
+            p.sendMessage(ChatColor.RED + "Хранилище должно находиться в той же зоне торговой точки.");
         }
-
-        return false;
+        return nearest;
     }
 
     private boolean isAttachedToBlock(Block signBlock, Block possibleSupportingBlock) {
@@ -1401,51 +1603,63 @@ public class SignManager implements Listener {
     }
 
     public ExtrudeMarker isSignWithinMarker(Location signLocation, String setName) {
+        boolean debug = false;
+        try {
+            debug = UpgradesListener.class.getDeclaredField("DEBUG").getBoolean(null);
+        } catch (Throwable ignored) {}
 
-        Optional<BlueMapAPI> apiOptional = BlueMapAPI.getInstance();
-        if (apiOptional.isPresent()) {
-            BlueMapAPI api = apiOptional.get();
-
-            Optional<BlueMapMap> mapOptional = api.getMap(signLocation.getWorld().getName());
-            if (mapOptional.isPresent()) {
-                BlueMapMap map = mapOptional.get();
-
-                MarkerSet markerSet = map.getMarkerSets().get(setName);
-                if (markerSet != null) {
-                    System.out.println("[DEBUG] Найден MarkerSet с ID" + setName + ". Кол-во маркеров: " + markerSet.getMarkers().size());
-
-                    for (Marker marker : markerSet.getMarkers().values()) {
-                        if (marker instanceof ExtrudeMarker extrudeMarker) {
-                            Shape baseShape = extrudeMarker.getShape();
-                            double minHeight = extrudeMarker.getShapeMinY();
-                            double maxHeight = extrudeMarker.getShapeMaxY();
-                            String label = extrudeMarker.getLabel();
-
-                            Vector2d signPos2D = new Vector2d(signLocation.getX(), signLocation.getZ());
-                            double y = signLocation.getY();
-
-                            boolean insidePolygon = zoneManager.isPointInsidePolygon(signPos2D, Collections.singletonList(baseShape.getPoints()));
-                            boolean insideHeight = y >= minHeight && y <= maxHeight;
-
-                            if (insidePolygon && insideHeight) {
-                                System.out.println("[DEBUG] Табличка попала внутрь маркера: " + label);
-                                return extrudeMarker;
-                            }
-                        }
-                    }
-
-                    System.out.println("[DEBUG] Табличка не попала ни в один маркер в MarkerSet" + setName);
-                } else {
-                    System.out.println("[DEBUG] MarkerSet с ID" + setName + "не найден.");
-                }
-            } else {
-                System.out.println("[DEBUG] Карта не найдена для мира: " + signLocation.getWorld().getName());
-            }
-        } else {
-            System.out.println("[DEBUG] BlueMapAPI не инициализирован!");
+        Optional<BlueMapAPI> apiOpt = BlueMapAPI.getInstance();
+        if (apiOpt.isEmpty()) {
+            if (debug) Bukkit.getLogger().info("[SignManager] BlueMapAPI не инициализирован.");
+            return null;
         }
+        BlueMapAPI api = apiOpt.get();
+
+        Optional<BlueMapMap> mapOpt = api.getMap(signLocation.getWorld().getName());
+        if (mapOpt.isEmpty()) {
+            if (debug) Bukkit.getLogger().info("[SignManager] Карта не найдена для мира " + signLocation.getWorld().getName());
+            return null;
+        }
+        BlueMapMap map = mapOpt.get();
+
+        MarkerSet set = map.getMarkerSets().get(setName);
+        if (set == null) {
+            if (debug) Bukkit.getLogger().info("[SignManager] MarkerSet с ID " + setName + " не найден.");
+            return null;
+        }
+
+        if (debug) Bukkit.getLogger().info("[SignManager] MarkerSet '" + setName + "' содержит " + set.getMarkers().size() + " маркеров.");
+
+        Vector2d sign2D = new Vector2d(signLocation.getX(), signLocation.getZ());
+        double y = signLocation.getY();
+
+        for (Marker marker : set.getMarkers().values()) {
+            if (!(marker instanceof ExtrudeMarker extrude)) continue;
+
+            Shape shape = extrude.getShape();
+            double minY = extrude.getShapeMinY();
+            double maxY = extrude.getShapeMaxY();
+            boolean insidePolygon = zoneManager.isPointInsidePolygon(sign2D, Collections.singletonList(shape.getPoints()));
+            boolean insideHeight = y >= minY && y <= maxY;
+
+            if (debug) {
+                Bukkit.getLogger().info(String.format(
+                        "[SignManager DEBUG] Проверяем маркер '%s': poly=%s, y=%.2f ∈ [%.2f..%.2f]? %s",
+                        extrude.getLabel(),
+                        insidePolygon, y, minY, maxY, insideHeight
+                ));
+            }
+
+            if (insidePolygon && insideHeight) {
+                if (debug) Bukkit.getLogger().info("[SignManager DEBUG] Табличка попала внутрь маркера '" + extrude.getLabel() + "'");
+                return extrude;
+            }
+        }
+
+        if (debug) Bukkit.getLogger().info("[SignManager DEBUG] Табличка не попала ни в один маркер в наборе '" + setName + "'");
         return null;
     }
+
 
     /** Применяет DTO батчами. Мы обновляем ТОЛЬКО существующие записи, чтобы не гадать конструктор. */
     public void applySignsDTOBatched(List<SignDTO> dto, int perTick) {
@@ -1483,7 +1697,6 @@ public class SignManager implements Listener {
             }
         }.runTaskTimer(unityLauncher, 1L, 1L);
     }
-
 
     /** Асинхронно читает YAML и строит DTO, не трогая Bukkit/World/Location. */
     public CompletableFuture<List<SignDTO>> loadSignsDTOAsync() {
@@ -1556,7 +1769,6 @@ public class SignManager implements Listener {
         out.add(new SignDTO(world, x, y, z, cat, owner, label));
     }
 
-
     private String asString(Object o) {
         if (o == null) return null;
         String s = String.valueOf(o).trim();
@@ -1567,6 +1779,19 @@ public class SignManager implements Listener {
         if (o == null) return null;
         if (o instanceof Number n) return n.intValue();
         try { return Integer.parseInt(String.valueOf(o)); } catch (Exception e) { return null; }
+    }
+
+    private String prefix() { return (C != null ? C.signsPrefix : ""); }
+
+    private void sendPrefixed(Player p, String msg) {
+        if (msg == null || msg.isEmpty()) return;
+        p.sendMessage(prefix() + msg);
+    }
+
+    private void sendPrefixed(Player p, String msg, double cost) {
+        if (msg == null) return;
+        String s = msg.replace("%cost%", String.valueOf(cost));
+        p.sendMessage(prefix() + s);
     }
 
 }

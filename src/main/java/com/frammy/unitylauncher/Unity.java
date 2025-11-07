@@ -48,27 +48,77 @@ public class Unity implements CommandExecutor {
                              @NotNull String label,
                              @NotNull String[] args) {
 
+        // --- Команды /login, /register (и алиасы) ---
+        String cmd = command.getName().toLowerCase(Locale.ROOT);
+
+        if (cmd.equals("login") || cmd.equals("l")) {
+            if (!(sender instanceof Player p)) { sender.sendMessage(ChatColor.RED + "Только игроки могут войти."); return true; }
+            if (args.length < 1) { p.sendMessage(ChatColor.YELLOW + "Используй: /login <пароль>"); return true; }
+
+            String password = args[0]; // НЕ логируем и не трогаем
+            UnityLauncher plugin = UnityLauncher.getInstance();
+            var auth = plugin.getAuthService();
+            var authListener = plugin.getAuthListener();
+            var limiter = plugin.getLoginLimiter();
+
+            String ip = (p.getAddress() != null) ? p.getAddress().getAddress().getHostAddress() : null;
+            String key = p.getUniqueId() + "|" + (ip == null ? "" : ip);
+
+            long waitSec = limiter.checkAllowed(key);
+            if (waitSec > 0) {
+                p.sendMessage(ChatColor.RED + "Слишком много неверных попыток. Подожди " + waitSec + " сек.");
+                return true;
+            }
+
+            if (auth.checkPassword(p.getName(), password.toCharArray())) {
+                auth.markSession(p.getName(), ip);
+                limiter.reset(key);
+                authListener.completeLogin(p);
+            } else {
+                limiter.registerFailure(key);
+                p.sendMessage(ChatColor.RED + "Неверный пароль!");
+            }
+            return true;
+        }
+
+        if (cmd.equals("register") || cmd.equals("reg")) {
+            if (!(sender instanceof Player p)) { sender.sendMessage(ChatColor.RED + "Только игроки могут регистрироваться."); return true; }
+            if (args.length < 1) { p.sendMessage(ChatColor.YELLOW + "Используй: /register <пароль>"); return true; }
+
+            String password = args[0];
+            UnityLauncher plugin = UnityLauncher.getInstance();
+            var auth = plugin.getAuthService();
+            var authListener = plugin.getAuthListener();
+
+            if (auth.isRegistered(p.getName())) {
+                p.sendMessage(ChatColor.RED + "Ты уже зарегистрирован. Используй /login.");
+                return true;
+            }
+            String err = com.frammy.unitylauncher.auth.PasswordPolicy.validate(password);
+            if (err != null) {
+                p.sendMessage(ChatColor.RED + err);
+                return true;
+            }
+            if (auth.setNewPassword(p.getName(), password.toCharArray())) {
+                authListener.completeRegister(p);
+            } else {
+                p.sendMessage(ChatColor.RED + "Ошибка регистрации. Попробуй позже.");
+            }
+            return true;
+        }
+
+
         // --- /ul reload (доступно консоли и игрокам с правом) ---
         if (args.length >= 1 && args[0].equalsIgnoreCase("reload")) {
-            // консоль всегда может, игроки — только с пермишеном/OP
             boolean allowed = !(sender instanceof Player) || sender.isOp() || sender.hasPermission("unitylauncher.reload");
             if (!allowed) {
                 sender.sendMessage(ChatColor.RED + "Нет прав: unitylauncher.reload");
                 return true;
             }
-
-            // 1) перечитать config.yml
             plugin.reloadConfig();
-            // Если у тебя есть отдельный класс конфигов апгрейдов — раскомментируй:
-            // UpgradesConfig.load(plugin);
-
-            // 2) перезапустить апгрейды (листенеры/таски)
             UpgradesListener.reload(plugin);
-
-            // 3) по желанию — перечитать зоны с диска (оставь, если зоны редактируешь вручную)
             plugin.getZoneManager().loadZonesFromConfig();
 
-            // 4) (опционально) медленно пересчитать владельцев табличек
              if (plugin.getSignManager() != null) {
                  plugin.getZoneManager().scheduleSignOwnershipRecalc(plugin.getSignManager(), 200);
              }
@@ -104,60 +154,60 @@ public class Unity implements CommandExecutor {
         }
 
         // ===== /ul relations ... =====
-        if (args[0].equalsIgnoreCase("relations")) {
-            if (args.length == 1) {
-                sender.sendMessage(ChatColor.YELLOW + "/ul relations get \"<ДругаяСтрана>\"");
-                sender.sendMessage(ChatColor.YELLOW + "/ul relations set \"<ДругаяСтрана>\" <HOSTILE|NEUTRAL|FRIENDLY>");
-                return true;
-            }
-
-            String sub = args[1].toLowerCase(Locale.ROOT);
-
-            ParsedArg parsed = parseQuotedArg(args);
-            String otherCountry = parsed.value;
-            if (otherCountry == null || otherCountry.isBlank()) {
-                sender.sendMessage(ChatColor.RED + "Укажи страну. " + ChatColor.GRAY +
-                        "Если название содержит пробел, используй кавычки. Пример: \"Моя Страна\"");
-                return true;
-            }
-
-            // синхронное получение своей страны
-            String myCountry = plugin.countryRegistryJdbc.getCountryOfPlayer(p.getName());
-            if (myCountry == null || myCountry.isBlank()) {
-                sender.sendMessage(ChatColor.RED + "Ты не состоишь ни в одном государстве.");
-                return true;
-            }
-
-            DiplomacyService diplomacy = plugin.diplomacy;
-
-            if (sub.equals("get")) {
-                RelationStatus s = diplomacy.getRelation(myCountry, otherCountry);
-                sender.sendMessage(
-                        ChatColor.GOLD + myCountry + ChatColor.GRAY + " ↔ " +
-                                ChatColor.GOLD + otherCountry + ChatColor.GRAY + " = " +
-                                ChatColor.AQUA + s
-                );
-                return true;
-            }
-
-            if (sub.equals("set")) {
-                // parsed.nextIndex — позиция аргумента после имени страны
-                if (parsed.nextIndex >= args.length) {
-                    sender.sendMessage(ChatColor.RED + "Укажи статус: HOSTILE | NEUTRAL | FRIENDLY");
-                    return true;
-                }
-
-                RelationStatus newStatus = RelationStatus.from(args[parsed.nextIndex]);
-                diplomacy.setRelation(myCountry, otherCountry, newStatus);
-
-                sender.sendMessage(ChatColor.GREEN + "Установлено: " +
-                        myCountry + " ↔ " + otherCountry + " = " + newStatus);
-                return true;
-            }
-
-            sender.sendMessage(ChatColor.RED + "Неизвестная подкоманда relations: " + sub);
-            return true;
-        }
+//        if (args[0].equalsIgnoreCase("relations")) {
+//            if (args.length == 1) {
+//                sender.sendMessage(ChatColor.YELLOW + "/ul relations get \"<ДругаяСтрана>\"");
+//                sender.sendMessage(ChatColor.YELLOW + "/ul relations set \"<ДругаяСтрана>\" <HOSTILE|NEUTRAL|FRIENDLY>");
+//                return true;
+//            }
+//
+//            String sub = args[1].toLowerCase(Locale.ROOT);
+//
+//            ParsedArg parsed = parseQuotedArg(args);
+//            String otherCountry = parsed.value;
+//            if (otherCountry == null || otherCountry.isBlank()) {
+//                sender.sendMessage(ChatColor.RED + "Укажи страну. " + ChatColor.GRAY +
+//                        "Если название содержит пробел, используй кавычки. Пример: \"Моя Страна\"");
+//                return true;
+//            }
+//
+//            // синхронное получение своей страны
+//            String myCountry = plugin.countryRegistryJdbc.getCountryOfPlayer(p.getName());
+//            if (myCountry == null || myCountry.isBlank()) {
+//                sender.sendMessage(ChatColor.RED + "Ты не состоишь ни в одном государстве.");
+//                return true;
+//            }
+//
+//            DiplomacyService diplomacy = plugin.diplomacy;
+//
+//            if (sub.equals("get")) {
+//                RelationStatus s = diplomacy.getRelation(myCountry, otherCountry);
+//                sender.sendMessage(
+//                        ChatColor.GOLD + myCountry + ChatColor.GRAY + " ↔ " +
+//                                ChatColor.GOLD + otherCountry + ChatColor.GRAY + " = " +
+//                                ChatColor.AQUA + s
+//                );
+//                return true;
+//            }
+//
+//            if (sub.equals("set")) {
+//                // parsed.nextIndex — позиция аргумента после имени страны
+//                if (parsed.nextIndex >= args.length) {
+//                    sender.sendMessage(ChatColor.RED + "Укажи статус: HOSTILE | NEUTRAL | FRIENDLY");
+//                    return true;
+//                }
+//
+//                RelationStatus newStatus = RelationStatus.from(args[parsed.nextIndex]);
+//                diplomacy.setRelation(myCountry, otherCountry, newStatus);
+//
+//                sender.sendMessage(ChatColor.GREEN + "Установлено: " +
+//                        myCountry + " ↔ " + otherCountry + " = " + newStatus);
+//                return true;
+//            }
+//
+//            sender.sendMessage(ChatColor.RED + "Неизвестная подкоманда relations: " + sub);
+//            return true;
+//        }
 
         // ===== Остальные команды =====
 
@@ -203,9 +253,9 @@ public class Unity implements CommandExecutor {
                     return true;
                 }
 
-                case "rcode":
-                    UnityCommands.getInstance().rCode(sender);
-                    return true;
+//                case "rcode":
+//                    UnityCommands.getInstance().rCode(sender);
+//                    return true;
 
                 case "balance":
                 case "bal": {
@@ -218,9 +268,9 @@ public class Unity implements CommandExecutor {
                     UnityCommands.getInstance().getCountry(sender);
                     return true;
 
-                case "top":
-                    sender.sendMessage("Введи категорию " + ChatColor.GREEN + "<balance/playtime/events>" + ChatColor.RESET + "!");
-                    return true;
+//                case "top":
+//                    sender.sendMessage("Введи категорию " + ChatColor.GREEN + "<balance/playtime/events>" + ChatColor.RESET + "!");
+//                    return true;
 
                 case "change":
                     sender.sendMessage("Введи старый, а затем желаемый пароль!");
@@ -230,22 +280,22 @@ public class Unity implements CommandExecutor {
                     UnityCommands.getInstance().getNotifications(sender);
                     return true;
 
-                case "pay":
-                    sender.sendMessage("Введи ник игрока и сумму, которую вы хотите перечислить.");
-                    return true;
-
-                case "countrybalance":
-                case "cb":
-                    sender.sendMessage("Введи действие и сумму денег.");
-                    return true;
-
-                case "daydeal":
-                    sender.sendMessage("Введи код.");
-                    return true;
-
-                case "group":
-                    sender.sendMessage("Введи категорию " + ChatColor.GREEN + "<list/set/prefix>" + ChatColor.RESET + "!");
-                    return true;
+//                case "pay":
+//                    sender.sendMessage("Введи ник игрока и сумму, которую вы хотите перечислить.");
+//                    return true;
+//
+//                case "countrybalance":
+//                case "cb":
+//                    sender.sendMessage("Введи действие и сумму денег.");
+//                    return true;
+//
+//                case "daydeal":
+//                    sender.sendMessage("Введи код.");
+//                    return true;
+//
+//                case "group":
+//                    sender.sendMessage("Введи категорию " + ChatColor.GREEN + "<list/set/prefix>" + ChatColor.RESET + "!");
+//                    return true;
             }
             return true;
         }
@@ -253,7 +303,6 @@ public class Unity implements CommandExecutor {
         // == 2 аргумента ==
         if (args.length == 2) {
             String sub0 = args[0].toLowerCase(Locale.ROOT);
-
             switch (sub0) {
 
                 case "help": {
@@ -267,8 +316,8 @@ public class Unity implements CommandExecutor {
                         sender.sendMessage(ChatColor.YELLOW + "Команды в категории \"" + category + "\":");
                         List<HelpCommandManager.HelpCommand> categoryCommands =
                                 helpManager.getCommandsByCategory(category);
-                        for (HelpCommandManager.HelpCommand cmd : categoryCommands) {
-                            p.sendMessage(cmd.toComponent());
+                        for (HelpCommandManager.HelpCommand cmdh : categoryCommands) {
+                            p.sendMessage(cmdh.toComponent());
                         }
                     } else {
                         sender.sendMessage(ChatColor.RED + "Категория \"" + category + "\" не найдена.");
@@ -294,17 +343,17 @@ public class Unity implements CommandExecutor {
                     return true;
                 }
 
-                case "top": {
-                    // нормализуем регистр первой буквы
-                    String cat = args[1].substring(0, 1).toUpperCase(Locale.ROOT)
-                            + args[1].substring(1).toLowerCase(Locale.ROOT);
-                    if (cat.equals("Playtime") || cat.equals("Balance") || cat.equals("Events")) {
-                        UnityCommands.getInstance().getTop(sender, cat);
-                    } else {
-                        sender.sendMessage("Введи категорию " + ChatColor.GREEN + "<balance/playtime/events>" + ChatColor.RESET + "!");
-                    }
-                    return true;
-                }
+//                case "top": {
+//                    // нормализуем регистр первой буквы
+//                    String cat = args[1].substring(0, 1).toUpperCase(Locale.ROOT)
+//                            + args[1].substring(1).toLowerCase(Locale.ROOT);
+//                    if (cat.equals("Playtime") || cat.equals("Balance") || cat.equals("Events")) {
+//                        UnityCommands.getInstance().getTop(sender, cat);
+//                    } else {
+//                        sender.sendMessage("Введи категорию " + ChatColor.GREEN + "<balance/playtime/events>" + ChatColor.RESET + "!");
+//                    }
+//                    return true;
+//                }
 
                 case "notifications":
                     if (args[1].equalsIgnoreCase("on") || args[1].equalsIgnoreCase("off")) {
@@ -314,37 +363,37 @@ public class Unity implements CommandExecutor {
                     }
                     return true;
 
-                case "pay":
-                    sender.sendMessage("Введи ник игрока и сумму, которую ты хочешь перечислить.");
-                    return true;
+//                case "pay":
+//                    sender.sendMessage("Введи ник игрока и сумму, которую ты хочешь перечислить.");
+//                    return true;
 
-                case "countrybalance":
-                case "cb":
-                    sender.sendMessage("Введи действие и сумму, которую ты хочешь перечислить.");
-                    return true;
+//                case "countrybalance":
+//                case "cb":
+//                    sender.sendMessage("Введи действие и сумму, которую ты хочешь перечислить.");
+//                    return true;
 
-                case "daydeal":
-                    UnityCommands.getInstance().dayDeal(sender, args[1]);
-                    return true;
+//                case "daydeal":
+//                    UnityCommands.getInstance().dayDeal(sender, args[1]);
+//                    return true;
 
-                case "group": {
-                    String sub1 = args[1].toLowerCase(Locale.ROOT);
-                    switch (sub1) {
-                        case "list":
-                            UnityCommands.getInstance().getGroups(sender);
-                            break;
-                        case "set":
-                            sender.sendMessage("Введи ник игрока и группу, в которую хотите его поместить (только для владельцев стран)");
-                            break;
-                        case "prefix":
-                            sender.sendMessage("Введи группу и префикс, который хотите ей присвоить (без пробелов)");
-                            break;
-                        default:
-                            sender.sendMessage("Введи категорию " + ChatColor.GREEN + "<list/set/prefix>" + ChatColor.RESET + "!");
-                            break;
-                    }
-                    return true;
-                }
+//                case "group": {
+//                    String sub1 = args[1].toLowerCase(Locale.ROOT);
+//                    switch (sub1) {
+//                        case "list":
+//                            UnityCommands.getInstance().getGroups(sender);
+//                            break;
+//                        case "set":
+//                            sender.sendMessage("Введи ник игрока и группу, в которую хотите его поместить (только для владельцев стран)");
+//                            break;
+//                        case "prefix":
+//                            sender.sendMessage("Введи группу и префикс, который хотите ей присвоить (без пробелов)");
+//                            break;
+//                        default:
+//                            sender.sendMessage("Введи категорию " + ChatColor.GREEN + "<list/set/prefix>" + ChatColor.RESET + "!");
+//                            break;
+//                    }
+//                    return true;
+//                }
             }
         }
 
@@ -358,66 +407,66 @@ public class Unity implements CommandExecutor {
                     UnityCommands.getInstance().changePass(sender, args[1], args[2]);
                     return true;
 
-                case "pay":
-                    try {
-                        double sendMoney = Double.parseDouble(args[2]);
-                        UnityCommands.getInstance().pay(sender, args[1], sendMoney, -1);
-                    } catch (Exception ex) {
-                        sender.sendMessage("Введите ник игрока и сумму, которую вы хотите перечислить.");
-                    }
-                    return true;
+//                case "pay":
+//                    try {
+//                        double sendMoney = Double.parseDouble(args[2]);
+//                        UnityCommands.getInstance().pay(sender, args[1], sendMoney, -1);
+//                    } catch (Exception ex) {
+//                        sender.sendMessage("Введите ник игрока и сумму, которую вы хотите перечислить.");
+//                    }
+//                    return true;
 
-                case "countrybalance":
-                case "cb":
-                    try {
-                        if (args[1].equalsIgnoreCase("add") || args[1].equalsIgnoreCase("withdraw")) {
-                            double sendMoney = Double.parseDouble(args[2]);
-                            UnityCommands.getInstance()
-                                    .CountryMoney(sender,
-                                            args[1].equalsIgnoreCase("add"),
-                                            sendMoney);
-                        } else {
-                            sender.sendMessage("Введите действие и сумму денег.");
-                        }
-                    } catch (Exception ex) {
-                        sender.sendMessage("Введите действие и сумму денег.");
-                    }
-                    return true;
-
-                case "group": {
-                    String sub1 = args[1].toLowerCase(Locale.ROOT);
-                    switch (sub1) {
-                        case "set":
-                            sender.sendMessage("Введи ник игрока и группу, в которую хотите его поместить (только для владельцев стран)");
-                            break;
-                        case "prefix":
-                            sender.sendMessage("Введи группу и префикс, который хотите ей присвоить (без пробелов)");
-                            break;
-                        default:
-                            sender.sendMessage("Введи категорию " + ChatColor.GREEN + "<list/set/prefix>" + ChatColor.RESET + "!");
-                            break;
-                    }
-                    return true;
-                }
+//                case "countrybalance":
+//                case "cb":
+//                    try {
+//                        if (args[1].equalsIgnoreCase("add") || args[1].equalsIgnoreCase("withdraw")) {
+//                            double sendMoney = Double.parseDouble(args[2]);
+//                            UnityCommands.getInstance()
+//                                    .CountryMoney(sender,
+//                                            args[1].equalsIgnoreCase("add"),
+//                                            sendMoney);
+//                        } else {
+//                            sender.sendMessage("Введите действие и сумму денег.");
+//                        }
+//                    } catch (Exception ex) {
+//                        sender.sendMessage("Введите действие и сумму денег.");
+//                    }
+//                    return true;
+//
+//                case "group": {
+//                    String sub1 = args[1].toLowerCase(Locale.ROOT);
+//                    switch (sub1) {
+//                        case "set":
+//                            sender.sendMessage("Введи ник игрока и группу, в которую хотите его поместить (только для владельцев стран)");
+//                            break;
+//                        case "prefix":
+//                            sender.sendMessage("Введи группу и префикс, который хотите ей присвоить (без пробелов)");
+//                            break;
+//                        default:
+//                            sender.sendMessage("Введи категорию " + ChatColor.GREEN + "<list/set/prefix>" + ChatColor.RESET + "!");
+//                            break;
+//                    }
+//                    return true;
+//                }
             }
         }
 
-        // == 4 аргумента ==  (/ul group set <ник> <группа>) или (/ul group prefix <группа> <префикс>)
-        if (args.length == 4 && args[0].equalsIgnoreCase("group")) {
-            String sub1 = args[1].toLowerCase(Locale.ROOT);
-            switch (sub1) {
-                case "set":
-                    UnityCommands.getInstance().setGroup(sender, args[2], args[3]);
-                    break;
-                case "prefix":
-                    UnityCommands.getInstance().setPrefix(sender, args[2], args[3]);
-                    break;
-                default:
-                    sender.sendMessage("Введи категорию " + ChatColor.GREEN + "<list/set/prefix>" + ChatColor.RESET + "!");
-                    break;
-            }
-            return true;
-        }
+//        // == 4 аргумента ==  (/ul group set <ник> <группа>) или (/ul group prefix <группа> <префикс>)
+//        if (args.length == 4 && args[0].equalsIgnoreCase("group")) {
+//            String sub1 = args[1].toLowerCase(Locale.ROOT);
+//            switch (sub1) {
+//                case "set":
+//                    UnityCommands.getInstance().setGroup(sender, args[2], args[3]);
+//                    break;
+//                case "prefix":
+//                    UnityCommands.getInstance().setPrefix(sender, args[2], args[3]);
+//                    break;
+//                default:
+//                    sender.sendMessage("Введи категорию " + ChatColor.GREEN + "<list/set/prefix>" + ChatColor.RESET + "!");
+//                    break;
+//            }
+//            return true;
+//        }
 
         // дальше аргументов больше — пока не документировано
         return true;

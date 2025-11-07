@@ -1,10 +1,10 @@
 package com.frammy.unitylauncher;
 
+import com.frammy.unitylauncher.auth.LoginRateLimiter;
 import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
 import com.frammy.unitylauncher.chunkactivity.ChunkActivityHeatmapExporter;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.tab.LuckPermsPrefixService;
-import com.frammy.unitylauncher.tab.TabDatabaseSync;
 import com.frammy.unitylauncher.tab.TabPrefixService;
 import com.frammy.unitylauncher.upgrades.BrandCommand;
 import com.frammy.unitylauncher.upgrades.UpgradesListener;
@@ -13,6 +13,9 @@ import com.frammy.unitylauncher.zones.ZoneManager;
 import com.frammy.unitylauncher.zones.countryrelations.CountryRegistryJdbc;
 import com.frammy.unitylauncher.zones.countryrelations.CountryRelationshipDao;
 import com.frammy.unitylauncher.zones.countryrelations.DiplomacyService;
+import com.frammy.unitylauncher.auth.AuthService;
+import com.frammy.unitylauncher.auth.AuthListener;
+import com.frammy.unitylauncher.auth.AuthBossbarManager;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import net.md_5.bungee.api.chat.ClickEvent;
@@ -34,6 +37,7 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.sql.DataSource;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
@@ -58,10 +62,15 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     private ActivityTracker tracker;
     private WebSocketManager webSocketManager;
     private BlueMapIntegration blueMapIntegration;
+    private LoginRateLimiter loginLimiter;
 
     public DiplomacyService diplomacy;
     public CountryRegistryJdbc countryRegistryJdbc;
     public CountryRelationshipDao countryRelationshipDao;
+
+    public AuthService authService;
+    public AuthListener authListener;
+    public AuthBossbarManager authBossbars;
 
     // DB pool
     private HikariDataSource hikari;
@@ -73,14 +82,26 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     public ZoneActivityCalculations getZoneActivityCalculations() { return zoneActivityCalculations; }
     public DataSource getDataSource() { return hikari; }
     public Set<Player> getAwaitingCorrectCommand() { return awaitingCorrectCommand; }
+    public CountryRegistryJdbc getCountryRegistryJdbc() { return countryRegistryJdbc;}
+    public AuthListener getAuthListener() { return authListener; }
+    public AuthService getAuthService() { return authService; }
+    public LoginRateLimiter getLoginLimiter() { return loginLimiter; }
 
     // cached db.properties + driver status
     private static volatile Properties DB_PROPS;
     private static final AtomicBoolean DRIVER_LOADED = new AtomicBoolean(false);
 
+    // --- AUTH config defaults (можно переопределить из secrets.properties) ---
+    private static long AUTH_TTL_MS = 24L * 60 * 60 * 1000; // 24h
+    private static int AUTH_ITER = 120_000;
+    private static int AUTH_KEY_LEN = 256;
+    private static byte[] AUTH_PEPPER = new byte[0];
+
+
     @Override
     public void onEnable() {
         instance = this;
+        loadAuthSecrets();
 
         // --- register self as listener ---
         Bukkit.getPluginManager().registerEvents(this, this);
@@ -118,10 +139,15 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
         // --- command registration & /ul help wiring ---
         HelpCommandManager helpManager = new HelpCommandManager();
+        Unity unityCmd = new Unity(helpManager, webSocketManager, tracker, zoneManager);
         Objects.requireNonNull(getCommand("unityLauncher"))
-                .setExecutor(new Unity(helpManager, webSocketManager, tracker, zoneManager));
+                .setExecutor(unityCmd);
         Objects.requireNonNull(getCommand("unityLauncher"))
                 .setTabCompleter(new CommandCompleter());
+        Objects.requireNonNull(getCommand("login"))
+                .setExecutor(unityCmd);
+        Objects.requireNonNull(getCommand("register"))
+                .setExecutor(unityCmd);
 
         commandCategories.add("Авторизация");
         commandCategories.add("Финансы");
@@ -239,13 +265,30 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             }
         });
 
+        // --- AUTH ---
+        this.authService  = new com.frammy.unitylauncher.auth.AuthService();
+        this.authBossbars = new com.frammy.unitylauncher.auth.AuthBossbarManager(this);
+        this.authListener = new com.frammy.unitylauncher.auth.AuthListener(this, this.authService, this.authBossbars);
+        this.loginLimiter = new com.frammy.unitylauncher.auth.LoginRateLimiter();
+        getServer().getPluginManager().registerEvents(this.authListener, this);
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> authService.preloadAllAuth());
+        Unity unity = new Unity(helpManager, webSocketManager, tracker, zoneManager);
+        Objects.requireNonNull(getCommand("unityLauncher")).setExecutor(unity);
+        Objects.requireNonNull(getCommand("unityLauncher")).setTabCompleter(new CommandCompleter());
+        Objects.requireNonNull(getCommand("login")).setExecutor(unity);
+        Objects.requireNonNull(getCommand("register")).setExecutor(unity);
+
+        // BlueMap маркеры и таблички
+        blueMapIntegration.initializeBlueMapMarkerStorage("zones_shop");
+        blueMapIntegration.loadBlueMapMarkers();        // ← подними из диска
+        signManager.loadSignData();                     // ← подними signData.yml
+
         getLogger().info("UnityLauncher enabled!");
     }
 
     private @NotNull TabPrefixService getTabPrefixService() {
-        TabDatabaseSync tabDb = new TabDatabaseSync(getDataSource(), "main", "world", this);
         TabPrefixService tabPrefixService =
-                new TabPrefixService(this, this::computeTabPrefixFromCache, tabDb);
+                new TabPrefixService(this, this::computeTabPrefixFromCache);
         LuckPermsPrefixService lpPrefixService =
                 new LuckPermsPrefixService(this);
         tabPrefixService.setLuckPermsPrefixService(lpPrefixService);
@@ -318,6 +361,15 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         if (hikari != null) {
             try { hikari.close(); } catch (Throwable ignore) {}
             hikari = null;
+        }
+
+        try {
+            signManager.saveSignData();                 // ← запиши signData.yml
+            blueMapIntegration.saveBlueMapMarkers("zones_shop"); // если сохраняешь этот набор
+            blueMapIntegration.saveBlueMapMarkers("services");   // ATM/SHOP POI
+        } catch (Throwable t) {
+            getLogger().severe("Save on disable failed: " + t.getMessage());
+            t.printStackTrace();
         }
 
         instance = null;
@@ -539,6 +591,47 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         t.printStackTrace(new PrintWriter(sw));
         Bukkit.getLogger().severe(sw.toString());
     }
+
+    public static long getAuthTtlMs() { return AUTH_TTL_MS; }
+    public static int getAuthIter() { return AUTH_ITER; }
+    public static int getAuthKeyLen() { return AUTH_KEY_LEN; }
+    public static byte[] getAuthPepper() { return AUTH_PEPPER; }
+
+    private void loadAuthSecrets() {
+        try {
+            var props = getProperties();
+
+            String b64 = props.getProperty("auth.pepper.base64", "").trim();
+            if (!b64.isEmpty()) AUTH_PEPPER = java.util.Base64.getDecoder().decode(b64);
+            AUTH_ITER = Integer.parseInt(props.getProperty("auth.iter", "120000").trim());
+            AUTH_KEY_LEN = Integer.parseInt(props.getProperty("auth.keyLen", "256").trim());
+            AUTH_TTL_MS = Long.parseLong(props.getProperty("auth.ttlMs", "86400000").trim());
+
+            getLogger().info("[Auth] secrets loaded: iter=" + AUTH_ITER + " keyLen=" + AUTH_KEY_LEN + " ttlMs=" + AUTH_TTL_MS);
+        } catch (Throwable t) {
+            getLogger().warning("[Auth] failed to load secrets.properties: " + t);
+        }
+    }
+
+    private @NotNull Properties getProperties() throws IOException {
+        java.io.File f = new java.io.File(getDataFolder(), "secrets.properties");
+        if (!f.exists()) {
+            // создай пустой шаблон при первом запуске
+            f.getParentFile().mkdirs();
+            try (var out = new PrintWriter(f, java.nio.charset.StandardCharsets.UTF_8)) {
+                out.println("# UnityLauncher auth secrets");
+                out.println("# auth.pepper.base64=       # <- заполни Base64-строкой");
+                out.println("auth.iter=120000");
+                out.println("auth.keyLen=256");
+                out.println("auth.ttlMs=86400000");
+            }
+        }
+
+        var props = new Properties();
+        try (var in = new java.io.FileInputStream(f)) { props.load(in); }
+        return props;
+    }
+
 
     /* ===================== User-facing error helper ===================== */
 
