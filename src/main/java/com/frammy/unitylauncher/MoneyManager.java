@@ -298,4 +298,78 @@ public class MoneyManager implements Listener {
         return expect != null && expect.equals(sig);
     }
 
+    /**
+     * Проверяет, является ли предмет валидной купюрой/монетой сервера.
+     */
+    public boolean isMoneyItem(ItemStack item) {
+        return verifyMoney(item);
+    }
+
+    /**
+     * Подсчитывает сумму наличных в инвентаре игрока.
+     */
+    public double getInventoryCash(Player player) {
+        if (player == null) return 0.0;
+        Inventory inv = player.getInventory();
+        double sum = 0.0;
+
+        for (ItemStack stack : inv.getStorageContents()) {
+            if (!verifyMoney(stack)) continue;
+
+            double unit = getMoneyValue(stack);
+            if (unit <= 0) continue;
+
+            sum += unit * stack.getAmount();
+        }
+        return round2(sum);
+    }
+
+    /**
+     * Пытается списать указанную сумму наличными из инвентаря игрока.
+     * Если денег недостаточно — вообще ничего не трогает и возвращает false.
+     * Если удалось списать всё — возвращает true.
+     */
+    public boolean spendCash(Player player, double amount) {
+        if (player == null || amount <= 0) return false;
+
+        amount = round2(amount);
+        double available = getInventoryCash(player);
+        if (available + 1e-9 < amount) {
+            // Наличных не хватает — вообще не трогаем инвентарь
+            return false;
+        }
+
+        double remaining = amount;
+        Inventory inv = player.getInventory();
+        ItemStack[] contents = inv.getStorageContents();
+
+        for (int slot = 0; slot < contents.length && remaining > 0; slot++) {
+            ItemStack stack = contents[slot];
+            if (!verifyMoney(stack)) continue;
+
+            double unit = getMoneyValue(stack); // номинал одной штуки
+            if (unit <= 0) continue;
+
+            int canTakeByValue = (int) Math.floor((remaining + 1e-9) / unit);
+            if (canTakeByValue <= 0) continue;
+
+            int take = Math.min(canTakeByValue, stack.getAmount());
+            if (take <= 0) continue;
+
+            int newAmount = stack.getAmount() - take;
+            remaining = round2(remaining - unit * take);
+
+            if (newAmount <= 0) {
+                inv.setItem(slot, null);
+            } else {
+                ItemStack copy = stack.clone();
+                copy.setAmount(newAmount);
+                inv.setItem(slot, copy);
+            }
+        }
+
+        // маленький допуск на плавающую точку
+        return remaining <= 0.009;
+    }
+
 }

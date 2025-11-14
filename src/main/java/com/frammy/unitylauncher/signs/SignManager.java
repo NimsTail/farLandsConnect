@@ -173,9 +173,11 @@ public class SignManager implements Listener {
             if (Objects.requireNonNull(e.getLine(0)).equalsIgnoreCase("shop") || Objects.requireNonNull(e.getLine(0)).equalsIgnoreCase("магазин")) {
                 ExtrudeMarker marker = isSignWithinMarker(sign.getLocation(), "zones_shop");
                 if (marker == null) {
-                    e.setCancelled(true);
-                    p.sendMessage(ChatColor.RED + "Таблички магазина можно ставить только внутри зоны магазина.");
-                    return;
+                    if (!zoneManager.isPlayerOwnerOfShopZoneAt(p.getName(), sign.getLocation())) {
+                        e.setCancelled(true);
+                        p.sendMessage(ChatColor.RED + "Магазинные таблички можно ставить только в вашей SHOP-зоне.");
+                        return;
+                    }
                 } else {
                     String label = marker.getLabel();
                     //  if (zoneManager.getZoneOwner("shop", marker.get)) {}
@@ -589,36 +591,59 @@ public class SignManager implements Listener {
                 double price = Double.parseDouble(signVariables.getSignText().get(3).replace("Цена: " + ChatColor.GREEN, ""));
                 int quantity = Integer.parseInt(signVariables.getSignText().get(2).replace("Кол-во: " + ChatColor.YELLOW, ""));
 
+                // Определяем способ оплаты: наличка или онлайн
+                ItemStack hand = p.getInventory().getItemInMainHand();
+                final boolean payWithCash = unityLauncher.moneyManager.isMoneyItem(hand);
+
                 p.sendMessage(ChatColor.GRAY + "Обработка транзакции...");
 
                 // Фон: достаём деньги покупателя и инфу продавца
                 String finalSeller = seller;
                 String finalSeller1 = seller;
                 String finalSeller2 = seller;
+                final boolean payWithCashFinal = payWithCash;
+
                 new BukkitRunnable() {
                     @Override public void run() {
-                        // 1) баланс покупателя
                         List<String> keys = List.of("money");
-                        Map<String, Object> buyerMap = UnityCommands.getInstance()
-                                .getJsonFieldValues("Users", "GeneralData", "Name", p.getName(), keys);
-                        Double buyerMoney = buyerMap.get("money") instanceof Number ? ((Number) buyerMap.get("money")).doubleValue() : 0.0;
 
-                        if (buyerMoney < price) {
-                            new BukkitRunnable(){ @Override public void run(){
-                                p.sendMessage(ChatColor.RED + "Недостаточно средств.");
-                            }}.runTask(UnityLauncher.getInstance());
-                            return;
+                        double buyerMoney = 0.0;
+                        if (!payWithCashFinal) {
+                            // 1) баланс покупателя (для онлайн-платежа)
+                            Map<String, Object> buyerMap = UnityCommands.getInstance()
+                                    .getJsonFieldValues("Users", "GeneralData", "Name", p.getName(), keys);
+                            buyerMoney = buyerMap.get("money") instanceof Number ? ((Number) buyerMap.get("money")).doubleValue() : 0.0;
+
+                            if (buyerMoney < price) {
+                                double finalBuyerMoney = buyerMoney;
+                                new BukkitRunnable(){ @Override public void run(){
+                                    p.sendMessage(ChatColor.RED + "Недостаточно средств. Баланс: " + ChatColor.YELLOW + finalBuyerMoney + ChatColor.RED + " Ⓕ.");
+                                }}.runTask(UnityLauncher.getInstance());
+                                return;
+                            }
                         }
 
                         // 2) баланс продавца (может не существовать → 0.0)
                         Map<String, Object> sellerMap = UnityCommands.getInstance()
                                 .getJsonFieldValues("Users", "GeneralData", "Name", finalSeller2, keys);
-                        Double sellerMoney = sellerMap.get("money") instanceof Number ? ((Number) sellerMap.get("money")).doubleValue() : 0.0;
+                        double sellerMoney = sellerMap.get("money") instanceof Number ? ((Number) sellerMap.get("money")).doubleValue() : 0.0;
 
-                        // 3) Дальше — основной поток: предмет/контейнер
+                        final double buyerMoneyFinal  = buyerMoney;
+                        final double sellerMoneyFinal = sellerMoney;
+
+                        // 3) Дальше — основной поток: предмет/контейнер + операция с наличкой
                         new BukkitRunnable(){
                             @Override public void run() {
                                 try {
+                                    // Если оплата наличкой — сперва пробуем списать кэш
+                                    if (payWithCashFinal) {
+                                        boolean ok = unityLauncher.moneyManager.spendCash(p, price);
+                                        if (!ok) {
+                                            p.sendMessage(ChatColor.RED + "Недостаточно наличных для покупки.");
+                                            return;
+                                        }
+                                    }
+
                                     Location chestLoc = getContainerLocation((Sign) b.getState());
                                     if (chestLoc == null) { p.sendMessage(ChatColor.RED + "Хранилище не привязано."); return; }
                                     Block cb = chestLoc.getBlock();
@@ -648,20 +673,25 @@ public class SignManager implements Listener {
                                             toGive.getType().name().toLowerCase().replace("_", " ")
                                     );
 
-                                    p.sendMessage(ChatColor.GREEN + "Покупка успешна: " + itemName + " ×" + quantity
+                                    String methodName = payWithCashFinal ? "наличными" : "онлайн";
+                                    p.sendMessage(ChatColor.GREEN + "Покупка успешна (" + methodName + "): " + itemName + " ×" + quantity
                                             + ChatColor.GRAY + " (за " + ChatColor.YELLOW + price + " Ⓕ" + ChatColor.GRAY + ")");
 
-                                    // 4) Обновляем деньги — в фоне (без зависимости от getPlayerInfo(seller))
+                                    // 4) Обновляем деньги — в фоне
                                     new BukkitRunnable(){ @Override public void run(){
                                         UnityCommands uc = UnityCommands.getInstance();
 
                                         Map<String, Object> updSeller = new HashMap<>();
-                                        updSeller.put("money", round2(sellerMoney + price));
+                                        updSeller.put("money", round2(sellerMoneyFinal + price));
                                         uc.mergeAndUpdatePlayerData(finalSeller2, "GeneralData", updSeller);
 
-                                        Map<String, Object> updBuyer = new HashMap<>();
-                                        updBuyer.put("money", round2(buyerMoney - price));
-                                        uc.mergeAndUpdatePlayerData(p.getName(), "GeneralData", updBuyer);
+                                        // Онлайн-платёж: списываем со счёта покупателя.
+                                        // При оплате наличкой баланс покупателя онлайн НЕ трогаем.
+                                        if (!payWithCashFinal) {
+                                            Map<String, Object> updBuyer = new HashMap<>();
+                                            updBuyer.put("money", round2(buyerMoneyFinal - price));
+                                            uc.mergeAndUpdatePlayerData(p.getName(), "GeneralData", updBuyer);
+                                        }
 
                                         // лог заказа
                                         uc.createOrder(finalSeller2, p.getName(), itemName, price, quantity, sign.getLocation(),
@@ -679,6 +709,7 @@ public class SignManager implements Listener {
                         }.runTask(UnityLauncher.getInstance());
                     }
                 }.runTaskAsynchronously(UnityLauncher.getInstance());
+
             }
         }
 
@@ -784,14 +815,15 @@ public class SignManager implements Listener {
             if (!(signBlock != null && signBlock.getState() instanceof Sign sign)) {
                 signSelectionMap.remove(p);
             } else {
-                // Проверка одинаковой "магазинной" зоны для таблички и контейнера
-                ExtrudeMarker sm = isSignWithinMarker(sign.getLocation(), "zones_shop");
-                ExtrudeMarker cm = isSignWithinMarker(containerLoc, "zones_shop");
-
-                if (sm == null || cm == null || !Objects.equals(sm.getLabel(), cm.getLabel())) {
+                // СТАЛО: одна и та же SHOP-зона + владелец этой SHOP-зоны = владелец таблички
+                if (!zoneManager.isSameShopArea(sign.getLocation(), containerLoc)) {
                     p.sendMessage(ChatColor.RED + "Хранилище должно быть в той же зоне магазина, что и табличка.");
                     e.setCancelled(true);
-                    // Режим оставим включённым: игрок сможет открыть корректное хранилище без повторного включения
+                    return;
+                }
+                if (!zoneManager.isPlayerOwnerOfShopZoneAt(p.getName(), sign.getLocation())) {
+                    p.sendMessage(ChatColor.RED + "Привязка доступна только владельцу этой SHOP-зоны.");
+                    e.setCancelled(true);
                     return;
                 }
 
@@ -871,35 +903,59 @@ public class SignManager implements Listener {
         // === 0) DEBUG флаг (необязательно)
         final boolean DEBUG = (C != null && C.DEBUG);
 
-        // === 1) Если ломают саму табличку (включая hanging sign)
-        if (brokenBlock.getState() instanceof Container) {
-            Location signLoc = containerToSourceSign.get(brokenBlock.getLocation());
-            if (signLoc != null) {
-                SignVariables sv = genericSignList.get(signLoc);
-                if (sv != null && sv.getSignCategory() == SignCategory.SHOP_SOURCE) {
-                    // только владелец таблички может ломать привязанный контейнер
-                    if (!sv.getOwnerName().equalsIgnoreCase(player.getName())) {
-                        player.sendMessage(ChatColor.RED + "Этот контейнер привязан к магазинной табличке. Ломать может только владелец (" + sv.getOwnerName() + ").");
-                        event.setCancelled(true);
-                        return;
-                    }
-                    // владелец ломает — разрешаем и чистим индексы
-                    containerToSourceSign.remove(brokenBlock.getLocation());
-                    sv.setSignState(SignState.SHOP_UNDEFINED);
-                    List<String> text = new ArrayList<>(sv.getSignText() == null ? List.of("", "", "", "") : sv.getSignText());
-                    while (text.size() < 4) text.add("");
-                    String line2 = text.get(2).replace("Кол-во: " + ChatColor.YELLOW, ChatColor.RESET + "");
-                    String line3 = text.get(3).replace("Цена: "    + ChatColor.GREEN, ChatColor.RESET + "");
-                    sv.setSignText(Arrays.asList(text.get(0), ChatColor.RED + "Разрушено", line2, line3));
+        // Если блок — в SHOP-зоне, где игрок НЕ владелец — запрещаем ломать таблички магазина и привязанные контейнеры
+        if (zoneManager.getShopZoneAt(brokenBlock.getLocation()) != null
+                && !zoneManager.isPlayerOwnerOfShopZoneAt(player.getName(), brokenBlock.getLocation())) {
 
-                    Block signBlock = signLoc.getBlock();
-                    if (signBlock.getState() instanceof Sign srcSign) {
-                        srcSign.setLine(1, ChatColor.RED + "Разрушено");
-                        srcSign.setLine(2, line2);
-                        srcSign.setLine(3, line3);
-                        srcSign.update();
-                    }
+            // 3.1.1: если сам блок — контейнер, и он привязан к SHOP_SOURCE — запрет
+            if (brokenBlock.getState() instanceof org.bukkit.block.Container) {
+                Location signLoc = containerToSourceSign.get(brokenBlock.getLocation());
+                if (signLoc != null) {
+                    event.setCancelled(true);
+                    player.sendMessage(ChatColor.RED + "Контейнер привязан к магазину. Ломать может только владелец SHOP-зоны.");
+                    return;
                 }
+            }
+
+            // 3.1.2: если есть прикреплённые к этому блоку наши магазинные таблички — запрет
+            for (BlockFace f : new BlockFace[]{ BlockFace.NORTH, BlockFace.SOUTH, BlockFace.EAST, BlockFace.WEST, BlockFace.UP, BlockFace.DOWN }) {
+                Block nb = brokenBlock.getRelative(f);
+                if (!(nb.getState() instanceof Sign neighborSign)) continue;
+                SignVariables sv = genericSignList.get(nb.getLocation());
+                if (sv == null) continue;
+                if (sv.getSignCategory() == SignCategory.SHOP_SOURCE || sv.getSignCategory() == SignCategory.SHOP_LIST) {
+                    event.setCancelled(true);
+                    player.sendMessage(ChatColor.RED + "В магазине ломать может только владелец SHOP-зоны.");
+                    return;
+                }
+            }
+        }
+
+        // === 1) Если ломают саму табличку (включая hanging)
+        if (brokenBlock.getState() instanceof Sign) {
+            Location signLoc = brokenBlock.getLocation();
+            SignVariables sv = genericSignList.get(signLoc);
+            if (sv != null && (sv.getSignCategory() == SignCategory.SHOP_SOURCE || sv.getSignCategory() == SignCategory.SHOP_LIST)) {
+                if (!sv.getOwnerName().equalsIgnoreCase(player.getName())) {
+                    player.sendMessage(ChatColor.RED + "Это магазинная табличка другого игрока (" + sv.getOwnerName() + "). Ломать нельзя.");
+                    event.setCancelled(true);
+                    return;
+                }
+                // Владелец ломает — снимем маркер, индексы и т.д.
+                String markerId = sv.getMarkerID();
+                if (markerId != null) {
+                    blueMapIntegration.removeBlueMapMarker(markerId, signLoc.getWorld().getName(), "services");
+                }
+                Location stored = parseContainerLocation(sv, signLoc.getWorld());
+                if (stored != null) containerToSourceSign.remove(stored);
+                genericSignList.remove(signLoc);
+                stopScrollingTask(signLoc);
+                signPages.remove(signLoc);
+                try {
+                    UUID uid = Bukkit.getOfflinePlayer(sv.getOwnerName()).getUniqueId();
+                    playerScrollIndex.remove(uid);
+                } catch (Throwable ignore) {}
+                return;
             }
         }
 
@@ -1566,27 +1622,38 @@ public class SignManager implements Listener {
         Block nearest = null;
         double minDistanceSquared = Double.MAX_VALUE;
         boolean badZoneFound = false;
+
+        // Маркер зоны самой таблички
+        ExtrudeMarker signMarker = isSignWithinMarker(origin, "zones_shop");
+
         for (int x = -5; x <= 5; x++) {
             for (int y = -5; y <= 5; y++) {
                 for (int z = -5; z <= 5; z++) {
                     Block block = world.getBlockAt(origin.clone().add(x, y, z));
-                    if (block.getState() instanceof Container) {
-                        double distanceSquared = origin.distanceSquared(block.getLocation());
-                        if (distanceSquared < minDistanceSquared) {
-                            if (isSignWithinMarker(origin, "zones_shop").equals(isSignWithinMarker(block.getLocation(), "zones_shop"))) {
-                                minDistanceSquared = distanceSquared;
-                                nearest = block;
-                            } else {
-                                badZoneFound = true;
-                            }
+                    if (!(block.getState() instanceof Container)) continue;
 
-                        }
+                    double dist2 = origin.distanceSquared(block.getLocation());
+                    ExtrudeMarker chestMarker = isSignWithinMarker(block.getLocation(), "zones_shop");
+
+                    boolean sameZone = (signMarker != null && chestMarker != null
+                            && Objects.equals(signMarker.getLabel(), chestMarker.getLabel()));
+                    if (!sameZone) { badZoneFound = true; continue; }
+
+                    // НОВОЕ: владелец SHOP-зоны должен совпадать с игроком
+                    if (!isShopMarkerOwnedBy(chestMarker, p.getName(), world)) {
+                        badZoneFound = true;
+                        continue;
+                    }
+
+                    if (dist2 < minDistanceSquared) {
+                        minDistanceSquared = dist2;
+                        nearest = block;
                     }
                 }
             }
         }
         if (nearest == null && badZoneFound) {
-            p.sendMessage(ChatColor.RED + "Хранилище должно находиться в той же зоне торговой точки.");
+            p.sendMessage(ChatColor.RED + "Хранилище должно находиться в твоей зоне магазина.");
         }
         return nearest;
     }
@@ -1794,4 +1861,49 @@ public class SignManager implements Listener {
         p.sendMessage(prefix() + s);
     }
 
+    // === OWNERSHIP CHECK: принадлежит ли этот SHOP-маркер игроку? ===
+    private boolean isShopMarkerOwnedBy(de.bluecolored.bluemap.api.markers.ExtrudeMarker marker, String playerName, World world) {
+        if (marker == null || playerName == null || world == null || zoneManager == null) return false;
+        final String label = marker.getLabel(); // имя зоны на карте == ZoneInfo.getName()
+        if (label == null || label.isBlank()) return false;
+
+        // Находим зону типа SHOP с таким именем в этом мире и сверяем владельца.
+        return zoneManager.getAllZonesSnapshot().stream()
+                .filter(z -> z.getType() == com.frammy.unitylauncher.zones.ZoneType.SHOP)
+                .filter(z -> z.getName() != null && z.getName().equals(label))
+                .filter(z -> z.getWorld() != null && z.getWorld().getUID().equals(world.getUID()))
+                .anyMatch(z -> z.getOwner() != null && z.getOwner().equalsIgnoreCase(playerName));
+    }
+
+    @org.bukkit.event.EventHandler(ignoreCancelled = true, priority = org.bukkit.event.EventPriority.HIGHEST)
+    public void onEntityExplode(org.bukkit.event.entity.EntityExplodeEvent e) {
+        protectShopBlocksFromExplosion(e.blockList());
+    }
+
+    @org.bukkit.event.EventHandler(ignoreCancelled = true, priority = org.bukkit.event.EventPriority.HIGHEST)
+    public void onBlockExplode(org.bukkit.event.block.BlockExplodeEvent e) {
+        protectShopBlocksFromExplosion(e.blockList());
+    }
+
+    private void protectShopBlocksFromExplosion(java.util.List<Block> blocks) {
+        // Удаляем из списка на разрушение: (а) наши магазинные таблички; (б) привязанные контейнеры
+        blocks.removeIf(b -> {
+            // Если блок в SHOP-зоне — проверяем ниже
+            if (zoneManager.getShopZoneAt(b.getLocation()) == null) return false;
+
+            // (а) табличка из нашего списка и это SHOP_* табличка
+            if (b.getState() instanceof Sign) {
+                SignVariables sv = genericSignList.get(b.getLocation());
+                if (sv != null && (sv.getSignCategory() == SignCategory.SHOP_SOURCE || sv.getSignCategory() == SignCategory.SHOP_LIST)) {
+                    return true; // защитить
+                }
+            }
+
+            // (б) контейнер, привязанный к SHOP_SOURCE
+            if (b.getState() instanceof org.bukkit.block.Container) {
+                return containerToSourceSign.containsKey(b.getLocation()); // защитить
+            }
+            return false;
+        });
+    }
 }

@@ -15,6 +15,8 @@ import de.bluecolored.bluemap.api.math.Color;
 import de.bluecolored.bluemap.api.math.Shape;
 import net.md_5.bungee.api.ChatMessageType;
 import net.md_5.bungee.api.chat.ClickEvent;
+import net.md_5.bungee.api.chat.ComponentBuilder;
+import net.md_5.bungee.api.chat.HoverEvent;
 import net.md_5.bungee.api.chat.TextComponent;
 import org.bukkit.*;
 import org.bukkit.Location;
@@ -28,6 +30,7 @@ import org.bukkit.inventory.ItemStack;
 
 import java.io.File;
 import java.io.IOException;
+import java.sql.Connection;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.*;
@@ -1014,7 +1017,7 @@ public class ZoneManager {
         // 5) Если удалили страну — уходим в фон и делаем РОВНО ОДНУ БД-транзакцию
         if (zi.getType() == ZoneType.COUNTRY) {
             Bukkit.getScheduler().runTaskAsynchronously(ul, () -> {
-                try (java.sql.Connection conn = UnityLauncher.DBConnect()) {
+                try (Connection conn = UnityLauncher.DBConnect()) {
                     if (conn == null) {
                         throw new RuntimeException("DBConnect() вернул null");
                     }
@@ -1076,11 +1079,43 @@ public class ZoneManager {
                     .append(String.format(Locale.US, "%.3f", hours.get(i))).append("\n");
         }
 
-        net.md_5.bungee.api.chat.TextComponent msg =
-                new net.md_5.bungee.api.chat.TextComponent(ChatColor.GREEN + "Текущая дневная стоимость: " + ChatColor.GOLD + String.format(Locale.US, "%.2f", cost) + "Ⓕ");
-        msg.setHoverEvent(new net.md_5.bungee.api.chat.HoverEvent(net.md_5.bungee.api.chat.HoverEvent.Action.SHOW_TEXT,
-                new net.md_5.bungee.api.chat.ComponentBuilder(hover.toString()).create()));
+        TextComponent msg =
+                new TextComponent(ChatColor.GREEN + "Текущая дневная стоимость: " + ChatColor.GOLD + String.format(Locale.US, "%.2f", cost) + "Ⓕ");
+        msg.setHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT,
+                new ComponentBuilder(hover.toString()).create()));
         p.spigot().sendMessage(msg);
+    }
+
+    private String resolveDisplayCountry(ZoneInfo z) {
+        if (z == null) return "—";
+
+        // 1) Если зона сама страна — её имя и есть страна
+        if (z.getType() == ZoneType.COUNTRY) {
+            return (z.getName() != null && !z.getName().isBlank()) ? z.getName() : "—";
+        }
+
+        // 2) Если это колония — страна владельца (ownerCountry) или имя зоны-страны (fallback)
+        if (z.getType() == ZoneType.COLONY) {
+            String c = z.getCountryName();
+            if (c != null && !c.isBlank()) return c;
+            // На всякий случай — fallback к имени
+            return (z.getName() != null && !z.getName().isBlank()) ? z.getName() : "—";
+        }
+
+        // 3) Внутренняя зона: ищем родителя (COUNTRY/COLONY), который полностью содержит полигоны z
+        try {
+            ZoneInfo parent = findSingleContainingZoneOfTypes(z.getCorners(), Set.of(ZoneType.COUNTRY, ZoneType.COLONY));
+            if (parent != null) {
+                String pc = zoneCountry(parent); // уже есть статический helper ниже в файле
+                if (pc != null && !pc.isBlank()) return pc;
+                // для COUNTRY zoneCountry(parent) возвращает имя зоны, так что сюда редко попадём
+                return (parent.getName() != null && !parent.getName().isBlank()) ? parent.getName() : "—";
+            }
+        } catch (Throwable ignored) { /* защитный контур — ничего страшного, покажем "—" */ }
+
+        // 4) Магазины и прочее вне стран: если у самой зоны задан ownerCountry — используем его
+        String own = z.getCountryName();
+        return (own != null && !own.isBlank()) ? own : "—";
     }
 
     // ==== Player location → zone ====
@@ -1090,19 +1125,41 @@ public class ZoneManager {
 
         if (Objects.equals(prev, next)) return;
 
-        if (prev == null) {
-            ZoneTypeData ztd = zoneLimits.get(next.getType());
-            if (ztd != null) p.spigot().sendMessage(ChatMessageType.ACTION_BAR,
-                    new TextComponent(ChatColor.GOLD + ztd.displayName() + " \"" + next.getName() + "\""));
-        } else if (next == null) {
-            p.spigot().sendMessage(ChatMessageType.ACTION_BAR, new TextComponent(ChatColor.RED + "Вы покинули зону"));
+        // Подготовим тексты
+        if (next == null) {
+            // Вышли из любой зоны
+            // Большой: Title "Вы покинули зону"
+            p.sendTitle(ChatColor.RED + "Вы покинули зону", "", 5, 40, 10);
+
+            // Маленький: страна отсутствует
+            p.spigot().sendMessage(ChatMessageType.ACTION_BAR,
+                    new TextComponent(ChatColor.DARK_GRAY + "Страна: " + ChatColor.GRAY + "—"));
+
         } else {
             ZoneTypeData ztd = zoneLimits.get(next.getType());
-            if (ztd != null) p.spigot().sendMessage(ChatMessageType.ACTION_BAR,
-                    new TextComponent(ChatColor.YELLOW + "\"" + prev.getName() + "\"" + ChatColor.GRAY + " → " + ChatColor.GOLD + ztd.displayName() + " \"" + next.getName() + "\""));
+            String typeName = (ztd != null ? ztd.displayName() : next.getType().name());
+            String zoneName = next.getName();
+
+            // Большой: Title с типом и названием зоны (а если был prev — короткий «A → B» тоже вмещается в сабтайтл)
+            String title = ChatColor.GOLD + typeName;
+            String subtitle;
+            if (prev == null) {
+                subtitle = ChatColor.YELLOW + "«" + zoneName + "»";
+            } else {
+                subtitle = ChatColor.GRAY + "из " + ChatColor.YELLOW + "«" + prev.getName() + "»"
+                        + ChatColor.GRAY + " → " + ChatColor.GOLD + "«" + zoneName + "»";
+            }
+            p.sendTitle(title, subtitle, 5, 40, 10);
+
+            // Маленький: страна зоны/родителя
+            String country = resolveDisplayCountry(next);
+            p.spigot().sendMessage(ChatMessageType.ACTION_BAR,
+                    new TextComponent(ChatColor.DARK_GREEN + "Страна: " + ChatColor.GREEN + country));
         }
+
         playerLastZone.put(p.getUniqueId(), next);
     }
+
 
     public ZoneInfo getZoneAt(Location loc) {
         World w = loc.getWorld();
@@ -1472,6 +1529,60 @@ public class ZoneManager {
         public static boolean eqCi(String a, String b) {
             return a != null && a.equalsIgnoreCase(b);
         }
+    }
+
+    // --- SHOP helpers ---
+
+    /** Возвращает SHOP-зону, которая целиком содержит loc, иначе null. */
+    public ZoneInfo getShopZoneAt(Location loc) {
+        if (loc == null) return null;
+        World w = loc.getWorld();
+        if (w == null) return null;
+        for (ZoneInfo z : zoneList.values()) {
+            if (z.getType() != ZoneType.SHOP) continue;
+            if (!worldOk(z.getCorners(), w)) continue;
+            if (pointInZone(loc, z.getCorners())) return z;
+        }
+        return null;
+    }
+
+    /** true, если loc находится в SHOP-зоне, владельцем которой является playerName (case-insensitive). */
+    public boolean isPlayerOwnerOfShopZoneAt(String playerName, Location loc) {
+        ZoneInfo shop = getShopZoneAt(loc);
+        return shop != null && NameUtil.eqCi(shop.getOwner(), playerName);
+    }
+
+    /** Вернёт label BlueMap-маркера зоны магазина для локации, иначе null. */
+    public String shopLabelAt(Location loc) {
+        try {
+            return BlueMapAPI.getInstance()
+                    .flatMap(api -> api.getMap(loc.getWorld().getName()))
+                    .map(map -> map.getMarkerSets().get("zones_shop"))
+                    .map(set -> {
+                        Vector2d p = new Vector2d(loc.getX(), loc.getZ());
+                        for (Marker m : set.getMarkers().values()) {
+                            if (m instanceof de.bluecolored.bluemap.api.markers.ExtrudeMarker extr) {
+                                Shape shape = extr.getShape();
+                                if (isPointInsidePolygon(p, java.util.Collections.singletonList(shape.getPoints()))) {
+                                    double y = loc.getY();
+                                    if (y >= extr.getShapeMinY() && y <= extr.getShapeMaxY()) {
+                                        return extr.getLabel();
+                                    }
+                                }
+                            }
+                        }
+                        return null;
+                    })
+                    .orElse(null);
+        } catch (Throwable ignore) { return null; }
+    }
+
+    /** true, если обе локации в одном и том же магазине (по BlueMap label). */
+    public boolean isSameShopArea(Location a, Location b) {
+        if (a == null || b == null || a.getWorld() == null || b.getWorld() == null) return false;
+        if (!a.getWorld().getUID().equals(b.getWorld().getUID())) return false;
+        String la = shopLabelAt(a), lb = shopLabelAt(b);
+        return la != null && la.equals(lb);
     }
 
 }
