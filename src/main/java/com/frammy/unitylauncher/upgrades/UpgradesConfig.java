@@ -13,7 +13,7 @@ public final class UpgradesConfig {
     public final int psychSupportLuckTicks;
 
     // redstone
-        public record RedstoneLevelCfg(String perm, String errmsg, Set<Material> allowed) {}
+    public record RedstoneLevelCfg(String perm, String errmsg, Set<Material> allowed) {}
 
     public final RedstoneLevelCfg rsL1, rsL2;
 

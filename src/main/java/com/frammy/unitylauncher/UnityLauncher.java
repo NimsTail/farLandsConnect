@@ -4,13 +4,12 @@ import com.frammy.unitylauncher.auth.AuthBossbarManager;
 import com.frammy.unitylauncher.auth.AuthListener;
 import com.frammy.unitylauncher.auth.AuthService;
 import com.frammy.unitylauncher.auth.LoginRateLimiter;
-import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
-import com.frammy.unitylauncher.chunkactivity.ActivityWeights;
-import com.frammy.unitylauncher.chunkactivity.ChunkActivityHeatmapExporter;
+import com.frammy.unitylauncher.chunkactivity.*;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.tab.LuckPermsPrefixService;
 import com.frammy.unitylauncher.tab.TabPrefixService;
 import com.frammy.unitylauncher.upgrades.BrandCommand;
+import com.frammy.unitylauncher.upgrades.UpgradesConfig;
 import com.frammy.unitylauncher.upgrades.UpgradesListener;
 import com.frammy.unitylauncher.zones.ZoneActivityCalculations;
 import com.frammy.unitylauncher.zones.ZoneManager;
@@ -72,6 +71,10 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     public AuthService authService;
     public AuthListener authListener;
     public AuthBossbarManager authBossbars;
+    private UpgradesConfig upgradesConfig;
+    private ZonesEconomyConfig zonesEconomyConfig;
+    private DailyEconomyTask dailyEconomyTask;
+    private CountryRegistryJdbc countryRegistry;
 
     // server messages (join/quit/advancement)
     private ServerMessagesListener serverMessagesListener;
@@ -119,6 +122,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
         // --- activity tracker (chunk activity sampling) ---
         tracker = new ActivityTracker(this);
+        // --- events → ActivityTracker (blocks, items, mobs, tick load, players) ---
+        safeRegisterListener("ChunkActivityEventsListener",
+                new ChunkActivityEventsListener(this, tracker));
 
         // --- websocket manager for the external launcher bridge ---
         webSocketManager = new WebSocketManager(getLogger());
@@ -299,6 +305,16 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             }
         });
 
+
+        this.upgradesConfig = UpgradesConfig.load(this);
+        this.zonesEconomyConfig = ZonesEconomyConfig.load(this);
+
+        this.countryRegistry = new CountryRegistryJdbc(this);
+
+        UserActivityJdbc userActivityJdbc = new UserActivityJdbc(this);
+        this.dailyEconomyTask = new DailyEconomyTask(this, countryRegistry, userActivityJdbc, zonesEconomyConfig);
+        this.dailyEconomyTask.start();
+
         // --- AUTH ---
         this.authService  = new AuthService();
         this.authBossbars = new AuthBossbarManager(this);
@@ -386,6 +402,12 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             }
         } catch (Throwable t) {
             getLogger().warning("[UnityLauncher] blueMapIntegration save failed: " + t.getMessage());
+        }
+
+        try {
+            if (dailyEconomyTask != null) dailyEconomyTask.stop();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
         }
 
         // shutdown DB pool
@@ -494,6 +516,17 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         }
     }
 
+    public UpgradesConfig getUpgradesConfig() {
+        return upgradesConfig;
+    }
+
+    public ZonesEconomyConfig getZonesEconomyConfig() {
+        return zonesEconomyConfig;
+    }
+
+    public CountryRegistryJdbc getCountryRegistry() {
+        return countryRegistry;
+    }
     /* ===================== DATABASE ===================== */
 
     @Nullable

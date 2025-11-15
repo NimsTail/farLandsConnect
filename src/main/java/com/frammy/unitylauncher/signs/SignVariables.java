@@ -23,10 +23,10 @@ public class SignVariables {
         this.markerID = markerID;
     }
 
-    public boolean getConfigurtable() {
+    public boolean isConfigurable() {
         return isConfigurable;
     }
-    public boolean getPaused() {
+    public boolean isPaused() {
         return isPaused;
     }
     public List<String> getSignText() {

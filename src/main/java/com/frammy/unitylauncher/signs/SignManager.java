@@ -4,6 +4,7 @@ import com.flowpowered.math.vector.Vector2d;
 import com.frammy.unitylauncher.BlueMapIntegration;
 import com.frammy.unitylauncher.UnityCommands;
 import com.frammy.unitylauncher.UnityLauncher;
+import com.frammy.unitylauncher.chunkactivity.ZonesEconomyConfig;
 import com.frammy.unitylauncher.upgrades.UpgradesConfig;
 import com.frammy.unitylauncher.upgrades.UpgradesListener;
 import com.frammy.unitylauncher.zones.ZoneManager;
@@ -88,6 +89,24 @@ public class SignManager implements Listener {
     // === ATM квоты ===
     private final Map<String, Integer> atmExtraCache = new HashMap<>(); // countryCanonical -> extra
     private long atmExtraCacheLoadedAt = 0L;
+
+    // === МУСОРКИ: лимит табличек на страну ===
+    // Пока фиксированная константа. При желании можно вынести в UpgradesConfig / zones-economy.
+    private static final int TRASH_SIGN_LIMIT_PER_COUNTRY = 5;
+
+    private int countExistingTrashForCountry(String countryCanonical) {
+        if (countryCanonical == null || countryCanonical.isBlank()) return 0;
+        int n = 0;
+        for (Map.Entry<Location, SignVariables> e : genericSignList.entrySet()) {
+            SignVariables sv = e.getValue();
+            if (sv.getSignCategory() != SignCategory.TRASH_SELL) continue;
+            String owner = sv.getOwnerName();
+            String pc = com.frammy.unitylauncher.upgrades.UpgradeCondition.playerCountryCanonical(owner);
+            if (countryCanonical.equals(pc)) n++;
+        }
+        return n;
+    }
+
 
     private int getBaseAtmLimitForCountry(String countryCanonical) {
         return countryMaxLevel(countryCanonical, C.atmPerm, 40);
@@ -322,6 +341,60 @@ public class SignManager implements Listener {
                     }.runTask(UnityLauncher.getInstance());
                 });
             }
+            if (Objects.requireNonNull(e.getLine(0)).equalsIgnoreCase("TRASH")
+                    || Objects.requireNonNull(e.getLine(0)).equalsIgnoreCase("МУСОР")
+                    || Objects.requireNonNull(e.getLine(0)).equalsIgnoreCase("MUSOR")) {
+
+                // Свисающие таблички тоже запрещаем
+                if (e.getBlock().getType().toString().contains("HANGING")) {
+                    p.sendMessage(ChatColor.RED + "Свисающие таблички нельзя использовать в качестве мусорного приёмника!");
+                    return;
+                }
+
+                // Должен быть в стране
+                String pc = com.frammy.unitylauncher.upgrades.UpgradeCondition.playerCountryCanonical(p.getName());
+                if (pc == null || pc.isBlank()) {
+                    e.setCancelled(true);
+                    p.sendMessage(ChatColor.RED + "Таблички приёма мусора можно ставить только будучи в составе страны.");
+                    return;
+                }
+
+                // Лимит табличек на страну
+                int have = countExistingTrashForCountry(pc);
+                if (have >= TRASH_SIGN_LIMIT_PER_COUNTRY) {
+                    e.setCancelled(true);
+                    p.sendMessage(ChatColor.RED + "Достигнут лимит мусорных табличек для страны [" + pc + "]: "
+                            + have + "/" + TRASH_SIGN_LIMIT_PER_COUNTRY);
+                    return;
+                }
+
+                // Создаём табличку
+                String line0 = "Мусорка [" + pc + "]";
+                sign.setLine(0, line0);
+                sign.setLine(1, "ПКМ с пустой");
+                sign.setLine(2, "рукой, чтобы");
+                sign.setLine(3, "сдать мусор");
+                sign.update();
+
+                Map<Integer, String> linesToScroll = new HashMap<>();
+                linesToScroll.put(0, line0);
+                makeSignScrollingLines(e.getBlock().getLocation(), linesToScroll, 6, 13);
+
+                SignVariables vars = new SignVariables(
+                        p.getName(),
+                        Arrays.asList(line0, sign.getLine(1), sign.getLine(2), sign.getLine(3)),
+                        List.of(0),
+                        false,
+                        false,
+                        SignCategory.TRASH_SELL,
+                        SignState.SHOP_DEFINED,
+                        null
+                );
+                genericSignList.put(sign.getLocation(), vars);
+
+                p.sendMessage(ChatColor.GREEN + "Табличка приёма мусора установлена. "
+                        + ChatColor.GRAY + "(" + (have + 1) + "/" + TRASH_SIGN_LIMIT_PER_COUNTRY + ")");
+            }
 
         } else {
             if (Objects.requireNonNull(e.getLine(0)).equalsIgnoreCase("ATM")) {
@@ -449,6 +522,24 @@ public class SignManager implements Listener {
         // Только наши таблички
         SignVariables sv0 = genericSignList.get(loc);
         if (sv0 == null) return;
+
+        // === МУСОРНЫЕ ТАБЛИЧКИ (TRASH_SELL) ===
+        if (sv0.getSignCategory() == SignCategory.TRASH_SELL) {
+            // Нас интересует только ПКМ по табличке
+            if (action == Action.RIGHT_CLICK_BLOCK) {
+                // Требуем пустую основную руку, чтобы не пересекаться с редактированием/боем
+                if (p.getInventory().getItemInMainHand().getType() != Material.AIR) {
+                    p.sendMessage(ChatColor.RED + "Освободи основную руку, чтобы сдать мусор.");
+                    e.setCancelled(true);
+                    return;
+                }
+
+                handleTrashSell(p, sign);
+                e.setCancelled(true);
+            }
+            // Никакая другая логика (SHOP/ATM) сюда не должна падать
+            return;
+        }
 
         // Магазинные таблички редактирует ТОЛЬКО владелец
         if (sv0.getSignCategory() == SignCategory.SHOP_SOURCE || sv0.getSignCategory() == SignCategory.SHOP_LIST) {
@@ -601,14 +692,13 @@ public class SignManager implements Listener {
                 String finalSeller = seller;
                 String finalSeller1 = seller;
                 String finalSeller2 = seller;
-                final boolean payWithCashFinal = payWithCash;
 
                 new BukkitRunnable() {
                     @Override public void run() {
                         List<String> keys = List.of("money");
 
                         double buyerMoney = 0.0;
-                        if (!payWithCashFinal) {
+                        if (!payWithCash) {
                             // 1) баланс покупателя (для онлайн-платежа)
                             Map<String, Object> buyerMap = UnityCommands.getInstance()
                                     .getJsonFieldValues("Users", "GeneralData", "Name", p.getName(), keys);
@@ -636,7 +726,7 @@ public class SignManager implements Listener {
                             @Override public void run() {
                                 try {
                                     // Если оплата наличкой — сперва пробуем списать кэш
-                                    if (payWithCashFinal) {
+                                    if (payWithCash) {
                                         boolean ok = unityLauncher.moneyManager.spendCash(p, price);
                                         if (!ok) {
                                             p.sendMessage(ChatColor.RED + "Недостаточно наличных для покупки.");
@@ -673,7 +763,7 @@ public class SignManager implements Listener {
                                             toGive.getType().name().toLowerCase().replace("_", " ")
                                     );
 
-                                    String methodName = payWithCashFinal ? "наличными" : "онлайн";
+                                    String methodName = payWithCash ? "наличными" : "онлайн";
                                     p.sendMessage(ChatColor.GREEN + "Покупка успешна (" + methodName + "): " + itemName + " ×" + quantity
                                             + ChatColor.GRAY + " (за " + ChatColor.YELLOW + price + " Ⓕ" + ChatColor.GRAY + ")");
 
@@ -687,7 +777,7 @@ public class SignManager implements Listener {
 
                                         // Онлайн-платёж: списываем со счёта покупателя.
                                         // При оплате наличкой баланс покупателя онлайн НЕ трогаем.
-                                        if (!payWithCashFinal) {
+                                        if (!payWithCash) {
                                             Map<String, Object> updBuyer = new HashMap<>();
                                             updBuyer.put("money", round2(buyerMoneyFinal - price));
                                             uc.mergeAndUpdatePlayerData(p.getName(), "GeneralData", updBuyer);
@@ -715,6 +805,9 @@ public class SignManager implements Listener {
 
         SignVariables vars = genericSignList.get(loc);
         SignState state = (vars != null) ? vars.getSignState() : SignState.ATM_MENU;
+        if (vars != null && vars.getSignState() != null) {
+            state = vars.getSignState();
+        }
         // RIGHT_CLICK → Пауза прокрутки
         if (action == Action.RIGHT_CLICK_BLOCK) {
             pauseScrolling(loc);
@@ -1400,8 +1493,8 @@ public class SignManager implements Listener {
 
             shopConfig.set(path + ".text", vars.getSignText());
             shopConfig.set(path + ".scrollLines", vars.getScrollLines());
-            shopConfig.set(path + ".isConfigurable", vars.getConfigurtable());
-            shopConfig.set(path + ".isPaused", vars.getPaused());
+            shopConfig.set(path + ".isConfigurable", vars.isConfigurable());
+            shopConfig.set(path + ".isPaused", vars.isPaused());
             shopConfig.set(path + ".owner", vars.getOwnerName());
             shopConfig.set(path + ".category", vars.getSignCategory().toString());
             shopConfig.set(path + ".state", vars.getSignState().toString());
@@ -1461,9 +1554,25 @@ public class SignManager implements Listener {
                 category = SignCategory.valueOf(section.getString("category", "SHOP_INFO"));
             } catch (IllegalArgumentException ignored) {}
 
-            try {
-                state = SignState.valueOf(section.getString("state", "MENU"));
-            } catch (IllegalArgumentException ignored) {}
+            String stateStr = section.getString("state");
+            if (stateStr != null && !stateStr.isBlank()) {
+                try {
+                    state = SignState.valueOf(stateStr);
+                } catch (IllegalArgumentException ignored) {
+                    // упадём в дефолт ниже
+                }
+            }
+
+            if (state == null) {
+                // разумный дефолт по типу таблички
+                if (category == SignCategory.ATM) {
+                    state = SignState.ATM_MENU;
+                } else if (category == SignCategory.SHOP_SOURCE) {
+                    state = SignState.SHOP_UNDEFINED;
+                } else {
+                    state = SignState.SHOP_DEFINED;
+                }
+            }
 
             // Обновляем блок на табличку, если это возможно
             Block block = loc.getBlock();
@@ -1546,7 +1655,7 @@ public class SignManager implements Listener {
                 stopScrollingTask(signLocation); // аккуратно снимает задачу, если есть
                 return;
             }
-            if (vars.getPaused()) {
+            if (vars.isPaused()) {
                 return; // пауза — просто пропускаем тик
             }
             // === КОНЕЦ ВСТАВКИ ===
@@ -1599,7 +1708,7 @@ public class SignManager implements Listener {
             if (sv == null) { resetTasks.remove(loc); return; }
 
             // Если сейчас на паузе — перепланируем
-            if (sv.getPaused()) { scheduleSignReset(loc); return; }
+            if (sv.isPaused()) { scheduleSignReset(loc); return; }
 
             BlockState st = loc.getBlock().getState();
             if (!(st instanceof Sign sign)) { resetTasks.remove(loc); return; }
@@ -1904,6 +2013,90 @@ public class SignManager implements Listener {
                 return containerToSourceSign.containsKey(b.getLocation()); // защитить
             }
             return false;
+        });
+    }
+
+    /**
+     * Продажа мусора по тарифам из zones-economy.yml (economy.trashSell.*).
+     *
+     * Настройки:
+     *  - enabled
+     *  - minStackSize
+     *  - prices (Material -> цена за 1 шт.)
+     *  - blacklist (Material, которые никогда не продаём)
+     *
+     * dailyLimitPerPlayer / globalDailyLimit здесь сознательно не трогаю —
+     * для них нужна отдельная система учёта за сутки.
+     */
+    private void handleTrashSell(Player p, Sign sign) {
+        ZonesEconomyConfig.TrashSell ts = ZonesEconomyConfig.get().trashSell;
+
+        if (!ts.enabled) {
+            p.sendMessage(ChatColor.RED + "Продажа мусора временно отключена на сервере.");
+            return;
+        }
+
+        Inventory inv = p.getInventory();
+        ItemStack[] contents = inv.getStorageContents();
+
+        double totalReward = 0.0;
+        int totalItems = 0;
+
+        for (int slot = 0; slot < contents.length; slot++) {
+            ItemStack stack = contents[slot];
+            if (stack == null || stack.getType().isAir()) continue;
+
+            Material type = stack.getType();
+
+            // Чёрный список — вообще не трогаем
+            if (ts.blacklist.contains(type)) continue;
+
+            Double pricePerOne = ts.prices.get(type);
+            if (pricePerOne == null || pricePerOne <= 0.0) continue;
+
+            int amount = stack.getAmount();
+            if (amount <= 0) continue;
+
+            // Минимальный размер стака для продажи
+            if (amount < ts.minStackSize) continue;
+
+            totalReward += pricePerOne * amount;
+            totalItems += amount;
+
+            // Забираем весь стак
+            inv.setItem(slot, null);
+        }
+
+        totalReward = round2(totalReward);
+
+        if (totalReward <= 0.0 || totalItems <= 0) {
+            p.sendMessage(ChatColor.YELLOW + "В инвентаре нет предметов, которые принимаются как мусор.");
+            return;
+        }
+
+        double finalTotalReward = totalReward;
+        int finalTotalItems = totalItems;
+
+        p.sendMessage(ChatColor.GRAY + "Сдаём мусор...");
+
+        UnityCommands.getInstance().getPlayerInfo(p.getName(), data -> {
+            if (data == null) {
+                new BukkitRunnable(){ @Override public void run(){
+                    p.sendMessage(ChatColor.RED + "Не удалось получить твои данные. Сообщи администрации.");
+                }}.runTask(UnityLauncher.getInstance());
+                return;
+            }
+
+            new BukkitRunnable(){ @Override public void run(){
+                Map<String, Object> updates = new HashMap<>();
+                updates.put("money", round2(data.money + finalTotalReward));
+                UnityCommands.getInstance().mergeAndUpdatePlayerData(p.getName(), "GeneralData", updates);
+
+                new BukkitRunnable(){ @Override public void run(){
+                    p.sendMessage(ChatColor.GREEN + "Сдано мусора: " + ChatColor.YELLOW + finalTotalItems + ChatColor.GREEN + " шт.");
+                    p.sendMessage(ChatColor.GREEN + "Зачислено: " + ChatColor.YELLOW + finalTotalReward + ChatColor.GREEN + " Ⓕ.");
+                }}.runTask(UnityLauncher.getInstance());
+            }}.runTaskAsynchronously(UnityLauncher.getInstance());
         });
     }
 }

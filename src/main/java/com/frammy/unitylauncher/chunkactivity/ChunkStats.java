@@ -8,6 +8,13 @@ public class ChunkStats {
     public int blocksPlaced = 0;
     public int blocksBroken = 0;
 
+    // Новые метрики
+    public int itemDrops = 0;
+    public int entitySpawns = 0;
+    public double tickLoad = 0.0;
+    public double playerActivity = 0.0;
+    public double structureBonus = 0.0;
+
     public long lastUpdated = System.currentTimeMillis();
 
     // Храним последние 24 часовых среза
@@ -28,15 +35,37 @@ public class ChunkStats {
         lastUpdated = System.currentTimeMillis();
     }
 
-    // cooling (сигмоида как у тебя)
+    // охлаждение (фикс багов с приведениями типов)
     public void applyCooling(long now) {
         long delta = now - lastUpdated;
+        if (delta <= 0) return;
+
         double hours = delta / 3600000.0;
         double decay = getSigmoidDecay(hours);
-        timeSpent *= (long) decay;
-        blocksPlaced *= (int) decay;
-        blocksBroken *= (int) decay;
-        // lastUpdated не трогаем
+
+        if (decay >= 1.0) return;
+
+        if (decay <= 0.0) {
+            timeSpent = 0;
+            blocksPlaced = 0;
+            blocksBroken = 0;
+            itemDrops = 0;
+            entitySpawns = 0;
+            tickLoad = 0.0;
+            playerActivity = 0.0;
+            structureBonus = 0.0;
+            return;
+        }
+
+        timeSpent       = (long) Math.round(timeSpent * decay);
+        blocksPlaced    = (int)  Math.round(blocksPlaced * decay);
+        blocksBroken    = (int)  Math.round(blocksBroken * decay);
+        itemDrops       = (int)  Math.round(itemDrops * decay);
+        entitySpawns    = (int)  Math.round(entitySpawns * decay);
+        tickLoad        =         tickLoad * decay;
+        playerActivity  =         playerActivity * decay;
+        structureBonus  =         structureBonus * decay;
+        // lastUpdated не двигаем — это "последняя реальная активность"
     }
 
     private double getSigmoidDecay(double hoursSinceLastActivity) {
@@ -55,6 +84,13 @@ public class ChunkStats {
         timeSpent = 0;
         blocksPlaced = 0;
         blocksBroken = 0;
+        itemDrops = 0;
+        entitySpawns = 0;
+        tickLoad = 0.0;
+        playerActivity = 0.0;
+        structureBonus = 0.0;
+
+        lastUpdated = System.currentTimeMillis();
     }
 
     // Среднее за "сутки" (по имеющимся часам), с фолбэком

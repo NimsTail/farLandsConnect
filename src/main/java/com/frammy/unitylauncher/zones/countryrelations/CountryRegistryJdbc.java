@@ -39,6 +39,9 @@ public class CountryRegistryJdbc {
     private final Map<String, String> countryToLeader = new ConcurrentHashMap<>();
     private final Map<String, Double> countryToTransferFeePct = new ConcurrentHashMap<>();
 
+    private final Map<String, Double> countryMoney = new ConcurrentHashMap<>();
+    private final Map<String, Double> countryWeeklyTaxDue = new ConcurrentHashMap<>();
+
     private final JavaPlugin plugin;
 
     private static final long CACHE_TTL_MS = 5_000;
@@ -69,6 +72,142 @@ public class CountryRegistryJdbc {
     }
 
     /* ===================== ПУБЛИЧНОЕ API ===================== */
+
+    /** Накопленный недельный налог (CountryInfo.WeeklyTaxDue), если нет — 0.0. */
+    public double getWeeklyTaxDue(String countryName) {
+        if (countryName == null || countryName.isBlank()) return 0.0;
+        refreshCacheIfExpired();
+        String key = countryName.toLowerCase(Locale.ROOT);
+        return countryWeeklyTaxDue.getOrDefault(key, 0.0);
+    }
+
+    /** Снимок по всем странам: lowerName -> WeeklyTaxDue. */
+    public Map<String, Double> getAllWeeklyTaxDue() {
+        refreshCacheIfExpired();
+        return new HashMap<>(countryWeeklyTaxDue);
+    }
+
+    /** Прибавить delta к WeeklyTaxDue (может быть отрицательным). */
+    public void addWeeklyTaxDue(String countryName, double delta) {
+        if (countryName == null || countryName.isBlank()) return;
+        if (delta == 0.0) return;
+
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            final String sql = """
+                UPDATE Countries
+                SET CountryInfo = JSON_SET(
+                    COALESCE(CountryInfo, JSON_OBJECT()),
+                    '$.WeeklyTaxDue',
+                    CAST(
+                        (COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(CountryInfo,'$.WeeklyTaxDue')) AS DECIMAL(20,3)), 0) + ?) AS JSON
+                    )
+                )
+                WHERE Name = ?
+                """;
+            try (Connection con = DBConnect()) {
+                if (con == null) { logDb("addWeeklyTaxDue", "DBConnect()==null"); return; }
+                try (PreparedStatement ps = con.prepareStatement(sql)) {
+                    ps.setDouble(1, delta);
+                    ps.setString(2, countryName);
+                    ps.executeUpdate();
+                }
+            } catch (Throwable t) {
+                logDb("addWeeklyTaxDue", t);
+                return;
+            }
+
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                String key = countryName.toLowerCase(Locale.ROOT);
+                double oldVal = countryWeeklyTaxDue.getOrDefault(key, 0.0);
+                countryWeeklyTaxDue.put(key, oldVal + delta);
+                touchCacheNow();
+            });
+        });
+    }
+
+    /** Обнулить WeeklyTaxDue для страны (при выставлении недельного счёта/списании). */
+    public void resetWeeklyTaxDue(String countryName) {
+        if (countryName == null || countryName.isBlank()) return;
+
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            final String sql = """
+                UPDATE Countries
+                SET CountryInfo = JSON_SET(
+                    COALESCE(CountryInfo, JSON_OBJECT()),
+                    '$.WeeklyTaxDue',
+                    CAST('0' AS JSON)
+                )
+                WHERE Name = ?
+                """;
+            try (Connection con = DBConnect()) {
+                if (con == null) { logDb("resetWeeklyTaxDue", "DBConnect()==null"); return; }
+                try (PreparedStatement ps = con.prepareStatement(sql)) {
+                    ps.setString(1, countryName);
+                    ps.executeUpdate();
+                }
+            } catch (Throwable t) {
+                logDb("resetWeeklyTaxDue", t);
+                return;
+            }
+
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                String key = countryName.toLowerCase(Locale.ROOT);
+                countryWeeklyTaxDue.put(key, 0.0);
+                touchCacheNow();
+            });
+        });
+    }
+
+
+    /** Баланс казны страны (из CountryInfo.Money), если нет — 0.0. */
+    public double getCountryMoney(String countryName) {
+        if (countryName == null || countryName.isBlank()) return 0.0;
+        refreshCacheIfExpired();
+        String key = countryName.toLowerCase(Locale.ROOT);
+        return countryMoney.getOrDefault(key, 0.0);
+    }
+
+    /**
+     * Добавить к балансу страны delta (может быть отрицательным).
+     * Работает асинхронно и атомарно на уровне БД.
+     */
+    public void addCountryMoney(String countryName, double delta) {
+        if (countryName == null || countryName.isBlank()) return;
+        if (delta == 0.0) return;
+
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            final String sql = """
+                UPDATE Countries
+                SET CountryInfo = JSON_SET(
+                    COALESCE(CountryInfo, JSON_OBJECT()),
+                    '$.Money',
+                    CAST(
+                        (COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(CountryInfo,'$.Money')) AS DECIMAL(20,3)), 0) + ?) AS JSON
+                    )
+                )
+                WHERE Name = ?
+                """;
+            try (Connection con = DBConnect()) {
+                if (con == null) { logDb("addCountryMoney", "DBConnect()==null"); return; }
+                try (PreparedStatement ps = con.prepareStatement(sql)) {
+                    ps.setDouble(1, delta);
+                    ps.setString(2, countryName);
+                    ps.executeUpdate();
+                }
+            } catch (Throwable t) {
+                logDb("addCountryMoney", t);
+                return;
+            }
+
+            // мягко обновим кэш в main-потоке, чтобы не ждать TTL
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                String key = countryName.toLowerCase(Locale.ROOT);
+                double oldVal = countryMoney.getOrDefault(key, 0.0);
+                countryMoney.put(key, oldVal + delta);
+                touchCacheNow();
+            });
+        });
+    }
 
     /** Получить страну игрока или null. */
     public String getCountryOfPlayer(String playerName) {
@@ -225,6 +364,9 @@ public class CountryRegistryJdbc {
         Map<String, Map<Integer, RoleInfo>> newCountryRoleMeta = new HashMap<>();
         Map<String, Double> newCountryToTransferFeePct = new HashMap<>();
 
+        Map<String, Double> newCountryMoney = new HashMap<>();
+        Map<String, Double> newCountryWeeklyTaxDue = new HashMap<>();
+
         try (Connection con = DBConnect()) {
             if (con == null) {
                 logDb("refreshCacheIfExpired", "DBConnect()==null");
@@ -247,14 +389,10 @@ public class CountryRegistryJdbc {
                     // --- 1. распарсили роли этой страны
                     Map<Integer, RoleInfo> rolesMap = parseRoles(permsJson);
 
-                    // если в этой конкретной итерации роли пустые,
-                    // но мы уже ранее в ЭТОМ refresh собрали непустые роли для той же страны,
-                    // то не затираем хорошее пустым мусором.
-                    // *** anti-overwrite logic:
+                    // anti-overwrite: если текущий JSON пустой, а ранее в этом refresh уже были роли — оставляем старое
                     if (rolesMap.isEmpty() && newCountryRoleMeta.containsKey(countryLower)
                             && newCountryRoleMeta.get(countryLower) != null
                             && !newCountryRoleMeta.get(countryLower).isEmpty()) {
-                        // оставляем старое
                         rolesMap = newCountryRoleMeta.get(countryLower);
                     }
 
@@ -284,25 +422,55 @@ public class CountryRegistryJdbc {
                     if (leaderFound != null && !leaderFound.isBlank()) {
                         newCountryToLeader.put(countryLower, leaderFound);
                     }
+
+                    // --- 3. CountryInfo: TransferFee, Money, WeeklyTaxDue
                     String countryInfo = rs.getString("CountryInfo");
-                    // --- 3. TransferFee из CountryInfo
                     try {
                         if (countryInfo != null && !countryInfo.isBlank()) {
                             JsonElement ciRoot = JsonParser.parseString(countryInfo);
                             if (ciRoot.isJsonObject()) {
                                 JsonObject ci = ciRoot.getAsJsonObject();
+
+                                // TransferFee
                                 if (ci.has("TransferFee") && !ci.get("TransferFee").isJsonNull()) {
                                     Double tf = null;
                                     try {
-                                        if (ci.get("TransferFee").isJsonPrimitive() && ci.get("TransferFee").getAsJsonPrimitive().isNumber()) {
-                                            tf = ci.get("TransferFee").getAsDouble();
-                                        } else if (ci.get("TransferFee").isJsonPrimitive() && ci.get("TransferFee").getAsJsonPrimitive().isString()) {
-                                            tf = Double.parseDouble(ci.get("TransferFee").getAsString().trim());
+                                        JsonElement tfEl = ci.get("TransferFee");
+                                        if (tfEl.isJsonPrimitive() && tfEl.getAsJsonPrimitive().isNumber()) {
+                                            tf = tfEl.getAsDouble();
+                                        } else if (tfEl.isJsonPrimitive() && tfEl.getAsJsonPrimitive().isString()) {
+                                            tf = Double.parseDouble(tfEl.getAsString().trim());
                                         }
                                     } catch (Exception ignored) {}
-                                    if (tf != null) {
-                                        newCountryToTransferFeePct.put(countryLower, tf);
-                                    }
+                                    if (tf != null) newCountryToTransferFeePct.put(countryLower, tf);
+                                }
+
+                                // Money
+                                if (ci.has("Money") && !ci.get("Money").isJsonNull()) {
+                                    Double moneyVal = null;
+                                    try {
+                                        JsonElement mEl = ci.get("Money");
+                                        if (mEl.isJsonPrimitive() && mEl.getAsJsonPrimitive().isNumber()) {
+                                            moneyVal = mEl.getAsDouble();
+                                        } else if (mEl.isJsonPrimitive() && mEl.getAsJsonPrimitive().isString()) {
+                                            moneyVal = Double.parseDouble(mEl.getAsString().trim());
+                                        }
+                                    } catch (Exception ignored) {}
+                                    if (moneyVal != null) newCountryMoney.put(countryLower, moneyVal);
+                                }
+
+                                // WeeklyTaxDue
+                                if (ci.has("WeeklyTaxDue") && !ci.get("WeeklyTaxDue").isJsonNull()) {
+                                    Double taxVal = null;
+                                    try {
+                                        JsonElement tEl = ci.get("WeeklyTaxDue");
+                                        if (tEl.isJsonPrimitive() && tEl.getAsJsonPrimitive().isNumber()) {
+                                            taxVal = tEl.getAsDouble();
+                                        } else if (tEl.isJsonPrimitive() && tEl.getAsJsonPrimitive().isString()) {
+                                            taxVal = Double.parseDouble(tEl.getAsString().trim());
+                                        }
+                                    } catch (Exception ignored) {}
+                                    if (taxVal != null) newCountryWeeklyTaxDue.put(countryLower, taxVal);
                                 }
                             }
                         }
@@ -329,6 +497,12 @@ public class CountryRegistryJdbc {
 
         countryToTransferFeePct.clear();
         countryToTransferFeePct.putAll(newCountryToTransferFeePct);
+
+        countryMoney.clear();
+        countryMoney.putAll(newCountryMoney);
+
+        countryWeeklyTaxDue.clear();
+        countryWeeklyTaxDue.putAll(newCountryWeeklyTaxDue);
 
         cacheLoadedOnce = true;
         lastRefresh = Instant.now();
@@ -568,6 +742,55 @@ public class CountryRegistryJdbc {
             }
         });
     }
+
+    /**
+     * Прибавить delta к полю CountryInfo.Taxes (может быть отрицательным).
+     * Работает атомарно на уровне БД.
+     *
+     * Пример JSON после нескольких вызовов:
+     *   {
+     *     "Money": 123.45,
+     *     "WeeklyTaxDue": 456.78,
+     *     "Taxes": 890.12
+     *   }
+     */
+    public void addCountryTaxes(String countryName, double delta) {
+        if (countryName == null || countryName.isBlank()) return;
+        if (delta == 0.0) return;
+
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            final String sql = """
+                UPDATE Countries
+                SET CountryInfo = JSON_SET(
+                    COALESCE(CountryInfo, JSON_OBJECT()),
+                    '$.Taxes',
+                    CAST(
+                        (
+                            COALESCE(
+                                CAST(JSON_UNQUOTE(JSON_EXTRACT(CountryInfo,'$.Taxes')) AS DECIMAL(20,3)),
+                                0
+                            ) + ?
+                        ) AS JSON
+                    )
+                )
+                WHERE Name = ?
+                """;
+            try (Connection con = DBConnect()) {
+                if (con == null) {
+                    logDb("addCountryTaxes", "DBConnect()==null");
+                    return;
+                }
+                try (PreparedStatement ps = con.prepareStatement(sql)) {
+                    ps.setDouble(1, delta);
+                    ps.setString(2, countryName);
+                    ps.executeUpdate();
+                }
+            } catch (Throwable t) {
+                logDb("addCountryTaxes", t);
+            }
+        });
+    }
+
 
     /* ===================== LOG ===================== */
 

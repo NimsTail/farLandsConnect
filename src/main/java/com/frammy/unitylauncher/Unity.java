@@ -3,6 +3,7 @@ package com.frammy.unitylauncher;
 import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
 import com.frammy.unitylauncher.chunkactivity.ActivityWeights;
 import com.frammy.unitylauncher.chunkactivity.ChunkActivityHeatmapExporter;
+import com.frammy.unitylauncher.chunkactivity.ZonesEconomyConfig;
 import com.frammy.unitylauncher.upgrades.UpgradesListener;
 import com.frammy.unitylauncher.zones.ZoneInfo;
 import com.frammy.unitylauncher.zones.ZoneManager;
@@ -150,6 +151,9 @@ public class Unity implements CommandExecutor {
             if (plugin.getSignManager() != null) {
                 plugin.getZoneManager().scheduleSignOwnershipRecalc(plugin.getSignManager(), 200);
             }
+
+            // 3) zones-economy.yml (отдельный файл)
+            ZonesEconomyConfig.load(plugin);
 
             sender.sendMessage(ChatColor.GREEN + "UnityLauncher: конфиг, сообщения, апгрейды и зоны перезагружены.");
             return true;

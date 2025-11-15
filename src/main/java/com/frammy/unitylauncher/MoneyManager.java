@@ -20,10 +20,6 @@ public class MoneyManager implements Listener {
 
     private final List<Integer> dollarDenominations = Arrays.asList(1000, 500, 200, 100, 50, 20, 10, 5, 2, 1);
     private final List<Integer> centDenominations = Arrays.asList(50, 20, 10, 5, 2, 1); // В центах
-    private static final NamespacedKey PDC_MONEY_VALUE =
-            new NamespacedKey(UnityLauncher.getInstance(), "money.cents"); // int: сумма в центрах
-    private static final NamespacedKey PDC_MONEY_KIND  =
-            new NamespacedKey(UnityLauncher.getInstance(), "money.kind");  // "coin" | "note"
     private static final Set<Material> MONEY_MATERIALS = Set.of(
             Material.PRISMARINE_SHARD,      // купюры (доллары)
             Material.PRISMARINE_CRYSTALS    // монеты (центы)
@@ -36,90 +32,104 @@ public class MoneyManager implements Listener {
     // Секрет для подписи
     private final String moneySecret;
 
-    private ItemStack createMoneyItem(Material mat, int cents, String glyph) {
-        ItemStack item = new ItemStack(mat, 1);
-        ItemMeta meta = item.getItemMeta();
-        if (meta != null) {
-            int abs = Math.abs(cents);
-            int dollars = abs / 100;
-            int justCents = abs % 100;
-            String display = (justCents == 0) ? String.valueOf(dollars) : (dollars + "." + String.format(java.util.Locale.ROOT, "%02d", justCents));
-
-            meta.setDisplayName(ChatColor.GREEN + glyph + "   " + ChatColor.RESET + display);
-            // ставим защищающие метки
-            meta.getPersistentDataContainer().set(PDC_MONEY_VALUE, PersistentDataType.INTEGER, cents);
-            meta.getPersistentDataContainer().set(PDC_MONEY_KIND,  PersistentDataType.STRING, (cents % 100 == 0) ? "note" : "coin");
-            // при желании — диапазон CMD, чтобы текстурпак отличал деньги
-            meta.setCustomModelData(10000 + (cents % 100 == 0 ? 1 : 2));
-            item.setItemMeta(meta);
-        }
-        return item;
-    }
-
     public void giveMoney(Player player, double amount) {
         int totalCents = (int) Math.round(amount * 100.0);
+        if (totalCents <= 0) {
+            player.sendMessage(ChatColor.RED + "Сумма должна быть больше нуля.");
+            return;
+        }
 
         UnityCommands.getInstance().getPlayerInfo(player.getName(), data -> {
             if (data == null) {
-                new BukkitRunnable(){ @Override public void run(){
-                    player.sendMessage(ChatColor.RED + "Данные не найдены.");
-                }}.runTask(UnityLauncher.getInstance());
+                new BukkitRunnable() {
+                    @Override public void run() {
+                        player.sendMessage(ChatColor.RED + "Данные не найдены.");
+                    }
+                }.runTask(UnityLauncher.getInstance());
                 return;
             }
+
             if (Math.round(data.money * 100.0) < totalCents) {
-                new BukkitRunnable(){ @Override public void run(){
-                    player.sendMessage(ChatColor.RED + "Недостаточно средств. Баланс: " + ChatColor.YELLOW + data.money + ChatColor.RED + " Ⓕ.");
-                }}.runTask(UnityLauncher.getInstance());
+                new BukkitRunnable() {
+                    @Override public void run() {
+                        player.sendMessage(ChatColor.RED + "Недостаточно средств. Баланс: " +
+                                ChatColor.YELLOW + data.money + ChatColor.RED + " Ⓕ.");
+                    }
+                }.runTask(UnityLauncher.getInstance());
                 return;
             }
 
-            // 1) Сформируем стэк предметов (SYNC-логика выполнения addItem — только в main)
+            // 1) Разбиваем сумму на номиналы и создаём HMAC-подписанные предметы
             List<ItemStack> toGive = new ArrayList<>();
-            int dollars = totalCents / 100, cents = totalCents % 100;
+            int dollars = totalCents / 100;
+            int cents   = totalCents % 100;
 
+            // Купюры (доллары) – PRISMARINE_SHARD, value в Ⓕ
             for (int d : dollarDenominations) {
                 while (dollars >= d) {
-                    toGive.add(createMoneyItem(Material.PRISMARINE_SHARD, d * 100, "Ⓕ"));
+                    toGive.add(createMoneyItem(Material.PRISMARINE_SHARD, d, "Ⓕ"));
                     dollars -= d;
                 }
             }
+
+            // Монеты (центы) – PRISMARINE_CRYSTALS, value в Ⓕ (0.50, 0.20 и т.д.), отображаем как количество центов
             for (int c : centDenominations) {
                 while (cents >= c) {
-                    toGive.add(createMoneyItem(Material.PRISMARINE_CRYSTALS, c, "ⓒ"));
+                    toGive.add(createMoneyItem(
+                            Material.PRISMARINE_CRYSTALS,
+                            c / 100.0,    // value в Ⓕ
+                            "ⓒ"
+                    ));
                     cents -= c;
                 }
             }
 
-            // 2) Попробуем выдать на главном потоке
-            new BukkitRunnable(){ @Override public void run(){
-                Map<Integer, ItemStack> leftoversAll = new HashMap<>();
-                for (ItemStack it : toGive) {
-                    Map<Integer, ItemStack> leftovers = player.getInventory().addItem(it);
-                    if (!leftovers.isEmpty()) leftoversAll.putAll(leftovers);
-                }
-                // Если что-то не влезло — дропнем у ног
-                if (!leftoversAll.isEmpty()) {
-                    leftoversAll.values().forEach(l -> player.getWorld().dropItemNaturally(player.getLocation(), l));
-                }
+            new BukkitRunnable() {
+                @Override public void run() {
+                    Map<Integer, ItemStack> leftoversAll = new HashMap<>();
+                    for (ItemStack it : toGive) {
+                        Map<Integer, ItemStack> leftovers = player.getInventory().addItem(it);
+                        if (!leftovers.isEmpty()) leftoversAll.putAll(leftovers);
+                    }
+                    // Если что-то не влезло — дропаем у ног
+                    if (!leftoversAll.isEmpty()) {
+                        leftoversAll.values().forEach(l ->
+                                player.getWorld().dropItemNaturally(player.getLocation(), l)
+                        );
+                    }
 
-                // 3) Списываем баланс АСИНХРОННО
-                new BukkitRunnable(){ @Override public void run(){
-                    Map<String, Object> updates = new HashMap<>();
-                    updates.put("money", round2(data.money - amount));
-                    UnityCommands.getInstance().mergeAndUpdatePlayerData(player.getName(), "GeneralData", updates);
-                }}.runTaskAsynchronously(UnityLauncher.getInstance());
+                    // 3) Списываем баланс АСИНХРОННО
+                    new BukkitRunnable() {
+                        @Override public void run() {
+                            Map<String, Object> updates = new HashMap<>();
+                            updates.put("money", round2(data.money - amount));
+                            UnityCommands.getInstance().mergeAndUpdatePlayerData(
+                                    player.getName(), "GeneralData", updates
+                            );
+                        }
+                    }.runTaskAsynchronously(UnityLauncher.getInstance());
 
-                player.sendMessage(ChatColor.GRAY + "С твоего счёта снято " + ChatColor.YELLOW + round2(amount) + ChatColor.GRAY + " Ⓕ.");
-            }}.runTask(UnityLauncher.getInstance());
+                    player.sendMessage(ChatColor.GRAY + "С твоего счёта снято " +
+                            ChatColor.YELLOW + round2(amount) + ChatColor.GRAY + " Ⓕ.");
+                }
+            }.runTask(UnityLauncher.getInstance());
         });
     }
 
     private double getMoneyValue(ItemStack item) {
+        if (item == null || item.getType().isAir()) return 0.0;
         if (!verifyMoney(item)) return 0.0;
+
         ItemMeta meta = item.getItemMeta();
         if (meta == null) return 0.0;
-        Double v = meta.getPersistentDataContainer().get(KEY_VALUE, PersistentDataType.DOUBLE);
-        return (v == null) ? 0.0 : round2(v);
+        var pdc = meta.getPersistentDataContainer();
+
+        // Новый формат: значение в Ⓕ в KEY_VALUE
+        Double v = pdc.get(KEY_VALUE, PersistentDataType.DOUBLE);
+        if (v != null && v > 0.0) {
+            return round2(v);
+        }
+        return 0.0;
     }
 
     public void takeMoney(Player player, double amount, boolean toCountry) {
@@ -203,6 +213,49 @@ public class MoneyManager implements Listener {
                 }}.runTaskAsynchronously(UnityLauncher.getInstance());
             });
         }
+    }
+
+    /**
+     * Списывает деньги со счёта игрока (банковский баланс, НЕ наличка).
+     * Используется в авто-биллинге зон.
+     *
+     */
+    public void withdraw(String playerName, double amount) {
+        if (playerName == null || playerName.isBlank()) {
+            Bukkit.getLogger().warning("[MoneyManager] withdraw: пустое имя игрока");
+            return;
+        }
+
+        amount = round2(amount);
+        if (amount <= 0) return;
+
+        double finalAmount = amount;
+
+        UnityCommands.getInstance().getPlayerInfo(playerName, data -> {
+            if (data == null) {
+                Bukkit.getLogger().warning("[MoneyManager] withdraw: данные игрока '" + playerName + "' не найдены");
+                return;
+            }
+
+            double cur = round2(data.money);
+            if (cur < finalAmount - 1e-9) {
+                Bukkit.getLogger().info("[MoneyManager] withdraw: у '" + playerName + "' мало денег: "
+                        + cur + " Ⓕ, нужно " + finalAmount + " Ⓕ");
+                return;
+            }
+
+            double newBal = round2(cur - finalAmount);
+
+            new BukkitRunnable() {
+                @Override
+                public void run() {
+                    Map<String, Object> upd = new HashMap<>();
+                    upd.put("money", newBal);
+                    UnityCommands.getInstance()
+                            .mergeAndUpdatePlayerData(playerName, "GeneralData", upd);
+                }
+            }.runTaskAsynchronously(UnityLauncher.getInstance());
+        });
     }
 
     private ItemStack createMoneyItem(Material material, double value, String symbol) {
@@ -289,13 +342,16 @@ public class MoneyManager implements Listener {
         if (meta == null) return false;
         var pdc = meta.getPersistentDataContainer();
 
+        // --- Новый формат: HMAC-подпись ---
         Integer ver = pdc.get(KEY_VER, PersistentDataType.INTEGER);
         Double  val = pdc.get(KEY_VALUE, PersistentDataType.DOUBLE);
         String  sig = pdc.get(KEY_SIG, PersistentDataType.STRING);
-        if (ver == null || ver != 1 || val == null || val <= 0 || sig == null || sig.isBlank()) return false;
 
-        String expect = hmac(signPayload(val, ver, mat));
-        return expect != null && expect.equals(sig);
+        if (ver != null && ver == 1 && val != null && val > 0 && sig != null && !sig.isBlank()) {
+            String expect = hmac(signPayload(val, ver, mat));
+            return expect != null && expect.equals(sig);
+        }
+        return false;
     }
 
     /**

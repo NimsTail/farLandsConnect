@@ -145,13 +145,8 @@ public class ZoneActivityCalculations {
         long period = 20L * 60 * 60 * 24;
 
         // Запускаем на ГЛАВНОМ потоке: снимем снапшоты и дернём async-вычисления
-        Bukkit.getScheduler().runTaskTimer(zm.ul, () -> {
-            try {
-                snapshotAndMaybeBillAllZones(); // внутри сам разделит на sync/async этапы
-            } catch (Throwable t) {
-                Bukkit.getLogger().warning("[Zones] Billing tick failed: " + t.getMessage());
-            }
-        }, delay, period);
+        // внутри сам разделит на sync/async этапы
+        Bukkit.getScheduler().runTaskTimer(zm.ul, this::snapshotAndMaybeBillAllZones, delay, period);
     }
 
     private long ticksUntilNextTime(){
@@ -195,39 +190,94 @@ public class ZoneActivityCalculations {
                     double cost = calculateDailyCostSnapshot(s, statsCopy, weights, mul);
                     dailyCosts.put(s.id(), cost);
                 }
-
                 // --- ЗАПИСЬ РЕЗУЛЬТАТОВ (обратно на главный поток) ---
                 Bukkit.getScheduler().runTask(zm.ul, () -> {
-                    // 1) фиксируем дневные стоимости
+                    // 1) фиксируем дневные стоимости в самих зонах
                     for (Map.Entry<String, Double> e : dailyCosts.entrySet()) {
                         ZoneInfo z = zoneById.get(e.getKey());
-                        if (z != null) z.addDailyCost(today, e.getValue());
+                        if (z != null) {
+                            z.addDailyCost(today, e.getValue());
+                        }
                     }
 
-                    // 2) авто-списание по расписанию (только sync!)
+                    // 2) собираем дневной налог по странам
+                    Map<String, Double> countryDailyTax = new HashMap<>();
+                    for (Map.Entry<String, Double> e : dailyCosts.entrySet()) {
+                        ZoneInfo z = zoneById.get(e.getKey());
+                        if (z == null) continue;
+                        if (!z.hasCountry()) continue; // зона не привязана к стране — пропускаем
+
+                        String country = z.getCountryName();
+                        if (country == null || country.isBlank()) continue;
+
+                        double cost = e.getValue();
+                        if (cost <= 0.0) continue;
+
+                        // аккумулируем
+                        countryDailyTax.merge(country, cost, Double::sum);
+                    }
+
+                    // 3) пишем в БД: WeeklyTaxDue и общий счётчик Taxes
+                    if (!countryDailyTax.isEmpty()) {
+                        var reg = zm.ul.countryRegistryJdbc;
+                        for (Map.Entry<String, Double> e : countryDailyTax.entrySet()) {
+                            String country = e.getKey();
+                            double dailyTax = round2(e.getValue()); // округлим до 2 знаков, чтобы не плодить мусор
+
+                            if (dailyTax <= 0.0) continue;
+
+                            // накопительный недельный долг
+                            reg.addWeeklyTaxDue(country, dailyTax);
+                            // общий накопленный налог (история)
+                            reg.addCountryTaxes(country, dailyTax);
+                        }
+                    }
+
+                    // 4) авто-списание по расписанию (как было)
                     for (ZoneInfo z : zoneById.values()) {
                         LocalDate next = z.getNextBillingDate();
                         if (LocalDate.now(zm.zoneId).isBefore(next)) continue;
 
-                        double due = z.getDueSinceLastBill(today);
-                        try {
+                        double dueRaw = z.getDueSinceLastBill(today);
+                        double due = round2(dueRaw);
+                        if (due <= 0.0) {
                             z.markBilled(today);
-                            if (due > 0) {
-                                // zm.ul.moneyManager.withdraw(z.getOwner(), due);
-                                Bukkit.getLogger().info("[Zones] Auto-billed " + z.getName() + " owner=" + z.getOwner()
-                                        + " amount=" + String.format(Locale.US, "%.2f", due));
-                            }
+                            continue;
+                        }
+
+                        String owner = z.getOwner();
+                        if (owner == null || owner.isBlank()) {
+                            Bukkit.getLogger().warning("[Zones] Auto-billing skipped for zone " + z.getName()
+                                    + ": owner is null/empty, amount=" + String.format(Locale.US, "%.2f", due));
+                            z.markBilled(today);
+                            continue;
+                        }
+
+                        try {
+                            zm.ul.moneyManager.withdraw(owner, due);
+                            z.markBilled(today);
+
+                            Bukkit.getLogger().info("[Zones] Auto-billed " + z.getName()
+                                    + " owner=" + owner
+                                    + " amount=" + String.format(Locale.US, "%.2f", due));
                         } catch (Exception ex) {
-                            Bukkit.getLogger().warning("[Zones] Auto-billing failed " + z.getName() + ": " + ex.getMessage());
+                            Bukkit.getLogger().warning("[Zones] Auto-billing failed for zone " + z.getName()
+                                    + " owner=" + owner
+                                    + " amount=" + String.format(Locale.US, "%.2f", due)
+                                    + " error=" + ex.getMessage());
                         }
                     }
                 });
-
             } catch (Throwable t) {
                 Bukkit.getLogger().warning("[Zones] Async cost calc failed: " + t.getMessage());
             }
         });
     }
+
+    private static double round2(double v) {
+        return Math.round(v * 100.0) / 100.0;
+    }
+
 
     /* ===== Почасовой ряд (старые → новые) ===== */
     public List<Double> getZoneHourlySeries(ZoneInfo zone,

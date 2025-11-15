@@ -118,4 +118,61 @@ public class ActivityTracker implements Listener {
     public void saveAllToDisk() {
         ChunkActivityStorage.saveToFile(chunkStatsMap, plugin.getDataFolder());
     }
+
+    // Удобный хелпер: получить/создать статистику чанка
+    private ChunkStats statsFor(Chunk chunk) {
+        if (chunk == null) return null;
+        return getStats(chunk); // getStats уже делает computeIfAbsent по String-ключу
+    }
+
+    /** Изменение блоков (place/break) с бонусом структуры. */
+    public void incBlocksChanged(Chunk chunk, int blocksDelta, double structureBonus) {
+        ChunkStats s = statsFor(chunk);
+        if (s == null) return;
+
+        int abs = Math.abs(blocksDelta);
+        if (blocksDelta >= 0) {
+            s.blocksPlaced += abs;
+        } else {
+            s.blocksBroken += abs;
+        }
+        s.structureBonus += structureBonus * abs;
+        s.lastUpdated = System.currentTimeMillis();
+    }
+
+    /** Выпавшие предметы (ItemSpawnEvent). */
+    public void incItemDrops(Chunk chunk, int amount) {
+        if (amount <= 0) return;
+        ChunkStats s = statsFor(chunk);
+        if (s == null) return;
+        s.itemDrops += amount;
+        s.lastUpdated = System.currentTimeMillis();
+    }
+
+    /** Спавн мобов. */
+    public void incEntitySpawns(Chunk chunk, int count) {
+        if (count <= 0) return;
+        ChunkStats s = statsFor(chunk);
+        if (s == null) return;
+        s.entitySpawns += count;
+        s.lastUpdated = System.currentTimeMillis();
+    }
+
+    /** Тиковая нагрузка от воронок / печек / редстоуна. */
+    public void incTickLoad(Chunk chunk, double loadUnits) {
+        if (loadUnits <= 0) return;
+        ChunkStats s = statsFor(chunk);
+        if (s == null) return;
+        s.tickLoad += loadUnits;
+        s.lastUpdated = System.currentTimeMillis();
+    }
+
+    /** Активность игроков в чанке (дискретные события). */
+    public void recordPlayerActivity(Chunk chunk, String playerName, double activityScore) {
+        if (activityScore <= 0) return;
+        ChunkStats s = statsFor(chunk);
+        if (s == null) return;
+        s.playerActivity += activityScore;
+        s.lastUpdated = System.currentTimeMillis();
+    }
 }

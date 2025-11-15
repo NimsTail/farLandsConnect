@@ -6,5 +6,6 @@ public enum SignCategory {
     SHOP_SELLER,
     SHOP_INFO,
     SHOP_LIST,
-    SHOP_HELP
+    SHOP_HELP,
+    TRASH_SELL
 }
