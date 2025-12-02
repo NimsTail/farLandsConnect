@@ -6,10 +6,7 @@ import com.google.gson.JsonParser;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.java.JavaPlugin;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
+import java.sql.*;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
@@ -47,6 +44,9 @@ public class CountryRegistryJdbc {
     private static final long CACHE_TTL_MS = 5_000;
     private volatile Instant lastRefresh = Instant.EPOCH;
     private volatile boolean cacheLoadedOnce = false;
+
+    private static final java.util.concurrent.atomic.AtomicBoolean ATM_SCHEMA_CHECKED =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
 
     public CountryRegistryJdbc(JavaPlugin plugin) {
         this.plugin = plugin;
@@ -105,7 +105,7 @@ public class CountryRegistryJdbc {
                 WHERE Name = ?
                 """;
             try (Connection con = DBConnect()) {
-                if (con == null) { logDb("addWeeklyTaxDue", "DBConnect()==null"); return; }
+                if (con == null) { logDb("addWeeklyTaxDue"); return; }
                 try (PreparedStatement ps = con.prepareStatement(sql)) {
                     ps.setDouble(1, delta);
                     ps.setString(2, countryName);
@@ -140,7 +140,7 @@ public class CountryRegistryJdbc {
                 WHERE Name = ?
                 """;
             try (Connection con = DBConnect()) {
-                if (con == null) { logDb("resetWeeklyTaxDue", "DBConnect()==null"); return; }
+                if (con == null) { logDb("resetWeeklyTaxDue"); return; }
                 try (PreparedStatement ps = con.prepareStatement(sql)) {
                     ps.setString(1, countryName);
                     ps.executeUpdate();
@@ -188,7 +188,7 @@ public class CountryRegistryJdbc {
                 WHERE Name = ?
                 """;
             try (Connection con = DBConnect()) {
-                if (con == null) { logDb("addCountryMoney", "DBConnect()==null"); return; }
+                if (con == null) { logDb("addCountryMoney"); return; }
                 try (PreparedStatement ps = con.prepareStatement(sql)) {
                     ps.setDouble(1, delta);
                     ps.setString(2, countryName);
@@ -270,7 +270,7 @@ public class CountryRegistryJdbc {
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             try (Connection con = DBConnect()) {
                 if (con == null) {
-                    logDb("deleteCountryAsync", "DBConnect()==null");
+                    logDb("deleteCountryAsync");
                     return;
                 }
                 try (PreparedStatement ps = con.prepareStatement("DELETE FROM Countries WHERE Name = ?")) {
@@ -293,28 +293,34 @@ public class CountryRegistryJdbc {
 
     /**
      * Гарантировать стартовый лимит банкоматов для страны.
-     * Таблица atm_quota(country PK, quota INT) предполагается.
+     * Таблица atm_quota(country PK, quota INT) создаётся автоматически, если её нет.
      */
     public void ensureInitialAtmAllowance(String countryName, int initialCount) {
         if (countryName == null || countryName.isBlank()) return;
         if (initialCount <= 0) return;
 
-        String sql = """
+        try (Connection con = DBConnect()) {
+            if (con == null) {
+                logDb("ensureInitialAtmAllowance");
+                return;
+            }
+
+            // === гарантия существования таблицы и колонок ===
+            ensureAtmQuotaSchema(con);
+
+            // === обычная логика UPSERT ===
+            final String sql = """
                 INSERT INTO atm_quota (country, quota)
                 VALUES (?, ?)
                 ON DUPLICATE KEY UPDATE quota = GREATEST(quota, VALUES(quota))
                 """;
 
-        try (Connection con = DBConnect()) {
-            if (con == null) {
-                logDb("ensureInitialAtmAllowance", "DBConnect()==null");
-                return;
-            }
             try (PreparedStatement ps = con.prepareStatement(sql)) {
-                ps.setString(1, countryName);
+                ps.setString(1, countryName.toLowerCase(Locale.ROOT));
                 ps.setInt(2, initialCount);
                 ps.executeUpdate();
             }
+
         } catch (Throwable t) {
             logDb("ensureInitialAtmAllowance", t);
         }
@@ -369,7 +375,7 @@ public class CountryRegistryJdbc {
 
         try (Connection con = DBConnect()) {
             if (con == null) {
-                logDb("refreshCacheIfExpired", "DBConnect()==null");
+                logDb("refreshCacheIfExpired");
                 return;
             }
 
@@ -648,7 +654,7 @@ public class CountryRegistryJdbc {
 
     private static RoleInfo roleFromJson(JsonObject o) {
         if (o == null) return null;
-        Integer id = getInt(o, "ID");
+        Integer id = getInt(o);
         String name = getString(o, "Name");
         String prefix = getString(o, "Prefix");
         if (id == null) return null;
@@ -665,11 +671,11 @@ public class CountryRegistryJdbc {
         return null;
     }
 
-    private static Integer getInt(JsonObject o, String key) {
-        if (o == null || key == null) return null;
-        if (!o.has(key) || o.get(key).isJsonNull()) return null;
+    private static Integer getInt(JsonObject o) {
+        if (o == null) return null;
+        if (!o.has("ID") || o.get("ID").isJsonNull()) return null;
         try {
-            JsonElement el = o.get(key);
+            JsonElement el = o.get("ID");
             if (el.isJsonPrimitive()) {
                 if (el.getAsJsonPrimitive().isNumber()) return el.getAsInt();
                 if (el.getAsJsonPrimitive().isString()) return Integer.parseInt(el.getAsString().trim());
@@ -703,7 +709,7 @@ public class CountryRegistryJdbc {
             WHERE Name = ?
             """;
             try (Connection con = DBConnect()) {
-                if (con == null) { logDb("setCountryAreaPreserveMoney", "DBConnect()==null"); return; }
+                if (con == null) { logDb("setCountryAreaPreserveMoney"); return; }
                 try (PreparedStatement ps = con.prepareStatement(sql)) {
                     ps.setDouble(1, area);
                     ps.setString(2, countryName);
@@ -731,7 +737,7 @@ public class CountryRegistryJdbc {
                 WHERE Name = ?
                 """;
             try (Connection con = DBConnect()) {
-                if (con == null) { logDb("addCountryArea", "DBConnect()==null"); return; }
+                if (con == null) { logDb("addCountryArea"); return; }
                 try (PreparedStatement ps = con.prepareStatement(sql)) {
                     ps.setDouble(1, deltaArea);
                     ps.setString(2, countryName);
@@ -777,7 +783,7 @@ public class CountryRegistryJdbc {
                 """;
             try (Connection con = DBConnect()) {
                 if (con == null) {
-                    logDb("addCountryTaxes", "DBConnect()==null");
+                    logDb("addCountryTaxes");
                     return;
                 }
                 try (PreparedStatement ps = con.prepareStatement(sql)) {
@@ -791,6 +797,49 @@ public class CountryRegistryJdbc {
         });
     }
 
+    /** Проверяет и создаёт таблицу atm_quota + недостающие колонки. */
+    private void ensureAtmQuotaSchema(Connection c) throws SQLException {
+        // чтобы не выполнять проверку тысячи раз
+        if (ATM_SCHEMA_CHECKED.get()) return;
+
+        // 1. создаём таблицу если отсутствует
+        try (Statement st = c.createStatement()) {
+            st.executeUpdate(
+                    "CREATE TABLE IF NOT EXISTS `atm_quota` (" +
+                            " `country` VARCHAR(64) NOT NULL," +
+                            " `quota`   INT NOT NULL DEFAULT 0," +
+                            " `updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP," +
+                            " PRIMARY KEY (`country`)" +
+                            ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+            );
+        }
+
+        // 2. проверяем существующие колонки
+        Set<String> cols = new HashSet<>();
+        DatabaseMetaData md = c.getMetaData();
+        try (ResultSet rs = md.getColumns(null, null, "atm_quota", "%")) {
+            while (rs.next()) {
+                cols.add(rs.getString("COLUMN_NAME").toLowerCase(Locale.ROOT));
+            }
+        }
+
+        try (Statement st = c.createStatement()) {
+            if (!cols.contains("country")) {
+                st.executeUpdate("ALTER TABLE `atm_quota` ADD COLUMN `country` VARCHAR(64) NOT NULL DEFAULT ''");
+            }
+            if (!cols.contains("quota")) {
+                st.executeUpdate("ALTER TABLE `atm_quota` ADD COLUMN `quota` INT NOT NULL DEFAULT 0");
+            }
+            if (!cols.contains("updated_at")) {
+                st.executeUpdate(
+                        "ALTER TABLE `atm_quota` ADD COLUMN `updated_at` TIMESTAMP " +
+                                "NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
+                );
+            }
+        }
+
+        ATM_SCHEMA_CHECKED.set(true);
+    }
 
     /* ===================== LOG ===================== */
 
@@ -798,7 +847,7 @@ public class CountryRegistryJdbc {
         Bukkit.getLogger().severe("[CountryRegistryJdbc] DB error in " + where + ": " + t);
     }
 
-    private static void logDb(String where, String msg) {
-        Bukkit.getLogger().severe("[CountryRegistryJdbc] " + where + ": " + msg);
+    private static void logDb(String where) {
+        Bukkit.getLogger().severe("[CountryRegistryJdbc] " + where + ": " + "DBConnect()==null");
     }
 }

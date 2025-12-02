@@ -56,6 +56,8 @@ public class ZoneManager {
 
     /** временные точки создаваемого полигона по игроку */
     public final Map<UUID, List<Location>> zonePoints = new HashMap<>();
+    /** тип зоны, которую сейчас рисует игрок (для контроля addcorner/build) */
+    private final Map<UUID, ZoneType> pendingZoneType = new HashMap<>();
     /** все зоны по markerID */
     public final Map<String, ZoneInfo> zoneList = new HashMap<>();
     /** последняя зона игрока (для actionbar/удаления/price) */
@@ -91,14 +93,43 @@ public class ZoneManager {
             }
             case "removecorner" -> removeCorner(p);
             case "build" -> {
-                if (args.length < 2) { p.sendMessage(ChatColor.RED + "Использование: /ul zone build <zoneType> [zoneName]"); return; }
-                ZoneType t = ZoneType.valueOf(args[1].toUpperCase());
+                if (args.length < 2) {
+                    p.sendMessage(ChatColor.RED + "Использование: /ul zone build <zoneType> [zoneName]");
+                    return;
+                }
+
+                ZoneType requested;
+                try {
+                    requested = ZoneType.valueOf(args[1].toUpperCase());
+                } catch (IllegalArgumentException ex) {
+                    p.sendMessage(ChatColor.RED + "Неизвестный тип зоны.");
+                    return;
+                }
+
+                UUID id = p.getUniqueId();
+                ZoneType pending = pendingZoneType.get(id);
+                if (pending != null && pending != requested) {
+                    p.sendMessage(ChatColor.RED + "Вы начали строить зону типа "
+                            + ChatColor.GOLD + pending + ChatColor.RED +
+                            ". Используйте тот же тип в /ul zone build или начните новую зону.");
+                    return;
+                }
+
+                ZoneType t = (pending != null) ? pending : requested;
+
                 if (t == ZoneType.COUNTRY) {
-                    buildZoneCountry(p); // имя страны берём из КЭША
+                    buildZoneCountry(p);
                 } else {
-                    if (args.length < 3) { p.sendMessage(ChatColor.RED + "Использование: /ul zone build <zoneType> <zoneName>"); return; }
+                    if (args.length < 3) {
+                        p.sendMessage(ChatColor.RED + "Использование: /ul zone build <zoneType> <zoneName>");
+                        return;
+                    }
                     buildZone(p, t, args[2]);
                 }
+
+                // после успешного билда очищаем состояние
+                zonePoints.remove(id);
+                pendingZoneType.remove(id);
             }
             case "update" -> {
                 if (args.length < 2) { p.sendMessage(ChatColor.RED + "Использование: /ul zone update <corners|name|color> <значение>"); return; }
@@ -114,19 +145,22 @@ public class ZoneManager {
 
     public final Map<ZoneType, ZoneTypeData> zoneLimits = new HashMap<>() {{
         // displayName, areaLimit, index(приоритет), baseCost, allowOverlap, areaMultiplier, minSize, perm
-        put(ZoneType.COUNTRY,    new ZoneTypeData("Государство",      30000.0, 10, 100.0,  false, 0.70,  0, "unityLauncher.createZone.country"));
-        put(ZoneType.COLONY,     new ZoneTypeData("Колония",          10000.0,  5,  80.0,  false, 0.85,  0, "unityLauncher.createZone.colony"));
+        // Чем БОЛЬШЕ index, тем ВЫШЕ по иерархии (отображение / update / т.п.)
 
-        put(ZoneType.BANK,       new ZoneTypeData("Банк",               300.0,  3,  20.0,  false, 1.0, 150, "unityLauncher.createZone.bank"));
-        put(ZoneType.HOSPITAL,   new ZoneTypeData("Госпиталь",          700.0,  3,  15.0,  false, 1.0, 200, "unityLauncher.createZone.hospital"));
-        put(ZoneType.INDUSTRIAL, new ZoneTypeData("Промышленная зона", 1000.0,  3,  20.0,  false, 1.15, 50, "unityLauncher.createZone.industrial"));
-        put(ZoneType.PARK,     new ZoneTypeData("Парк",           1000.0,  3, 30.0,  false, 0.85,  0, "unityLauncher.createZone.region"));
-        put(ZoneType.CHURCH,     new ZoneTypeData("Церковь",            500.0,  3,  10.0,  false, 1.0,  20, "unityLauncher.createZone.church"));
-        put(ZoneType.LIBRARY,    new ZoneTypeData("Библиотека",         500.0,  3,  10.0,  false, 1.0,  20, "unityLauncher.createZone.library"));
-        put(ZoneType.GREENHOUSE,       new ZoneTypeData("Теплица",               900.0,  3,   5.0,  false, 1.0,  20, "unityLauncher.createZone.greenhouse"));
+        put(ZoneType.COUNTRY,    new ZoneTypeData("Государство",      30000.0, 1, 100.0,  false, 0.70,  0, "unityLauncher.createZone.country"));
+        put(ZoneType.COLONY,     new ZoneTypeData("Колония",          10000.0, 2,  80.0,  false, 0.85,  0, "unityLauncher.createZone.colony"));
 
-        put(ZoneType.SHOP,       new ZoneTypeData("Торговая точка",     500.0,  2,   3.0,  true,  1.0,  10, "unityLauncher.createZone.shop"));
+        put(ZoneType.BANK,       new ZoneTypeData("Банк",               300.0, 4,  20.0,  false, 1.0, 150, "unityLauncher.createZone.bank"));
+        put(ZoneType.HOSPITAL,   new ZoneTypeData("Госпиталь",          700.0, 4,  15.0,  false, 1.0, 200, "unityLauncher.createZone.hospital"));
+        put(ZoneType.INDUSTRIAL, new ZoneTypeData("Промышленная зона", 1000.0, 4,  20.0,  false, 1.15, 50, "unityLauncher.createZone.industrial"));
+        put(ZoneType.PARK,       new ZoneTypeData("Парк",              1000.0, 4,  30.0,  false, 0.85,  0, "unityLauncher.createZone.region"));
+        put(ZoneType.CHURCH,     new ZoneTypeData("Церковь",            500.0, 4,  10.0,  false, 1.0,  20, "unityLauncher.createZone.church"));
+        put(ZoneType.LIBRARY,    new ZoneTypeData("Библиотека",         500.0, 4,  10.0,  false, 1.0,  20, "unityLauncher.createZone.library"));
+        put(ZoneType.GREENHOUSE, new ZoneTypeData("Теплица",            900.0, 4,   5.0,  false, 1.0,  20, "unityLauncher.createZone.greenhouse"));
+
+        put(ZoneType.SHOP,       new ZoneTypeData("Торговая точка",     500.0, 10,  3.0,  true,  1.0,  10, "unityLauncher.createZone.shop"));
     }};
+
 
     // ==== Lifecycle / IO ====
     public ZoneManager(UnityLauncher plugin, SignManager signManager, BlueMapIntegration blueMapIntegration, ActivityTracker activityTracker) {
@@ -400,6 +434,18 @@ public class ZoneManager {
             p.sendMessage(ChatColor.RED + "Неверный тип зоны!"); return;
         }
 
+        UUID id = p.getUniqueId();
+
+        // Проверяем/фиксируем тип строящейся зоны
+        ZoneType existing = pendingZoneType.get(id);
+        List<Location> pts = zonePoints.computeIfAbsent(id, k -> new ArrayList<>());
+
+        if (existing != null && existing != type && !pts.isEmpty()) {
+            p.sendMessage(ChatColor.RED + "Вы уже строите зону типа " + ChatColor.GOLD + existing +
+                    ChatColor.RED + ". Завершите её или очистите точки перед сменой типа.");
+            return;
+        }
+        pendingZoneType.put(id, type);
 
         // Блокировка добавления точек для новой страны, если страна уже существует
         if (type == ZoneType.COUNTRY && playerHasCountryZone(p.getName())) {
@@ -415,9 +461,6 @@ public class ZoneManager {
                 return;
             }
         }
-
-        UUID id = p.getUniqueId();
-        List<Location> pts = zonePoints.computeIfAbsent(id, k -> new ArrayList<>());
 
         // Мир должен совпадать
         if (!pts.isEmpty() && !pts.getFirst().getWorld().equals(p.getWorld())) {
@@ -501,10 +544,23 @@ public class ZoneManager {
             p.sendMessage(ChatColor.RED + "Государство можно создавать только в Overworld."); return;
         }
 
-        // 4) в области ничего не должно быть
-        if (areaHasAnyZonesInsideOrIntersecting(pts, null)) {
-            p.sendMessage(ChatColor.RED + "Нельзя создать Государство: внутри/по границе уже есть другие зоны.");
-            return;
+        // 4) проверяем пересечения по общим правилам (разрешаем вложенные дочерние зоны)
+        ZoneInfo candidate = new ZoneInfo(
+                ZoneType.COUNTRY,
+                "tmp_id",
+                playerCountry,
+                "tmp_marker",
+                pts,
+                p.getName(),
+                org.bukkit.Color.WHITE
+        );
+        for (ZoneInfo existing : zoneList.values()) {
+            if (!canZonesCoexist(candidate, existing)) {
+                p.sendMessage(ChatColor.RED + "Нельзя создать Государство: конфликт с зоной "
+                        + ChatColor.GOLD + existing.getName()
+                        + ChatColor.RED + " (" + existing.getType() + ").");
+                return;
+            }
         }
 
         // 5) создаём
@@ -782,8 +838,11 @@ public class ZoneManager {
     }
 
     public void updateZone(Player p, String updateType, String value) {
-        ZoneInfo zi = resolvePlayerOwnZoneHere(p);
-        if (zi == null) { p.sendMessage(ChatColor.RED + "Вы не в своей зоне!"); return; }
+        ZoneInfo zi = resolvePlayerZoneForUpdate(p);
+        if (zi == null) {
+            p.sendMessage(ChatColor.RED + "Не удалось определить, какую из ваших зон редактировать. Зайдите в нужную зону ещё раз.");
+            return;
+        }
         playerLastZone.put(p.getUniqueId(), zi);
 
         switch (updateType) {
@@ -908,6 +967,13 @@ public class ZoneManager {
 
                     zi.getCorners().removeLast();
                     p.sendMessage(ChatColor.GRAY + "Удалена последняя точка.");
+
+                    // Общая проверка: новая форма зоны не должна пересекаться/включать другие зоны
+                    if (areaHasAnyZonesInsideOrIntersecting(tmp, zi.getMarkerID())) {
+                        p.sendMessage(ChatColor.RED + "Нельзя менять границы: новая форма зоны пересекается с другой зоной.");
+                        return;
+                    }
+
                 } else {
                     p.sendMessage(ChatColor.GRAY + "Используйте: /ul zone update corners +  или  -"); return;
                 }
@@ -918,6 +984,15 @@ public class ZoneManager {
                 saveZonesToConfig();
             }
             case "name" -> {
+                if (zi.getType() == ZoneType.COUNTRY) {
+                    p.sendMessage(ChatColor.RED + "Имя государства менять нельзя.");
+                    return;
+                }
+                if (value == null || value.isBlank()) {
+                    p.sendMessage(ChatColor.RED + "Название не может быть пустым.");
+                    return;
+                }
+
                 zi.setName(value);
                 upsertBlueMapMarker(zi, zi.getFillColor());
                 p.sendMessage(ChatColor.GREEN + "Название обновлено!");
@@ -972,6 +1047,31 @@ public class ZoneManager {
         playerLastZone.put(p.getUniqueId(), zi);
     }
 
+    /** Внутреннее удаление зоны: из памяти + BlueMap + кулдаун-метки. */
+    private void removeZoneInternal(ZoneInfo zi) {
+        if (zi == null) return;
+
+        // 1) Убираем из карты зон и кулдауна
+        zoneList.remove(zi.getMarkerID());
+        lastCornersEditByMarker.remove(zi.getMarkerID());
+
+        // 2) Чистим маркер на BlueMap
+        if (Bukkit.getPluginManager().isPluginEnabled("BlueMap") && !zi.getCorners().isEmpty()) {
+            BlueMapAPI.getInstance()
+                    .flatMap(api -> api.getMap(zi.getCorners().getFirst().getWorld().getName()))
+                    .ifPresent(map -> {
+                        String setId = "zones_" + zi.getType().name().toLowerCase();
+                        MarkerSet set = map.getMarkerSets().get(setId);
+                        if (set != null) {
+                            set.getMarkers().remove(zi.getMarkerID());
+                        }
+                        if (blueMapIntegration != null) {
+                            blueMapIntegration.saveBlueMapMarkers(setId);
+                        }
+                    });
+        }
+    }
+
     public void confirmRemoveZone(Player p) {
         ZoneInfo zi = playerLastZone.get(p.getUniqueId());
         if (zi == null) {
@@ -979,43 +1079,60 @@ public class ZoneManager {
             return;
         }
 
-        // 1) Если страна — широкаовещалка сразу (без ожидания БД)
+        // ===== УДАЛЕНИЕ СТРАНЫ С КАСКАДОМ =====
         if (zi.getType() == ZoneType.COUNTRY) {
+            // Имя страны (используем helper, чтобы не промахнуться)
+            String countryName = zoneCountry(zi);
+            if (countryName == null || countryName.isBlank()) {
+                // fallback — всё равно что-то выведем
+                countryName = zi.getName();
+            }
+            String normTarget = normCountry(countryName);
+
+            // Сохраняем онлайн-игроков этой страны, чтобы после удаления очистить им LP-префиксы
+            Set<UUID> affectedPlayers = Bukkit.getOnlinePlayers().stream()
+                    .filter(pl -> {
+                        String c = ul.countryRegistryJdbc.getCountryOfPlayer(pl.getName());
+                        return c != null && Objects.equals(normCountry(c), normTarget);
+                    })
+                    .map(Player::getUniqueId)
+                    .collect(Collectors.toSet());
+
+            // 0) Широковещалка
             Bukkit.broadcastMessage(
                     ChatColor.RED + "[Уведомление] Государство \"" +
-                            ChatColor.GOLD + zi.getName() +
+                            ChatColor.GOLD + countryName +
                             ChatColor.RED + "\" было удалено владельцем " +
                             ChatColor.YELLOW + p.getName() + ChatColor.RED + "."
             );
-        }
 
-        // 2) Локальная очистка (in-memory)
-        zoneList.remove(zi.getMarkerID());
-        // если ведёте таймстемпы редактирования углов — чистим тоже:
-        lastCornersEditByMarker.remove(zi.getMarkerID());
+            // 1) Собираем все зоны, принадлежащие этой стране:
+            //    - сама страна (COUNTRY)
+            //    - все её колонии (COLONY)
+            //    - все внутренние зоны, у которых ownerCountry = эта страна
+            List<ZoneInfo> toDelete = new ArrayList<>();
+            for (ZoneInfo z : new ArrayList<>(zoneList.values())) {
+                String zCountry = zoneCountry(z); // уже нормальный helper: ownerCountry, а для COUNTRY — name
+                if (zCountry == null || zCountry.isBlank()) continue;
+                if (Objects.equals(normCountry(zCountry), normTarget)) {
+                    toDelete.add(z);
+                }
+            }
 
-        // 3) BlueMap (удаление маркера набора зоны)
-        if (Bukkit.getPluginManager().isPluginEnabled("BlueMap") && !zi.getCorners().isEmpty()) {
-            BlueMapAPI.getInstance()
-                    .flatMap(api -> api.getMap(zi.getCorners().getFirst().getWorld().getName()))
-                    .ifPresent(map -> {
-                        String setId = "zones_" + zi.getType().name().toLowerCase();
-                        MarkerSet set = map.getMarkerSets().get(setId);
-                        if (set != null) set.getMarkers().remove(zi.getMarkerID());
-                        if (blueMapIntegration != null) {
-                            blueMapIntegration.saveBlueMapMarkers(setId);
-                        }
-                    });
-        }
+            // 2) Удаляем все найденные зоны локально
+            for (ZoneInfo z : toDelete) {
+                removeZoneInternal(z);
+            }
 
-        p.sendMessage(ChatColor.GREEN + "Зона \"" + zi.getName() + "\" удалена!");
-        playerLastZone.remove(p.getUniqueId());
+            p.sendMessage(ChatColor.GREEN + "Государство \"" + countryName
+                    + "\" и все связанные с ним зоны (" + toDelete.size() + " шт.) удалены.");
 
-        // 4) Фиксируем YAML на диск (без БД)
-        saveZonesToConfig();
+            // Сбрасываем lastZone игрока и сохраняем YAML
+            playerLastZone.remove(p.getUniqueId());
+            saveZonesToConfig();
 
-        // 5) Если удалили страну — уходим в фон и делаем РОВНО ОДНУ БД-транзакцию
-        if (zi.getType() == ZoneType.COUNTRY) {
+            // 3) Асинхронная очистка по БД — как у тебя было, только используем countryName
+            String finalCountryName = countryName;
             Bukkit.getScheduler().runTaskAsynchronously(ul, () -> {
                 try (Connection conn = UnityLauncher.DBConnect()) {
                     if (conn == null) {
@@ -1023,31 +1140,56 @@ public class ZoneManager {
                     }
                     try {
                         conn.setAutoCommit(false);
+
                         // 1. Чистим отношения дипломатии для этой страны, если DAO есть
                         if (UnityLauncher.getInstance().countryRelationshipDao != null) {
-                            UnityLauncher.getInstance().countryRelationshipDao.deleteByCountryTx(conn, zi.getName());
+                            UnityLauncher.getInstance().countryRelationshipDao.deleteByCountryTx(conn, finalCountryName);
                         }
+
                         // 2. Удаляем страну из таблицы Countries + чистим локальный кэш CountryRegistryJdbc
-                        UnityLauncher.getInstance().countryRegistryJdbc.deleteCountryTx(conn, zi.getName());
+                        UnityLauncher.getInstance().countryRegistryJdbc.deleteCountryTx(conn, finalCountryName);
+
                         conn.commit();
                     } catch (Exception inner) {
                         try { conn.rollback(); } catch (Exception ignore) {}
                         throw inner;
                     }
-                    // сообщим в лог на главном потоке
-                    Bukkit.getScheduler().runTask(ul, () ->
-                            Bukkit.getLogger().info("[Zones] Страна \"" + zi.getName() + "\" удалена из БД (TX ok).")
-                    );
+
+                    // После успешного коммита — на главном потоке чистим LP-префиксы и пишем лог
+                    Bukkit.getScheduler().runTask(ul, () -> {
+                        var prefixService = UnityLauncher.getInstance().luckPermsPrefixService;
+                        if (prefixService != null && !affectedPlayers.isEmpty()) {
+                            for (UUID uuid : affectedPlayers) {
+                                prefixService.clear(uuid);
+                            }
+                        } else if (prefixService == null && !affectedPlayers.isEmpty()) {
+                            Bukkit.getLogger().warning("[UnityLauncher] luckPermsPrefixService == null при удалении страны " + finalCountryName);
+                        }
+
+                        Bukkit.getLogger().info("[Zones] Страна \"" + finalCountryName + "\" и её зоны удалены из БД (TX ok).");
+                    });
 
                 } catch (Exception ex) {
                     Bukkit.getScheduler().runTask(ul, () -> {
-                        Bukkit.getLogger().warning("[Zones] Ошибка удаления страны \"" + zi.getName() + "\" из БД: " + ex.getMessage());
+                        Bukkit.getLogger().warning("[Zones] Ошибка при удалении страны \"" + finalCountryName + "\" из БД: " + ex.getMessage());
                         p.sendMessage(ChatColor.RED + "Удаление страны в БД завершилось ошибкой, см. консоль.");
                     });
                 }
             });
+
+
+            return;
         }
 
+        // ===== Обычная зона (не страна) =====
+
+        removeZoneInternal(zi);
+
+        p.sendMessage(ChatColor.GREEN + "Зона \"" + zi.getName() + "\" удалена!");
+        playerLastZone.remove(p.getUniqueId());
+
+        // Фиксируем YAML
+        saveZonesToConfig();
     }
 
     public void cancelRemoveZone(Player p) {
@@ -1125,41 +1267,59 @@ public class ZoneManager {
 
         if (Objects.equals(prev, next)) return;
 
-        // Подготовим тексты
+        String barText;
+
         if (next == null) {
-            // Вышли из любой зоны
-            // Большой: Title "Вы покинули зону"
-            p.sendTitle(ChatColor.RED + "Вы покинули зону", "", 5, 40, 10);
-
-            // Маленький: страна отсутствует
-            p.spigot().sendMessage(ChatMessageType.ACTION_BAR,
-                    new TextComponent(ChatColor.DARK_GRAY + "Страна: " + ChatColor.GRAY + "—"));
-
+            // Вышли из любых зон
+            barText = ChatColor.DARK_GRAY + "Зона: " + ChatColor.GRAY + "—";
         } else {
-            ZoneTypeData ztd = zoneLimits.get(next.getType());
-            String typeName = (ztd != null ? ztd.displayName() : next.getType().name());
-            String zoneName = next.getName();
+            ZoneType type = next.getType();
+            String country = resolveDisplayCountry(next); // страна/колония, если есть
 
-            // Большой: Title с типом и названием зоны (а если был prev — короткий «A → B» тоже вмещается в сабтайтл)
-            String title = ChatColor.GOLD + typeName;
-            String subtitle;
-            if (prev == null) {
-                subtitle = ChatColor.YELLOW + "«" + zoneName + "»";
-            } else {
-                subtitle = ChatColor.GRAY + "из " + ChatColor.YELLOW + "«" + prev.getName() + "»"
-                        + ChatColor.GRAY + " → " + ChatColor.GOLD + "«" + zoneName + "»";
+            switch (type) {
+                case COUNTRY -> {
+                    // Вход в страну: показываем только название страны
+                    String name = (country != null && !country.isBlank())
+                            ? country
+                            : next.getName();
+                    barText = ChatColor.DARK_GREEN + "Страна: " + ChatColor.GREEN + name;
+                }
+                case SHOP -> {
+                    // Вход в магазин: только название магазина (опционально можно подсунуть страну в скобках)
+                    barText = ChatColor.GOLD + "Магазин: " + ChatColor.YELLOW + next.getName();
+                    if (country != null && !country.isBlank()) {
+                        barText += ChatColor.GRAY + " (" +
+                                ChatColor.DARK_GREEN + "Страна: " +
+                                ChatColor.GREEN + country +
+                                ChatColor.GRAY + ")";
+                    }
+                }
+                default -> {
+                    // Вход в обычную зону внутри страны/колонии:
+                    // показываем название зоны + страну, в которой она находится
+                    ZoneTypeData ztd = zoneLimits.get(type);
+                    String typeName = (ztd != null ? ztd.displayName() : type.name());
+
+                    barText = ChatColor.GOLD + typeName + ": " +
+                            ChatColor.YELLOW + next.getName();
+
+                    if (country != null && !country.isBlank()) {
+                        barText += ChatColor.GRAY + " | " +
+                                ChatColor.DARK_GREEN + "Страна: " +
+                                ChatColor.GREEN + country;
+                    }
+                }
             }
-            p.sendTitle(title, subtitle, 5, 40, 10);
-
-            // Маленький: страна зоны/родителя
-            String country = resolveDisplayCountry(next);
-            p.spigot().sendMessage(ChatMessageType.ACTION_BAR,
-                    new TextComponent(ChatColor.DARK_GREEN + "Страна: " + ChatColor.GREEN + country));
         }
+
+        // Только маленькая надпись снизу, без Title
+        p.spigot().sendMessage(
+                ChatMessageType.ACTION_BAR,
+                new TextComponent(barText)
+        );
 
         playerLastZone.put(p.getUniqueId(), next);
     }
-
 
     public ZoneInfo getZoneAt(Location loc) {
         World w = loc.getWorld();
@@ -1325,6 +1485,40 @@ public class ZoneManager {
     private static float fnum(Map<?, ?> m, String key) {
         Object v = m.get(key);
         return (v instanceof Number) ? ((Number) v).floatValue() : (float) 0.0;
+    }
+
+    /**
+     * Специальный резолвер зоны именно для /ul zone update:
+     *
+     * 1) Если есть lastZone → берём её (можно редактировать хоть снаружи).
+     * 2) Иначе пробуем зону под игроком (getZoneAt), но только если он её владелец.
+     * 3) Если всё ещё ничего нет — если у игрока ровно ОДНА зона-владелец, берём её.
+     *    Если их несколько, возвращаем null (чтобы не гадать, какую именно он хотел).
+     */
+    private ZoneInfo resolvePlayerZoneForUpdate(Player p) {
+        // 1) Последняя запомненная зона игрока
+        ZoneInfo zi = playerLastZone.get(p.getUniqueId());
+        if (zi != null && zoneList.containsValue(zi)) {
+            return zi;
+        }
+
+        // 2) Зона "под ногами", если он её владелец
+        ZoneInfo here = getZoneAt(p.getLocation());
+        if (here != null && NameUtil.eqCi(here.getOwner(), p.getName())) {
+            return here;
+        }
+
+        // 3) Фоллбек: если у игрока ровно одна своя зона — используем её
+        ZoneInfo owned = null;
+        for (ZoneInfo z : zoneList.values()) {
+            if (!NameUtil.eqCi(z.getOwner(), p.getName())) continue;
+            if (owned != null) {
+                // Больше одной зоны — непонятно, какую редактировать
+                return null;
+            }
+            owned = z;
+        }
+        return owned;
     }
 
     // ==== Resolve player's current own zone ====

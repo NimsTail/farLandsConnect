@@ -16,6 +16,8 @@ import de.bluecolored.bluemap.api.markers.MarkerSet;
 import de.bluecolored.bluemap.api.math.Shape;
 import org.bukkit.*;
 import org.bukkit.block.*;
+import org.bukkit.block.data.BlockData;
+import org.bukkit.block.data.Directional;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.HumanEntity;
@@ -1013,15 +1015,23 @@ public class SignManager implements Listener {
             // 3.1.2: если есть прикреплённые к этому блоку наши магазинные таблички — запрет
             for (BlockFace f : new BlockFace[]{ BlockFace.NORTH, BlockFace.SOUTH, BlockFace.EAST, BlockFace.WEST, BlockFace.UP, BlockFace.DOWN }) {
                 Block nb = brokenBlock.getRelative(f);
-                if (!(nb.getState() instanceof Sign neighborSign)) continue;
+                if (!(nb.getState() instanceof Sign)) continue;
+
                 SignVariables sv = genericSignList.get(nb.getLocation());
                 if (sv == null) continue;
-                if (sv.getSignCategory() == SignCategory.SHOP_SOURCE || sv.getSignCategory() == SignCategory.SHOP_LIST) {
-                    event.setCancelled(true);
-                    player.sendMessage(ChatColor.RED + "В магазине ломать может только владелец SHOP-зоны.");
-                    return;
+                if (sv.getSignCategory() != SignCategory.SHOP_SOURCE
+                        && sv.getSignCategory() != SignCategory.SHOP_LIST) {
+                    continue;
                 }
+
+                // ВАЖНО: запрещаем только если табличка реально ПРИКРЕПЛЕНА к этому блоку
+                if (!isAttachedToBlock(nb, brokenBlock)) continue;
+
+                event.setCancelled(true);
+                player.sendMessage(ChatColor.RED + "В магазине ломать может только владелец SHOP-зоны.");
+                return;
             }
+
         }
 
         // === 1) Если ломают саму табличку (включая hanging)
@@ -1767,16 +1777,47 @@ public class SignManager implements Listener {
         return nearest;
     }
 
-    private boolean isAttachedToBlock(Block signBlock, Block possibleSupportingBlock) {
-        if (!(signBlock.getState() instanceof Sign signState)) return false;
-        BlockFace face = signState.getBlock().getFace(possibleSupportingBlock);
-        if (face == null) return false;
-        Block attachedBlock = signBlock.getRelative(face);
-        if (attachedBlock.getType() == Material.AIR) {
-            return false;
+    // Возвращает блок, на котором держится табличка (стена / пол / потолок / цепь)
+    private Block getSignSupportBlock(Block signBlock) {
+        BlockState state = signBlock.getState();
+        if (!(state instanceof Sign)) return null;
+
+        Material type = signBlock.getType();
+        BlockData data = signBlock.getBlockData();
+        String name = type.name();
+
+        // Настенные таблички и настенные свисающие таблички
+        if (data instanceof Directional directional &&
+                (name.endsWith("WALL_SIGN") || name.endsWith("WALL_HANGING_SIGN"))) {
+
+            BlockFace facing = directional.getFacing();        // куда смотрит
+            BlockFace attached = facing.getOppositeFace();     // к чему прикреплена
+            return signBlock.getRelative(attached);
         }
-        return attachedBlock.equals(possibleSupportingBlock);
+
+        // Обычные стоячие таблички — стоят на блоке снизу
+        if (name.endsWith("_SIGN") && !name.contains("WALL") && !name.contains("HANGING")) {
+            return signBlock.getRelative(BlockFace.DOWN);
+        }
+
+        // Свисающие (цепь к потолку)
+        if (name.endsWith("HANGING_SIGN") && !name.contains("WALL")) {
+            return signBlock.getRelative(BlockFace.UP);
+        }
+
+        // Фоллбек: если есть направление — используем его, иначе считаем что стоит на блоке снизу
+        if (data instanceof Directional dir) {
+            return signBlock.getRelative(dir.getFacing().getOppositeFace());
+        }
+
+        return signBlock.getRelative(BlockFace.DOWN);
     }
+
+    private boolean isAttachedToBlock(Block signBlock, Block possibleSupportingBlock) {
+        Block support = getSignSupportBlock(signBlock);
+        return support != null && support.equals(possibleSupportingBlock);
+    }
+
 
     public ExtrudeMarker isSignWithinMarker(Location signLocation, String setName) {
         boolean debug = false;

@@ -15,77 +15,88 @@ public class CommandCompleter implements TabCompleter {
 
     @Nullable
     @Override
-    public List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command command, @NotNull String alias, @NotNull String[] args) {
+    public List<String> onTabComplete(@NotNull CommandSender sender,
+                                      @NotNull Command command,
+                                      @NotNull String alias,
+                                      @NotNull String[] args) {
+
         List<String> completions = new ArrayList<>();
         ZoneManager zoneManager = UnityLauncher.getInstance().getZoneManager();
 
-        // Проверяем количество аргументов
+        // первый аргумент — список подкоманд /ul <...>
         if (args.length == 1) {
-            // Предлагаем команды на первом уровне аргументов
-            completions.add("rcode");
+            // auth
+            completions.add("login");
+            completions.add("reg");
+            completions.add("change");         // смена пароля
+
+            // экономика/инфо
             completions.add("balance");
-            completions.add("notifications");
-            completions.add("countrybalance");
-            completions.add("daydeal");
-            completions.add("group");
-            completions.add("change");
-            completions.add("top");
             completions.add("country");
+
+            // зоны / дипломатия
             completions.add("zone");
             completions.add("relations");
 
+            // легаси/заглушки (пока команды существуют в UnityCommands)
+            completions.add("notifications");
+            completions.add("countrybalance");
+            completions.add("daydeal");
+
         } else if (args.length == 2) {
             switch (args[0].toLowerCase()) {
-                case "zone":
+                case "zone" -> {
                     completions.add("build");
                     completions.add("addcorner");
                     completions.add("removecorner");
                     completions.add("update");
                     completions.add("remove");
                     completions.add("price");
-                    break;
-                case "top":
+                }
+                case "top" -> {
                     completions.add("Playtime");
                     completions.add("Balance");
                     completions.add("Events");
-                    break;
-                case "notifications":
+                }
+                case "notifications" -> {
                     completions.add("on");
                     completions.add("off");
-                    break;
-                case "group":
+                }
+                case "group" -> {
                     completions.add("list");
                     completions.add("set");
                     completions.add("prefix");
-                    break;
-                case "countrybalance":
+                }
+                case "countrybalance" -> {
                     completions.add("add");
                     completions.add("withdraw");
-                    break;
-
+                }
+                // login/reg/change — сюда подсказки не нужны, там идёт пароль/аргумент
             }
-        }
-        else if (args.length == 3) {
-            switch (args[1].toLowerCase()) {
 
-                case "update":
+        } else if (args.length == 3) {
+            switch (args[1].toLowerCase()) {
+                case "update" -> {
                     completions.add("corners");
                     completions.add("name");
                     completions.add("color");
-                    break;
-                case "build", "addcorner":
-                    for (ZoneType zoneType : zoneManager.zoneLimits.keySet()) {
-                        completions.add(zoneType.toString().toUpperCase());
+                }
+                case "build", "addcorner" -> {
+                    if (zoneManager != null) {
+                        for (ZoneType zoneType : zoneManager.zoneLimits.keySet()) {
+                            completions.add(zoneType.toString().toUpperCase());
+                        }
                     }
-                    break;
+                }
             }
-        }
-        else if (args.length == 4) {
+
+        } else if (args.length == 4) {
             if (args[2].equalsIgnoreCase("corners")) {
                 completions.add("+");
                 completions.add("-");
             }
         }
+
         return completions;
     }
 }

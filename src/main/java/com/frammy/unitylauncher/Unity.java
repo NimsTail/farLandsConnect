@@ -152,7 +152,7 @@ public class Unity implements CommandExecutor {
                 plugin.getZoneManager().scheduleSignOwnershipRecalc(plugin.getSignManager(), 200);
             }
 
-            // 3) zones-economy.yml (отдельный файл)
+            // 4) zones-economy.yml (отдельный файл)
             ZonesEconomyConfig.load(plugin);
 
             sender.sendMessage(ChatColor.GREEN + "UnityLauncher: конфиг, сообщения, апгрейды и зоны перезагружены.");
@@ -167,14 +167,7 @@ public class Unity implements CommandExecutor {
 
         // ===================== /ul (без аргументов) =====================
         if (args.length == 0) {
-            sender.sendMessage(ChatColor.YELLOW + "Выбери категорию команды:\n");
-            for (String cat : plugin.commandCategories) {
-                Component clickableCategory = Component.text("[> " + cat)
-                        .color(NamedTextColor.GRAY)
-                        .clickEvent(ClickEvent.runCommand("/ul help " + cat))
-                        .hoverEvent(HoverEvent.showText(Component.text("Нажми, чтобы показать команды категории")));
-                p.sendMessage(clickableCategory);
-            }
+            sendRootUlHelp(p);
             return true;
         }
 
@@ -230,8 +223,7 @@ public class Unity implements CommandExecutor {
 
                 case "balance":
                 case "bal": {
-                    double balance = UnityCommands.getInstance().getMoney(sender);
-                    sender.sendMessage("Ваш баланс: " + ChatColor.GREEN + balance + ChatColor.RESET + "!");
+                    UnityCommands.getInstance().getMoney(sender);
                     return true;
                 }
 
@@ -241,13 +233,29 @@ public class Unity implements CommandExecutor {
                 }
 
                 case "change": {
-                    // подсказка по смене пароля (реальная смена — при 3 аргументах)
-                    sender.sendMessage("Введи старый, а затем желаемый пароль!");
+                    // Тупо подсказка — реальная смена пароля только при 3 аргументах
+                    sender.sendMessage(ChatColor.YELLOW + "Используй: /ul change <старый_пароль> <новый_пароль>");
                     return true;
                 }
 
                 case "notifications": {
                     UnityCommands.getInstance().getNotifications(sender);
+                    return true;
+                }
+
+                case "help": {
+                    // /ul help → тот же вывод, что и просто /ul
+                    sendRootUlHelp(p);
+                    return true;
+                }
+
+                case "daydeal": {
+                    sender.sendMessage(ChatColor.YELLOW + "Ежедневные предложения появятся в следующих обновлениях.");
+                    return true;
+                }
+
+                case "relations": {
+                    sender.sendMessage(ChatColor.YELLOW + "Система отношений между странами появится в следующих обновлениях.");
                     return true;
                 }
 
@@ -304,6 +312,12 @@ public class Unity implements CommandExecutor {
                     return true;
                 }
 
+                case "change": {
+                    // /ul change <old>  — нет нового пароля
+                    sender.sendMessage(ChatColor.RED + "Не указан новый пароль. Используй: /ul change <старый_пароль> <новый_пароль>");
+                    return true;
+                }
+
                 default:
                     return true;
             }
@@ -313,8 +327,21 @@ public class Unity implements CommandExecutor {
         if (args.length == 3) {
             String sub0 = args[0].toLowerCase(Locale.ROOT);
 
-            if (sub0.equals("change")) {// /ul change <old> <new>
-                UnityCommands.getInstance().changePass(sender, args[1], args[2]);
+            if (sub0.equals("change")) { // /ul change <old> <new>
+                String oldPass = args[1];
+                String newPass = args[2];
+
+                if (newPass.isBlank()) {
+                    sender.sendMessage(ChatColor.RED + "Не указан новый пароль. Используй: /ul change <старый_пароль> <новый_пароль>");
+                    return true;
+                }
+
+                if (oldPass.equals(newPass)) {
+                    sender.sendMessage(ChatColor.RED + "Новый пароль совпадает со старым. Смена пароля не имеет смысла.");
+                    return true;
+                }
+
+                UnityCommands.getInstance().changePass(sender, oldPass, newPass);
                 return true;
             }
             return true;
@@ -322,5 +349,19 @@ public class Unity implements CommandExecutor {
 
         // прочие конфигурации аргументов пока не используются
         return true;
+    }
+
+    /**
+     * Общий вывод "корневой" помощи /ul и /ul help
+     */
+    private void sendRootUlHelp(Player p) {
+        p.sendMessage(ChatColor.YELLOW + "Выбери категорию команды:\n");
+        for (String cat : plugin.commandCategories) {
+            Component clickableCategory = Component.text("[> " + cat)
+                    .color(NamedTextColor.GRAY)
+                    .clickEvent(ClickEvent.runCommand("/ul help " + cat))
+                    .hoverEvent(HoverEvent.showText(Component.text("Нажми, чтобы показать команды категории")));
+            p.sendMessage(clickableCategory);
+        }
     }
 }

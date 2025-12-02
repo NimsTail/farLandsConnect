@@ -4,12 +4,14 @@ import com.frammy.unitylauncher.zones.countryrelations.CountryRegistryJdbc;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.google.gson.Gson;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.jetbrains.annotations.NotNull;
- import com.google.gson.Gson;
+
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -41,7 +43,8 @@ public class UnityCommands {
     }
 
     private CountryRegistryJdbc registry() {
-        return UnityLauncher.getInstance().getCountryRegistryJdbc();
+        UnityLauncher ul = UnityLauncher.getInstance();
+        return (ul != null) ? ul.countryRegistryJdbc : null;
     }
 
     /* ===================== КЭШ Users.* JSON (4 колонки) ===================== */
@@ -211,7 +214,8 @@ public class UnityCommands {
                 // countryName — сначала SocialData, если пусто — спросим у CountryRegistryJdbc
                 String c = null;
                 if (row.social.has("countryName")) c = safeGetString(row.social.get("countryName"));
-                if (c == null) c = registry().getCountryOfPlayer(playerName);
+                CountryRegistryJdbc reg = registry();
+                if (c == null && reg != null) c = reg.getCountryOfPlayer(playerName);
                 pd.countryName = c;
                 callback.accept(pd);
             } catch (Exception e) {
@@ -228,106 +232,13 @@ public class UnityCommands {
 
     /* ===================== Команды (новая логика) ===================== */
 
-//    /** /pay <ник> <сумма> [комиссия] */
-//    public void pay(@NotNull CommandSender sender, String receiver, double amount, double customFee) {
-//        final String senderName = sender.getName();
-//        if (senderName.equalsIgnoreCase(receiver)) { sender.sendMessage(ChatColor.RED + "Нельзя отправить самому себе."); return; }
-//        if (amount <= 0) { sender.sendMessage(ChatColor.RED + "Сумма должна быть > 0."); return; }
-//
-//        CountryRegistryJdbc reg = registry();
-//        String sCountry = reg.getCountryOfPlayer(senderName);
-//        String rCountry = reg.getCountryOfPlayer(receiver);
-//
-//        final double feeFraction;
-//        if (customFee >= 0.0) {
-//            feeFraction = Math.max(0.0, customFee);
-//        } else {
-//            double defaultPct = 8.0;
-//            double sPct = (sCountry != null) ? reg.getCountryTransferFeePctOr(sCountry, defaultPct) : defaultPct;
-//            double rPct = (rCountry != null) ? reg.getCountryTransferFeePctOr(rCountry, defaultPct) : defaultPct;
-//            feeFraction = Math.max(sPct, rPct) / 100.0;
-//        }
-//
-//        try (Connection con = DBConnect()) {
-//            if (con == null) { sender.sendMessage(ChatColor.RED + "База недоступна."); return; }
-//            con.setAutoCommit(false);
-//
-//            UserJsonRow sRow = lockAndReadUserMoney(con, senderName);
-//            UserJsonRow rRow = lockAndReadUserMoney(con, receiver);
-//            if (sRow == null) { sender.sendMessage(ChatColor.RED + "Тебя нет в базе."); con.rollback(); return; }
-//            if (rRow == null) { sender.sendMessage(ChatColor.RED + "Получатель не найден."); con.rollback(); return; }
-//
-//            double sMoney = (sRow.money != null) ? sRow.money : 0.0;
-//            double rMoney = (rRow.money != null) ? rRow.money : 0.0;
-//            if (sMoney < amount) { sender.sendMessage(ChatColor.RED + "Недостаточно средств."); con.rollback(); return; }
-//
-//            double toReceiver = Math.max(0.0, amount * (1.0 - feeFraction));
-//
-//            writeUserMoney(con, senderName, sMoney - amount);
-//            writeUserMoney(con, receiver,   rMoney + toReceiver);
-//
-//            con.commit();
-//
-//            Player rp = Bukkit.getPlayerExact(receiver);
-//            if (rp != null) {
-//                rp.sendMessage("Получено " + ChatColor.GREEN + String.format("%.2f", toReceiver) + ChatColor.RESET +
-//                        " от " + senderName + " (комиссия: " + String.format("%.2f", feeFraction * 100) + "%).");
-//            }
-//            sender.sendMessage("Отправлено " + ChatColor.GREEN + String.format("%.2f", amount) + "Ⓕ" + ChatColor.RESET +
-//                    " игроку " + receiver + ". Получит: " + String.format("%.2f", toReceiver) +
-//                    "Ⓕ (комиссия: " + String.format("%.2f", feeFraction * 100) + "%).");
-//
-//        } catch (Exception e) {
-//            sender.sendMessage(ChatColor.RED + "Ошибка платежа.");
-//            Bukkit.getLogger().warning("[UnityCommands] pay: " + e);
-//        }
-//    }
-//
-//    /** /countrybalance add|withdraw <сумма> */
-//    public void CountryMoney(@NotNull CommandSender sender, boolean deposit, double amount) {
-//        if (amount <= 0) { sender.sendMessage(ChatColor.RED + "Сумма должна быть > 0."); return; }
-//        final String player = sender.getName();
-//        CountryRegistryJdbc reg = registry();
-//        String country = reg.getCountryOfPlayer(player);
-//        if (country == null || country.isBlank()) { sender.sendMessage(ChatColor.RED + "Вы не состоите в стране."); return; }
-//        boolean isLeader = reg.isCountryLeaderCached(player);
-//
-//        try (Connection con = DBConnect()) {
-//            if (con == null) { sender.sendMessage(ChatColor.RED + "База недоступна."); return; }
-//            con.setAutoCommit(false);
-//
-//            UserJsonRow u = lockAndReadUserMoney(con, player);
-//            if (u == null) { sender.sendMessage(ChatColor.RED + "Игрок не найден в БД."); con.rollback(); return; }
-//            double userMoney = (u.money != null) ? u.money : 0.0;
-//
-//            Double cMoney = lockAndReadCountryMoney(con, country);
-//            double countryMoney = (cMoney != null) ? cMoney : 0.0;
-//
-//            if (deposit) {
-//                if (userMoney < amount) { sender.sendMessage(ChatColor.RED + "Недостаточно средств."); con.rollback(); return; }
-//                writeUserMoney(con, player, userMoney - amount);
-//                writeCountryMoney(con, country, countryMoney + amount);
-//                con.commit();
-//                sender.sendMessage(ChatColor.GREEN + "В казну зачислено " + String.format("%.2f", amount) + "Ⓕ.");
-//            } else {
-//                if (!isLeader) { sender.sendMessage(ChatColor.RED + "Выводить из казны может только лидер."); con.rollback(); return; }
-//                if (countryMoney < amount) { sender.sendMessage(ChatColor.RED + "В казне недостаточно средств."); con.rollback(); return; }
-//                writeCountryMoney(con, country, countryMoney - amount);
-//                writeUserMoney(con, player, userMoney + amount);
-//                con.commit();
-//                sender.sendMessage(ChatColor.GREEN + "Из казны выведено " + String.format("%.2f", amount) + "Ⓕ.");
-//            }
-//        } catch (Exception e) {
-//            sender.sendMessage(ChatColor.RED + "Ошибка операции.");
-//            Bukkit.getLogger().warning("[UnityCommands] CountryMoney: " + e);
-//        }
-//    }
-
-    /** /bal — читает JSON-баланс и печатает его. */
-    public double getMoney(@NotNull CommandSender sender) {
+    /**
+     * /bal — читает JSON-баланс и печатает его.
+     */
+    public void getMoney(@NotNull CommandSender sender) {
         double bal = 0.0;
         try (Connection con = DBConnect()) {
-            if (con == null) { sender.sendMessage(ChatColor.RED + "База недоступна."); return 0.0; }
+            if (con == null) { sender.sendMessage(ChatColor.RED + "База недоступна."); return; }
             String sql = "SELECT JSON_EXTRACT(GeneralData,'$.money') AS m FROM Users WHERE Name=? LIMIT 1";
             try (PreparedStatement ps = con.prepareStatement(sql)) {
                 ps.setString(1, sender.getName());
@@ -343,19 +254,35 @@ public class UnityCommands {
             Bukkit.getLogger().warning("[UnityCommands] getMoney: " + e);
         }
         sender.sendMessage("Ваш баланс: " + ChatColor.GREEN + String.format("%.2f", bal) + ChatColor.RESET + "Ⓕ");
-        return bal;
     }
 
     /** /country — по новой логике: страна из CountryRegistryJdbc, лидер оттуда, казна из JSON. */
     public void getCountry(@NotNull CommandSender sender) {
         String me = sender.getName();
         CountryRegistryJdbc reg = registry();
+        if (reg == null) {
+            sender.sendMessage(ChatColor.RED + "Система стран недоступна.");
+            return;
+        }
+
         String country = reg.getCountryOfPlayer(me);
         if (country == null || country.isBlank()) {
             sender.sendMessage(ChatColor.RED + "Вы не состоите ни в одной стране.");
             return;
         }
+
         String leader = reg.getLeaderOfCountry(country);
+        String leaderDisplay = "—";
+        if (leader != null && !leader.isBlank()) {
+            // Попробуем достать нормальный ник с правильным регистром
+            var op = Bukkit.getOfflinePlayer(leader);
+            if (op.getName() != null) {
+                leaderDisplay = op.getName();
+            } else {
+                leaderDisplay = leader;
+            }
+        }
+
         Double money = 0.0;
         try (Connection con = DBConnect()) {
             if (con != null) {
@@ -370,39 +297,55 @@ public class UnityCommands {
         } catch (Exception e) {
             Bukkit.getLogger().warning("[UnityCommands] getCountry: " + e);
         }
+
+        sender.sendMessage(ChatColor.DARK_GREEN + "=== Информация о государстве ===");
         sender.sendMessage("Государство: " + ChatColor.GOLD + country + ChatColor.RESET);
-        sender.sendMessage("Лидер: " + ChatColor.AQUA + (leader != null ? leader : "—"));
+        sender.sendMessage("Лидер: " + ChatColor.AQUA + leaderDisplay);
         sender.sendMessage("Казна: " + ChatColor.GREEN + String.format("%.2f", (money != null ? money : 0.0)) + ChatColor.RESET + "Ⓕ");
     }
 
-//    /** /rcode — берём GeneralData.regCode (как в твоём дампе). */
-//    public void rCode(@NotNull CommandSender sender) {
-//        try (Connection con = DBConnect()) {
-//            if (con == null) { sender.sendMessage(ChatColor.RED + "База недоступна."); return; }
-//            String sql = "SELECT JSON_EXTRACT(GeneralData,'$.regCode') AS rc FROM Users WHERE Name=? LIMIT 1";
-//            try (PreparedStatement ps = con.prepareStatement(sql)) {
-//                ps.setString(1, sender.getName());
-//                try (ResultSet rs = ps.executeQuery()) {
-//                    if (rs.next()) {
-//                        String raw = rs.getString("rc");
-//                        String code = parseJsonString(raw);
-//                        if (code == null || code.equals("0") || code.isBlank()) {
-//                            sender.sendMessage(ChatColor.RED + "Сначала зарегистрируйтесь в FarLands клиенте.");
-//                        } else {
-//                            sender.sendMessage("Твой код регистрации: " + ChatColor.GREEN + code);
-//                        }
-//                    } else {
-//                        sender.sendMessage(ChatColor.RED + "Тебя нет в базе данных.");
-//                    }
-//                }
-//            }
-//        } catch (Exception e) {
-//            sender.sendMessage(ChatColor.RED + "Ошибка запроса к базе.");
-//            Bukkit.getLogger().warning("[UnityCommands] rCode: " + e);
-//        }
-//    }
-
     // ==== AUTH: /ul login <pass>  и  /ul reg <pass> ====
+
+    // Анти-брутфорс по UUID+IP
+    private static final int MAX_LOGIN_FAILS = 5;
+    private static final long LOGIN_BLOCK_MS = 30_000L; // 30 секунд
+    private static final ConcurrentHashMap<String, LoginFailState> LOGIN_FAILS = new ConcurrentHashMap<>();
+
+    private static final class LoginFailState {
+        int attempts;
+        long blockedUntilMs;
+    }
+
+    /** Общая проверка качества пароля по нашим правилам. */
+    private static boolean validatePasswordPolicy(String pass, CommandSender sender) {
+        String what = "Новый пароль";
+        if (pass == null || pass.isBlank()) {
+            sender.sendMessage(ChatColor.RED + what + " не может быть пустым.");
+            return false;
+        }
+
+        int len = pass.length();
+        if (len < 8 || len > 128) {
+            sender.sendMessage(ChatColor.RED + what + " должен быть от 8 до 128 символов.");
+            return false;
+        }
+
+        byte[] bytes = pass.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > 512) {
+            sender.sendMessage(ChatColor.RED + what + " слишком длинный по байтам (UTF-8 > 512). Укороти его.");
+            return false;
+        }
+
+        for (int i = 0; i < pass.length(); i++) {
+            char c = pass.charAt(i);
+            if (Character.isWhitespace(c) || Character.isISOControl(c)) {
+                sender.sendMessage(ChatColor.RED + what + " не должен содержать пробелы или управляющие символы.");
+                return false;
+            }
+        }
+        return true;
+    }
+
     public void login(@NotNull CommandSender sender, String pass) {
         if (!(sender instanceof org.bukkit.entity.Player p)) {
             sender.sendMessage(ChatColor.RED + "Эта команда доступна только игрокам.");
@@ -415,10 +358,26 @@ public class UnityCommands {
 
         var auth = UnityLauncher.getInstance().getAuthService();
         var listener = UnityLauncher.getInstance().getAuthListener();
+        if (auth == null) {
+            sender.sendMessage(ChatColor.RED + "Auth-сервис недоступен.");
+            return;
+        }
 
         // уже авторизован?
         if (listener != null && listener.isAuthenticated(p)) {
             sender.sendMessage(ChatColor.GREEN + "Ты уже вошёл.");
+            return;
+        }
+
+        // rate-limit по UUID+IP
+        String ip = (p.getAddress() != null) ? p.getAddress().getAddress().getHostAddress() : "unknown";
+        String key = p.getUniqueId() + "|" + ip;
+        long now = System.currentTimeMillis();
+        LoginFailState state = LOGIN_FAILS.get(key);
+        if (state != null && now < state.blockedUntilMs) {
+            long leftSec = (state.blockedUntilMs - now + 999) / 1000;
+            sender.sendMessage(ChatColor.RED + "Слишком много неудачных попыток. Попробуй через " +
+                    ChatColor.YELLOW + leftSec + ChatColor.RED + " сек.");
             return;
         }
 
@@ -432,12 +391,26 @@ public class UnityCommands {
         // проверяем пароль
         boolean ok = auth.checkPassword(p.getName(), pass.toCharArray());
         if (!ok) {
-            sender.sendMessage(ChatColor.RED + "Неверный пароль.");
+            // учёт ошибки + блокировки
+            LoginFailState s = (state != null) ? state : new LoginFailState();
+            s.attempts++;
+            if (s.attempts >= MAX_LOGIN_FAILS) {
+                s.blockedUntilMs = now + LOGIN_BLOCK_MS;
+                s.attempts = 0;
+                sender.sendMessage(ChatColor.RED + "Неверный пароль. Логин временно заблокирован на " +
+                        (LOGIN_BLOCK_MS / 1000) + " секунд.");
+            } else {
+                sender.sendMessage(ChatColor.RED + "Неверный пароль. Осталось попыток: " +
+                        ChatColor.YELLOW + (MAX_LOGIN_FAILS - s.attempts));
+            }
+            LOGIN_FAILS.put(key, s);
             return;
         }
 
+        // успех — снимаем блокировки
+        LOGIN_FAILS.remove(key);
+
         // отметим сессию
-        String ip = (p.getAddress() != null) ? p.getAddress().getAddress().getHostAddress() : null;
         auth.markSession(p.getName(), ip);
         auth.updateCacheAfterSession(p.getName(), System.currentTimeMillis(), ip);
 
@@ -450,17 +423,17 @@ public class UnityCommands {
             sender.sendMessage(ChatColor.RED + "Эта команда доступна только игрокам.");
             return;
         }
-        if (pass == null || pass.isBlank()) {
-            sender.sendMessage(ChatColor.YELLOW + "Использование: /ul reg <пароль>");
-            return;
-        }
-        if (pass.length() < 4) {
-            sender.sendMessage(ChatColor.RED + "Пароль слишком короткий (мин. 4 символа).");
+        if (!validatePasswordPolicy(pass, sender)) {
+            sender.sendMessage(ChatColor.GRAY + "Использование: /ul reg <пароль>");
             return;
         }
 
         var auth = UnityLauncher.getInstance().getAuthService();
         var listener = UnityLauncher.getInstance().getAuthListener();
+        if (auth == null) {
+            sender.sendMessage(ChatColor.RED + "Auth-сервис недоступен.");
+            return;
+        }
 
         // уже есть пароль?
         if (auth.isRegisteredFast(p.getName())) {
@@ -477,13 +450,11 @@ public class UnityCommands {
         // обновим кэш после записи пароля
         var rec = auth.getCached(p.getName().toLowerCase(java.util.Locale.ROOT));
         if (rec == null || rec.phcHash() == null) {
-            // перезагрузим из БД, либо просто отметим кэш:
-            // простой путь — попросить сервис обновить кэш:
             auth.updateCacheAfterPasswordSet(p.getName(), "<set>");
         }
 
         // сразу активируем сессию
-        String ip = (p.getAddress() != null) ? p.getAddress().getAddress().getHostAddress() : null;
+        String ip = (p.getAddress() != null) ? p.getAddress().getAddress().getHostAddress() : "unknown";
         auth.markSession(p.getName(), ip);
         auth.updateCacheAfterSession(p.getName(), System.currentTimeMillis(), ip);
 
@@ -532,10 +503,22 @@ public class UnityCommands {
             sender.sendMessage(ChatColor.RED + "Auth недоступен.");
             return;
         }
-        if (newPass == null || newPass.length() < 4) {
-            sender.sendMessage(ChatColor.RED + "Новый пароль слишком короткий (мин. 4).");
+
+        if (oldPass == null || oldPass.isBlank()) {
+            sender.sendMessage(ChatColor.RED + "Не указан старый пароль. Используй: /ul change <старый_пароль> <новый_пароль>");
             return;
         }
+
+        if (!validatePasswordPolicy(newPass, sender)) {
+            sender.sendMessage(ChatColor.GRAY + "Использование: /ul change <старый_пароль> <новый_пароль>");
+            return;
+        }
+
+        if (oldPass.equals(newPass)) {
+            sender.sendMessage(ChatColor.RED + "Новый пароль совпадает со старым. Смысла менять нет.");
+            return;
+        }
+
         boolean ok = auth.checkPassword(p.getName(), oldPass.toCharArray());
         if (!ok) {
             sender.sendMessage(ChatColor.RED + "Старый пароль неверен.");
@@ -546,8 +529,7 @@ public class UnityCommands {
             sender.sendMessage(ChatColor.RED + "Не удалось сохранить новый пароль.");
             return;
         }
-        // Обновим сессию, чтобы не просило логин
-        String ip = (p.getAddress()!=null) ? p.getAddress().getAddress().getHostAddress() : null;
+        String ip = (p.getAddress()!=null) ? p.getAddress().getAddress().getHostAddress() : "unknown";
         auth.markSession(p.getName(), ip);
         sender.sendMessage(ChatColor.GREEN + "Пароль изменён.");
     }

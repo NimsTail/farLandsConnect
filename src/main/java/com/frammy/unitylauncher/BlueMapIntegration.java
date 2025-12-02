@@ -1,7 +1,6 @@
 package com.frammy.unitylauncher;
 
 import com.flowpowered.math.vector.Vector2d;
-import com.flowpowered.math.vector.Vector2i;
 import com.flowpowered.math.vector.Vector3d;
 import com.frammy.unitylauncher.signs.SignVariables;
 import com.frammy.unitylauncher.zones.ZoneInfo;
@@ -101,7 +100,7 @@ public class BlueMapIntegration {
             final String id = "sign_" + loc.getBlockX() + "_" + loc.getBlockY() + "_" + loc.getBlockZ();
             Vector3d pos = new Vector3d(loc.getX(), loc.getY(), loc.getZ());
 
-            POIMarker poi = new POIMarker(id, pos, null, new Vector2i(0, 0));
+            POIMarker poi = new POIMarker(id, pos); // без iconAddress
             String label = (vars != null && vars.getSignCategory() != null) ? vars.getSignCategory().name() : "Sign";
             poi.setLabel(label);
 
@@ -123,9 +122,7 @@ public class BlueMapIntegration {
                 return;
             }
 
-            MarkerSet markerSet = markerSets.computeIfAbsent(setID, k -> {
-                return new MarkerSet("Markers");
-            });
+            MarkerSet markerSet = markerSets.computeIfAbsent(setID, k -> new MarkerSet("Markers"));
             // человекочитаемый label набора
             markerSet.setLabel((setLabel != null && !setLabel.isEmpty()) ? setLabel : setID);
 
@@ -179,7 +176,7 @@ public class BlueMapIntegration {
 
                 case "point_atm" -> {
                     Vector3d position = new Vector3d(location.getX() + 0.5, location.getY(), location.getZ() + 0.5);
-                    POIMarker marker = new POIMarker("atm_" + id, position, null, new Vector2i(0, 0));
+                    POIMarker marker = new POIMarker("atm_" + id, position); // без null
                     marker.setLabel("ATM");
                     marker.setIcon("assets/atm.png", 8, 8);
                     markerSet.getMarkers().put(String.valueOf(id), marker);
@@ -187,7 +184,7 @@ public class BlueMapIntegration {
 
                 case "point_shop" -> {
                     Vector3d position = new Vector3d(location.getX() + 0.5, location.getY(), location.getZ() + 0.5);
-                    POIMarker marker = new POIMarker("shop_" + id, position, null, new Vector2i(0, 0));
+                    POIMarker marker = new POIMarker("shop_" + id, position); // без null
                     marker.setLabel("Табличка о продаже");
                     marker.setDetail("ID - '" + id + "'");
                     marker.setIcon("assets/atm.png", 8, 8);

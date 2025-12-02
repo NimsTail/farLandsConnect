@@ -17,6 +17,7 @@ import org.bukkit.event.weather.ThunderChangeEvent;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.Random;
 
 public final class ServerMessagesListener implements Listener {
@@ -49,11 +50,15 @@ public final class ServerMessagesListener implements Listener {
     /**
      * Вызывается из onEnable().
      */
-    public static void init(UnityLauncher pl) {
+    public static ServerMessagesListener init(UnityLauncher pl) {
         plugin = pl;
         reloadMessages(); // прогружаем конфиг + дефолты
-        Bukkit.getPluginManager().registerEvents(new ServerMessagesListener(), pl);
+
+        ServerMessagesListener listener = new ServerMessagesListener();
+        Bukkit.getPluginManager().registerEvents(listener, pl);
         plugin.getLogger().info("[UL] ServerMessagesListener initialized");
+
+        return listener;
     }
 
     /**
@@ -116,12 +121,12 @@ public final class ServerMessagesListener implements Listener {
 
         DEBUG = c.getBoolean("serverMessages.debug", false);
 
-        JOIN_ENABLED       = getBooleanWithDefault(c, "serverMessages.join.enabled", true);
-        QUIT_ENABLED       = getBooleanWithDefault(c, "serverMessages.quit.enabled", true);
-        ADV_ENABLED        = getBooleanWithDefault(c, "serverMessages.advancement.enabled", true);
-        DEATH_ENABLED      = getBooleanWithDefault(c, "serverMessages.death.enabled", true);
-        FIRSTJOIN_ENABLED  = getBooleanWithDefault(c, "serverMessages.firstJoin.enabled", true);
-        THUNDER_ENABLED    = getBooleanWithDefault(c, "serverMessages.thunder.enabled", true);
+        JOIN_ENABLED       = getBooleanWithDefault(c, "serverMessages.join.enabled");
+        QUIT_ENABLED       = getBooleanWithDefault(c, "serverMessages.quit.enabled");
+        ADV_ENABLED        = getBooleanWithDefault(c, "serverMessages.advancement.enabled");
+        DEATH_ENABLED      = getBooleanWithDefault(c, "serverMessages.death.enabled");
+        FIRSTJOIN_ENABLED  = getBooleanWithDefault(c, "serverMessages.firstJoin.enabled");
+        THUNDER_ENABLED    = getBooleanWithDefault(c, "serverMessages.thunder.enabled");
 
         THUNDER_CHANCE = c.getDouble("serverMessages.thunder.chance", 0.01);
 
@@ -164,11 +169,11 @@ public final class ServerMessagesListener implements Listener {
         }
     }
 
-    private static boolean getBooleanWithDefault(FileConfiguration c, String path, boolean def) {
+    private static boolean getBooleanWithDefault(FileConfiguration c, String path) {
         if (!c.contains(path)) {
-            c.set(path, def);
+            c.set(path, true);
         }
-        return c.getBoolean(path, def);
+        return c.getBoolean(path, true);
     }
 
     private static List<String> nonEmptyOrDefault(List<String> list, List<String> def) {
@@ -306,10 +311,8 @@ public final class ServerMessagesListener implements Listener {
         Player p = event.getEntity();
 
         // В новых Paper API deathMessage() возвращает Component
-        String vanillaPlain = null;
-        if (event.deathMessage() != null) {
-            vanillaPlain = PlainTextComponentSerializer.plainText().serialize(event.deathMessage());
-        }
+        String vanillaPlain;
+        vanillaPlain = PlainTextComponentSerializer.plainText().serialize(Objects.requireNonNull(event.deathMessage()));
 
         // Убираем стандартное серверное сообщение
         event.deathMessage(null);

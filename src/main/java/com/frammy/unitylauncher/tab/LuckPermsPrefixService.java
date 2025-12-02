@@ -24,8 +24,23 @@ public final class LuckPermsPrefixService {
     private static final int PRIORITY = 1000; // выше типичных групп, если нужно — измените
     private static final NodeMetadataKey<String> META_SOURCE_KEY =
             NodeMetadataKey.of("source", String.class); // ключ метаданных
+
+    /** Кешируем ссылку на LuckPerms, чтобы не ловить исключения каждый раз. Может быть null. */
+    private final LuckPerms lp;
+
     public LuckPermsPrefixService(Plugin plugin) {
         this.plugin = plugin;
+
+        LuckPerms tmp = null;
+        try {
+            tmp = LuckPermsProvider.get();
+        } catch (IllegalStateException e) {
+            Bukkit.getLogger().warning(
+                    "[UnityLauncher] LuckPermsPrefixService: LuckPerms API недоступен: "
+                            + e.getClass().getSimpleName() + ": " + e.getMessage()
+            );
+        }
+        this.lp = tmp;
     }
 
     /** Установить/обновить префикс. Если prefix == null или пустой — снимаем наш кастомный LP-префикс. */
@@ -35,11 +50,23 @@ public final class LuckPermsPrefixService {
         // если ничего не поменялось — не дёргаем LuckPerms лишний раз
         if ((prev == null && now == null) || (prev != null && prev.equals(now))) return;
 
+        // Если LuckPerms вообще нет — не пытаемся ничего делать
+        if (lp == null) {
+            Bukkit.getLogger().warning(
+                    "[UnityLauncher] LuckPermsPrefixService: lp == null, пропускаю applyOrClear для " + uuid
+            );
+            return;
+        }
+
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
-                LuckPerms lp = LuckPermsProvider.get();
                 User user = lp.getUserManager().loadUser(uuid).join();
-                if (user == null) return;
+                if (user == null) {
+                    Bukkit.getLogger().warning(
+                            "[UnityLauncher] LuckPermsPrefixService: user == null для " + uuid
+                    );
+                    return;
+                }
 
                 // убираем наши старые prefix-ноды
                 user.data().clear(node ->
@@ -58,8 +85,12 @@ public final class LuckPermsPrefixService {
 
                 lp.getUserManager().saveUser(user);
                 lastApplied.put(uuid, now);
-            } catch (Throwable t) {
-                Bukkit.getLogger().warning("[UnityLauncher] LuckPermsPrefixService error: " + t.getMessage());
+            } catch (Exception t) {
+                Bukkit.getLogger().warning(
+                        "[UnityLauncher] LuckPermsPrefixService error: "
+                                + t.getClass().getSimpleName() + ": " + t.getMessage()
+                );
+                t.printStackTrace();
             }
         });
     }

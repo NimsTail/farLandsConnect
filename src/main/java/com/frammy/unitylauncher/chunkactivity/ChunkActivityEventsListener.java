@@ -3,16 +3,12 @@ package com.frammy.unitylauncher.chunkactivity;
 import com.frammy.unitylauncher.UnityLauncher;
 import org.bukkit.Chunk;
 import org.bukkit.Location;
-import org.bukkit.block.Block;
-import org.bukkit.entity.Creature;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
-import org.bukkit.event.block.BlockBreakEvent;
-import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.block.BlockRedstoneEvent;
 import org.bukkit.event.entity.CreatureSpawnEvent;
 import org.bukkit.event.entity.ItemSpawnEvent;
@@ -67,7 +63,7 @@ public class ChunkActivityEventsListener implements Listener {
         if (ch == null) return;
 
         ItemStack stack = entity.getItemStack();
-        int amount = (stack == null) ? 0 : stack.getAmount();
+        int amount = stack.getAmount();
         if (amount <= 0) return;
 
         tracker.incItemDrops(ch, amount);
@@ -77,8 +73,8 @@ public class ChunkActivityEventsListener implements Listener {
 
     @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
     public void onCreatureSpawn(CreatureSpawnEvent e) {
-        Creature mob = (Creature) e.getEntity();
-        Chunk ch = chunkOf(mob.getLocation());
+        Entity entity = e.getEntity(); // Без каста к Creature
+        Chunk ch = chunkOf(entity.getLocation());
         if (ch == null) return;
 
         // пока просто считаем каждый спавн как +1

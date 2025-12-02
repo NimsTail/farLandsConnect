@@ -7,6 +7,7 @@ import com.frammy.unitylauncher.zones.ZoneType;
 import org.bukkit.*;
 import org.bukkit.block.*;
 import org.bukkit.block.data.Ageable;
+import org.bukkit.entity.Animals;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
 import org.bukkit.event.*;
@@ -14,6 +15,7 @@ import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.entity.CreatureSpawnEvent;
+import org.bukkit.event.entity.EntityBreedEvent;
 import org.bukkit.event.entity.EntityChangeBlockEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.inventory.*;
@@ -63,6 +65,8 @@ public class UpgradesListener implements Listener {
     private static final Map<Block, Double> BREW_ACCEL = new ConcurrentHashMap<>();
     private static BukkitTask brewTask;
 
+    private static BukkitTask foodRationTask;
+
     // ===== Регистрация/перезапуск =====
 
     public static void registerAll(JavaPlugin plugin) {
@@ -105,6 +109,16 @@ public class UpgradesListener implements Listener {
                 UpgradesListener::runBrewTick,
                 1L, 1L // тикаем раз в тик — точно и дёшево (на активных стойках)
         );
+
+        if (foodRationTask != null) foodRationTask.cancel();
+        foodRationTask = Bukkit.getScheduler().runTaskTimer(
+                plugin,
+                UpgradesListener::runFoodRationTick,
+                C.foodRationPeriodTicks,
+                C.foodRationPeriodTicks
+        );
+        d("foodRation task started: period=" + C.foodRationPeriodTicks + " ticks");
+
     }
 
     public static void reload(JavaPlugin plugin) {
@@ -132,7 +146,9 @@ public class UpgradesListener implements Listener {
         INSOMNIA_FROZEN.clear();
         if (brewTask != null) { brewTask.cancel(); brewTask = null; }
         BREW_ACCEL.clear();
-        HandlerList.unregisterAll(new UpgradesListener());
+        if (foodRationTask != null) { foodRationTask.cancel(); foodRationTask = null; }
+
+        HandlerList.unregisterAll(plugin);
     }
 
     // =====================================================================
@@ -518,19 +534,58 @@ public class UpgradesListener implements Listener {
     public void onExplode(EntityExplodeEvent e) {
         Location loc = e.getLocation();
         String country = UpgradeCondition.locationCountryOwner(loc);
-        if (country == null) return;
-        if (UpgradeCondition.countryMaxLevel(country, C.tntPerm, 1) < 1) return;
+        if (country == null || country.isBlank()) return;
+
+        ZoneInfo z = UpgradeCondition.zoneAt(loc);
+        ZoneType zt = (z != null ? z.getType() : null);
+
+        boolean hasQuarry  = UpgradeCondition.countryMaxLevel(country, C.tntPerm, 1) >= 1;
+        boolean hasLicense = UpgradeCondition.countryMaxLevel(country, C.tntLicensePerm, 1) >= 1;
+
+        if (!hasQuarry && !hasLicense) return;
 
         var rnd = ThreadLocalRandom.current();
-        for (Block b : e.blockList()) {
-            Double prob = C.tntDupWhitelist.get(b.getType());
-            if (prob == null) continue;
-            if (rnd.nextDouble() > prob) continue;
 
-            Collection<ItemStack> drops = b.getDrops();
-            for (ItemStack dIt : drops) {
-                if (dIt == null || dIt.getType().isAir() || dIt.getAmount() <= 0) continue;
-                loc.getWorld().dropItemNaturally(b.getLocation(), dIt.clone());
+        for (Block b : e.blockList()) {
+            Material type = b.getType();
+
+            // === Индустриальный TNT-Quarry: дюп whitelist-блоков в INDUSTRIAL ===
+            if (hasQuarry && zt == ZoneType.INDUSTRIAL) {
+                Double prob = C.tntDupWhitelist.get(type);
+                if (prob != null && rnd.nextDouble() <= prob) {
+                    Collection<ItemStack> drops = b.getDrops();
+                    for (ItemStack dIt : drops) {
+                        if (dIt == null || dIt.getType().isAir() || dIt.getAmount() <= 0) continue;
+                        loc.getWorld().dropItemNaturally(b.getLocation(), dIt.clone());
+                    }
+                    if (DEBUG) d("TNTQuarry: extra drops for " + type + " at " + b.getLocation());
+                }
+            }
+
+            // === Колониальная ТНТ-Лицензия: форчуноподобный доп. дроп руды в COLONY ===
+            if (hasLicense && zt == ZoneType.COLONY && C.tntLicenseOres.contains(type)) {
+                Collection<ItemStack> drops = b.getDrops();
+                if (drops.isEmpty()) continue;
+
+                for (ItemStack baseDrop : drops) {
+                    if (baseDrop == null || baseDrop.getType().isAir() || baseDrop.getAmount() <= 0) continue;
+
+                    int extraMult = 0;
+                    for (int i = 0; i < C.tntLicenseMaxExtra; i++) {
+                        if (rnd.nextDouble() < C.tntLicenseChancePerExtra) {
+                            extraMult++;
+                        }
+                    }
+                    if (extraMult <= 0) continue;
+
+                    ItemStack extra = baseDrop.clone();
+                    int totalExtra = baseDrop.getAmount() * extraMult;
+                    extra.setAmount(Math.min(extra.getMaxStackSize(), totalExtra));
+                    loc.getWorld().dropItemNaturally(b.getLocation(), extra);
+
+                    if (DEBUG) d("TNTLicense: extra " + extra.getAmount() + "x " + extra.getType() +
+                            " at " + b.getLocation() + " (mult=" + extraMult + ")");
+                }
             }
         }
     }
@@ -604,6 +659,8 @@ public class UpgradesListener implements Listener {
         applyOrRemove(p, PotionEffectType.HASTE,      hasteLvl > 0 ? hasteLvl - 1 : -1);
         applyOrRemove(p, PotionEffectType.SPEED,      speedLvl > 0 ? speedLvl - 1 : -1);
         applyOrRemove(p, PotionEffectType.RESISTANCE, resLvl   > 0 ? resLvl   - 1 : -1);
+        // Пыльезащита — отдельный эффект для INDUSTRIAL-зон под землёй
+        applyDustProtectionIfNeeded(p);
 
         lastApplied.put(p.getUniqueId(), now);
     }
@@ -790,6 +847,21 @@ public class UpgradesListener implements Listener {
         return false;
     }
 
+    private static boolean hasBeeHiveNearby(Block base, int radius) {
+        World w = base.getWorld();
+        int bx = base.getX(), by = base.getY(), bz = base.getZ();
+
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -radius; dy <= radius; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    Material t = w.getBlockAt(bx + dx, by + dy, bz + dz).getType();
+                    if (t == Material.BEE_NEST || t == Material.BEEHIVE) return true;
+                }
+            }
+        }
+        return false;
+    }
+
     /** Шанс от темноты: light < 9 → (0...max]; при light<=4 → max. */
     private static double chanceFromLight(int light, double maxPct) {
         final int THRESH = 9, MIN = 4;
@@ -816,7 +888,7 @@ public class UpgradesListener implements Listener {
             // у зоны должна быть страна и у неё — апгрейд теплиц
             String country = UpgradeCondition.zoneCountryCanonical(z);
             if (country == null || country.isBlank()) continue;
-            if (UpgradeCondition.countryMaxLevel(country, "unity.crops.lowlight", 1) < 1) continue;
+            if (UpgradeCondition.countryMaxLevel(country, C.cropsLLPermBase, 1) < 1) continue;
 
             // бюджет попыток на зону
             int budget = C.cropsLL_PerZoneBudget;
@@ -839,6 +911,14 @@ public class UpgradesListener implements Listener {
                     int light = b.getLightLevel();
                     double chance = chanceFromLight(light, C.cropsLL_MaxPercent);
                     if (chance <= 0.0) break;
+
+                    // Пчелиное опыление: при апгрейде страны и ульях рядом увеличиваем шанс
+                    if (C.beePollinationBonusPercent > 0.0 &&
+                            UpgradeCondition.countryMaxLevel(country, C.beePollinationPerm, 1) >= 1 &&
+                            hasBeeHiveNearby(b, C.beePollinationRadius)) {
+
+                        chance = Math.min(100.0, chance + C.beePollinationBonusPercent);
+                    }
 
                     Ageable age = (Ageable) b.getBlockData();
                     if (age.getAge() >= age.getMaximumAge()) break;
@@ -1159,4 +1239,200 @@ public class UpgradesListener implements Listener {
         if (DEBUG) d("Pilgrimage: " + p.getName() + " got " + type.getName() + " for " + C.churchPilgrimageBuffMinutes + "m @amp=" + amp);
     }
 
+    // =====================================================================
+    //  ЭКОТОПЛИВО — бамбук как топливо горит дольше
+    // =====================================================================
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
+    public void onFurnaceBurn(FurnaceBurnEvent e) {
+        Block block = e.getBlock();
+        Location loc = block.getLocation();
+
+        // Должны быть в стране/колонии
+        if (!UpgradeCondition.isInsideCountryOrColony(loc)) return;
+
+        String country = UpgradeCondition.locationCountryOwner(loc);
+        if (country == null || country.isBlank()) return;
+
+        // Страна должна иметь апгрейд Экотопливо
+        if (UpgradeCondition.countryMaxLevel(country, C.ecoFuelPerm, 1) < 1) return;
+
+        ItemStack fuel = e.getFuel();
+        if (fuel.getType() != Material.BAMBOO) return;
+
+        int base = e.getBurnTime();
+        if (base <= 0) return;
+
+        int boosted = (int) Math.round(base * C.ecoFuelMultiplier);
+        if (boosted <= base) return;
+
+        e.setBurnTime(boosted);
+
+        if (DEBUG) d("EcoFuel: boosted bamboo burn at " + loc + " from " + base + " to " + boosted +
+                " (mult=" + C.ecoFuelMultiplier + ") country=" + country);
+    }
+
+    /** Пыльезащита: в индустриальной зоне, ниже конфигного Y, выдаём NIGHT_VISION, если у страны есть апгрейд. */
+    private void applyDustProtectionIfNeeded(Player p) {
+        if (C.dustProtectionPerm == null || C.dustProtectionPerm.isBlank()) return;
+
+        Location loc = p.getLocation();
+        if (loc.getBlockY() >= C.dustProtectionMinY) return;
+
+        ZoneInfo z = UpgradeCondition.zoneAt(loc);
+        if (z == null || z.getType() != ZoneType.INDUSTRIAL) return;
+
+        String pc = UpgradeCondition.playerCountryCanonical(p.getName());
+        String zc = UpgradeCondition.zoneCountryCanonical(z);
+        if (pc == null || !pc.equals(zc)) return;
+
+        if (UpgradeCondition.countryMaxLevel(pc, C.dustProtectionPerm, 1) < 1) return;
+
+        p.addPotionEffect(new PotionEffect(
+                PotionEffectType.NIGHT_VISION,
+                C.dustProtectionDurationTicks,
+                0,
+                true,  // ambient
+                false, // particles
+                true   // icon
+        ));
+
+        if (DEBUG) d("DustProtection: NIGHT_VISION for " + p.getName() + " at " + loc);
+    }
+
+    // =====================================================================
+    //  ПРОМЫШЛЕННЫЙ ПЕРЕРАБОТЧИК — шанс редкого лута с мусорных блоков
+    // =====================================================================
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
+    public void onBlockBreakRecycler(BlockBreakEvent e) {
+        Block b = e.getBlock();
+        Material type = b.getType();
+        if (!C.recyclerInputs.contains(type)) return;
+
+        Location loc = b.getLocation();
+        ZoneInfo z = UpgradeCondition.zoneAt(loc);
+        if (z == null || z.getType() != ZoneType.INDUSTRIAL) return;
+
+        String country = UpgradeCondition.zoneCountryCanonical(z);
+        if (country == null || country.isBlank()) return;
+        if (UpgradeCondition.countryMaxLevel(country, C.recyclerPerm, 1) < 1) return;
+
+        var rnd = ThreadLocalRandom.current();
+
+        for (Map.Entry<Material, Double> en : C.recyclerExtraDrops.entrySet()) {
+            Material dropMat = en.getKey();
+            double prob = en.getValue();
+            if (prob <= 0.0) continue;
+
+            if (rnd.nextDouble() < prob) {
+                b.getWorld().dropItemNaturally(loc, new ItemStack(dropMat, 1));
+                if (DEBUG) d("Recycler: extra " + dropMat + " at " + loc + " from " + type + " country=" + country);
+            }
+        }
+    }
+
+    // =====================================================================
+    //  СКОТОВОДСТВО — ускорение роста и шанс двойни
+    // =====================================================================
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
+    public void onAnimalBreed(EntityBreedEvent e) {
+        if (!(e.getEntity() instanceof Animals baby)) return;
+
+        Location loc = baby.getLocation();
+        ZoneInfo z = UpgradeCondition.zoneAt(loc);
+        if (z == null || z.getType() != ZoneType.GREENHOUSE) return; // сельхоз-зоны
+
+        String country = UpgradeCondition.zoneCountryCanonical(z);
+        if (country == null || country.isBlank()) return;
+
+        // Скотоводство+ — ускоренный рост детёнышей
+        if (UpgradeCondition.countryMaxLevel(country, C.livestockPlusPerm, 1) >= 1) {
+            int age = baby.getAge(); // у новорождённого обычно отрицательный (ticks до взросления)
+            if (age < 0 && C.livestockPlusSpeedPercent > 0.0) {
+                double k = Math.max(0.0, Math.min(1.0, C.livestockPlusSpeedPercent / 100.0));
+                int newAge = (int) Math.round(age * (1.0 - k)); // например, -24000 -> -18000 при 25%
+                baby.setAge(newAge);
+                if (DEBUG) d("Livestock+: faster growth for " + baby.getType() + " at " + loc +
+                        " country=" + country + " speed=" + C.livestockPlusSpeedPercent + "%");
+            }
+        }
+
+        // Скотоводство++ — шанс двойни
+        if (UpgradeCondition.countryMaxLevel(country, C.livestockDoublePerm, 1) >= 1) {
+            if (C.livestockDoubleChancePercent > 0.0 &&
+                    ThreadLocalRandom.current().nextDouble(100.0) < C.livestockDoubleChancePercent) {
+
+                World w = loc.getWorld();
+                if (w != null) {
+                    w.spawnEntity(loc, baby.getType());
+                    if (DEBUG) d("Livestock++: twin spawned for " + baby.getType() + " at " + loc +
+                            " country=" + country);
+                }
+            }
+        }
+    }
+
+    // =====================================================================
+    //  Продовольственный пай — периодический Saturation в колониях
+    // =====================================================================
+
+    private static void runFoodRationTick() {
+        if (C.foodRationDurationTicks <= 0) return;
+
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            if (p.isDead() || p.getGameMode() == GameMode.SPECTATOR) continue;
+
+            Location loc = p.getLocation();
+            ZoneInfo z = UpgradeCondition.zoneAt(loc);
+            if (z == null || z.getType() != ZoneType.COLONY) continue;
+
+            String pc = UpgradeCondition.playerCountryCanonical(p.getName());
+            String zc = UpgradeCondition.zoneCountryCanonical(z);
+            if (pc == null || !pc.equals(zc)) continue;
+
+            if (UpgradeCondition.countryMaxLevel(pc, C.foodRationPerm, 1) < 1) continue;
+
+            // Можно ограничить только голодных, но это не обязательно
+            if (p.getFoodLevel() >= 20) continue;
+
+            p.addPotionEffect(new PotionEffect(
+                    PotionEffectType.SATURATION,
+                    C.foodRationDurationTicks,
+                    Math.max(0, C.foodRationAmplifier),
+                    true,  // ambient
+                    false, // particles
+                    true   // icon
+            ));
+
+            if (DEBUG) d("FoodRation: applied Saturation to " + p.getName() + " in colony " + z.getID());
+        }
+    }
+
+    // =====================================================================
+    //  Форпост — защиты от рейдов в колониях
+    // =====================================================================
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
+    public void onRaiderSpawn(CreatureSpawnEvent e) {
+        if (e.getSpawnReason() != CreatureSpawnEvent.SpawnReason.RAID) return;
+
+        Location loc = e.getLocation();
+        ZoneInfo z = UpgradeCondition.zoneAt(loc);
+        if (z == null || z.getType() != ZoneType.COLONY) return;
+
+        String country = UpgradeCondition.zoneCountryCanonical(z);
+        if (country == null || country.isBlank()) return;
+
+        if (UpgradeCondition.countryMaxLevel(country, C.outpostPerm, 1) < 1) return;
+
+        double pKill = C.outpostCullPercent;
+        if (pKill <= 0.0) return;
+
+        if (ThreadLocalRandom.current().nextDouble(100.0) < pKill) {
+            e.setCancelled(true);
+            if (DEBUG) d("Outpost: cancelled raider spawn at " + loc + " in colony zone " + z.getID());
+        }
+    }
 }

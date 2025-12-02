@@ -54,7 +54,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     // === managers / services ===
     private final Set<Player> awaitingCorrectCommand = new HashSet<>();
     public final List<String> commandCategories = new ArrayList<>();
-
+    public LuckPermsPrefixService luckPermsPrefixService;
     public MoneyManager moneyManager;
     private ZoneManager zoneManager;
     public ZoneActivityCalculations zoneActivityCalculations;
@@ -74,7 +74,6 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     private UpgradesConfig upgradesConfig;
     private ZonesEconomyConfig zonesEconomyConfig;
     private DailyEconomyTask dailyEconomyTask;
-    private CountryRegistryJdbc countryRegistry;
 
     // server messages (join/quit/advancement)
     private ServerMessagesListener serverMessagesListener;
@@ -113,6 +112,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         instance = this;
         loadAuthSecrets();
 
+        // --- init DB pool как можно раньше ---
+        initDataSource();
+
         // --- базовые листенеры (сам плагин) ---
         Bukkit.getPluginManager().registerEvents(this, this);
 
@@ -123,7 +125,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         // --- activity tracker (chunk activity sampling) ---
         tracker = new ActivityTracker(this);
         // --- events → ActivityTracker (blocks, items, mobs, tick load, players) ---
-        safeRegisterListener("ChunkActivityEventsListener",
+        safeRegisterListener(
                 new ChunkActivityEventsListener(this, tracker));
 
         // --- websocket manager for the external launcher bridge ---
@@ -146,9 +148,11 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         zoneManager.setSignManager(signManager);
         getServer().getPluginManager().registerEvents(signManager, this);
 
-        // сразу поднимем signData.yml (это не тяжело, не зависит от BlueMap)
+        // === ВАЖНО: грузим таблички ВСЕГДА, без привязки к BlueMap ===
         try {
             signManager.loadSignData();
+            getLogger().info("[UnityLauncher] signData.yml загружен ("
+                    + signManager.genericSignList.size() + " табличек)");
         } catch (Throwable t) {
             getLogger().warning("[UnityLauncher] signManager.loadSignData() failed on enable: " + t.getMessage());
             t.printStackTrace();
@@ -170,48 +174,63 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         Objects.requireNonNull(getCommand("register"))
                 .setExecutor(unityCmd);
 
-// категории и помощь
+        // категории и помощь
         commandCategories.clear();
 
-// ---------- Авторизация ----------
+        /* ======================================================
+         *  Авторизация
+         * ====================================================== */
         commandCategories.add("Авторизация");
         helpManager.addCommand("/ul change", "Подсказка по смене пароля", "Авторизация");
         helpManager.addCommand("/ul change <старый> <новый>", "Сменить пароль аккаунта", "Авторизация");
 
-// ---------- Финансы ----------
+        /* ======================================================
+         *  Финансы
+         * ====================================================== */
         commandCategories.add("Финансы");
         helpManager.addCommand("/ul balance", "Показать твой личный баланс", "Финансы");
         helpManager.addCommand("/ul zone price", "Посчитать дневную стоимость текущей зоны", "Финансы");
 
-// ---------- Уведомления ----------
+
+        /* ======================================================
+         *  Уведомления
+         * ====================================================== */
         commandCategories.add("Уведомления");
-        helpManager.addCommand("/ul notifications", "Просмотр полученных уведомлений", "Уведомления");
+        helpManager.addCommand("/ul notifications", "Список уведомлений", "Уведомления");
         helpManager.addCommand("/ul notifications ON", "Включить уведомления", "Уведомления");
         helpManager.addCommand("/ul notifications OFF", "Выключить уведомления", "Уведомления");
 
-// ---------- Страна ----------
+        /* ======================================================
+         *  Страна
+         * ====================================================== */
         commandCategories.add("Страна");
         helpManager.addCommand("/ul country", "Информация о твоей стране", "Страна");
+        helpManager.addCommand("/ul relations", "Международные отношения (скоро)", "Страна");
 
-// ---------- Зоны ----------
+        /* ======================================================
+         *  Зоны
+         * ====================================================== */
         commandCategories.add("Зоны");
-        helpManager.addCommand("/ul zone addcorner <тип>", "Добавить точку контура новой зоны", "Зоны");
+        helpManager.addCommand("/ul zone addcorner <тип>", "Добавить точку новой зоны", "Зоны");
         helpManager.addCommand("/ul zone removecorner", "Удалить последнюю точку контура", "Зоны");
-        helpManager.addCommand("/ul zone build <тип> [название]", "Построить зону по выставленным точкам", "Зоны");
-        helpManager.addCommand("/ul zone update corners +/-", "Расширить или сузить границы зоны", "Зоны");
-        helpManager.addCommand("/ul zone update name <новое_имя>", "Переименовать зону", "Зоны");
-        helpManager.addCommand("/ul zone update color R,G,B", "Изменить цвет зоны на карте", "Зоны");
-        helpManager.addCommand("/ul zone remove", "Запросить удаление текущей зоны", "Зоны");
+        helpManager.addCommand("/ul zone build <тип> [название]", "Построить зону", "Зоны");
+        helpManager.addCommand("/ul zone update corners +/-", "Расширить/сузить границы", "Зоны");
+        helpManager.addCommand("/ul zone update name <новое>", "Переименовать зону", "Зоны");
+        helpManager.addCommand("/ul zone update color R,G,B", "Изменить цвет зоны", "Зоны");
+        helpManager.addCommand("/ul zone remove", "Запросить удаление зоны", "Зоны");
         helpManager.addCommand("/ul zone confirmremove", "Подтвердить удаление зоны", "Зоны");
         helpManager.addCommand("/ul zone cancelremove", "Отменить удаление зоны", "Зоны");
 
-// ---------- Админ / отладка ----------
+
+        /* ======================================================
+         *  Админ
+         * ====================================================== */
         commandCategories.add("Админ");
-        helpManager.addCommand("/ul reload", "Перезагрузить конфиг, апгрейды и зоны", "Админ");
-        helpManager.addCommand("/ul expo", "Экспортировать тепловую карту активности чанков в BlueMap", "Админ");
-        helpManager.addCommand("/ul fsnap", "Принудительно сделать снимок активности и начислить биллинг зон", "Админ");
-        helpManager.addCommand("/ul blist", "Показать список зон по очереди биллинга", "Админ");
-        helpManager.addCommand("/ul fpslink <url>", "Отправить ссылку в подключённое приложение", "Админ");
+        helpManager.addCommand("/ul reload", "Перезагрузить конфиг, апгрейды, зоны", "Админ");
+        helpManager.addCommand("/ul expo", "Экспортировать тепловую карту активностей", "Админ");
+        helpManager.addCommand("/ul fsnap", "Принудительный подсчёт зоны и биллинг", "Админ");
+        helpManager.addCommand("/ul blist", "Показать очередь биллинга зон", "Админ");
+        helpManager.addCommand("/ul fpslink <url>", "Отправить ссылку в лаунчер", "Админ");
 
         // --- diplomacy / international relations (COUNTRIES table) ---
         countryRelationshipDao = new CountryRelationshipDao();
@@ -238,9 +257,6 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                         t.printStackTrace();
                     }
                 }), 40L);
-
-        // --- init DB pool early so DBConnect() uses hikari ---
-        initDataSource();
 
         // --- tab prefix sync for LuckPerms/scoreboard ---
         TabPrefixService tabPrefixService = getTabPrefixService();
@@ -304,15 +320,13 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                 logDbException(t);
             }
         });
-
+        this.luckPermsPrefixService = new LuckPermsPrefixService(this);
 
         this.upgradesConfig = UpgradesConfig.load(this);
         this.zonesEconomyConfig = ZonesEconomyConfig.load(this);
 
-        this.countryRegistry = new CountryRegistryJdbc(this);
-
         UserActivityJdbc userActivityJdbc = new UserActivityJdbc(this);
-        this.dailyEconomyTask = new DailyEconomyTask(this, countryRegistry, userActivityJdbc, zonesEconomyConfig);
+        this.dailyEconomyTask = new DailyEconomyTask(this, countryRegistryJdbc, userActivityJdbc, zonesEconomyConfig);
         this.dailyEconomyTask.start();
 
         // --- AUTH ---
@@ -324,7 +338,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> authService.preloadAllAuth());
 
         // --- server messages (join/quit/advancement phrases) ---
-        ServerMessagesListener.init(this);
+        this.serverMessagesListener = ServerMessagesListener.init(this);
 
         getLogger().info("UnityLauncher enabled!");
     }
@@ -338,21 +352,25 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         return tabPrefixService;
     }
 
+
     @Override
     public void onDisable() {
 
-        // save sign data (shops etc.)
+        // --- save sign data (shops etc.) ---
         try {
             if (signManager != null) {
                 signManager.saveSignData();
+                getLogger().info("[UnityLauncher] signData.yml сохранён (" +
+                        signManager.genericSignList.size() + " табличек)");
             } else {
                 getLogger().warning("[UnityLauncher] signManager is null on disable — skipping saveSignData()");
             }
         } catch (Throwable t) {
             getLogger().warning("[UnityLauncher] saveSignData() failed: " + t.getMessage());
+            t.printStackTrace();
         }
 
-        // save zones.yml
+        // --- save zones.yml ---
         try {
             if (zoneManager != null) {
                 zoneManager.saveZonesToConfig();
@@ -361,9 +379,10 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             }
         } catch (Throwable t) {
             getLogger().warning("[UnityLauncher] saveZonesToConfig() failed: " + t.getMessage());
+            t.printStackTrace();
         }
 
-        // persist chunk activity to disk
+        // --- persist chunk activity to disk ---
         try {
             if (tracker != null) {
                 tracker.forceSampleNow();
@@ -371,30 +390,32 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             }
         } catch (Throwable t) {
             getLogger().warning("[UnityLauncher] tracker save failed: " + t.getMessage());
+            t.printStackTrace();
         }
 
-        // close websocket sessions
+        // --- close websocket sessions ---
         try {
             if (webSocketManager != null) {
                 webSocketManager.disconnectAll();
             }
         } catch (Throwable t) {
             getLogger().warning("[UnityLauncher] webSocketManager disconnect failed: " + t.getMessage());
+            t.printStackTrace();
         }
 
-        // save diplomacy state
+        // --- save diplomacy state ---
         try {
             if (diplomacy != null) {
                 diplomacy.snapshot().keySet().forEach(diplomacy::save);
             }
         } catch (Throwable t) {
             getLogger().warning("[UnityLauncher] diplomacy save failed: " + t.getMessage());
+            t.printStackTrace();
         }
 
-        // persist BlueMap markers
+        // --- persist BlueMap markers ---
         try {
             if (blueMapIntegration != null) {
-                // наборы, которыми ты уже пользуешься
                 blueMapIntegration.saveBlueMapMarkers("zones_shop");
                 blueMapIntegration.saveBlueMapMarkers("services");
                 blueMapIntegration.saveBlueMapMarkers("shops");
@@ -402,15 +423,18 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             }
         } catch (Throwable t) {
             getLogger().warning("[UnityLauncher] blueMapIntegration save failed: " + t.getMessage());
+            t.printStackTrace();
         }
 
+        // --- stop daily economy task, но без падения onDisable ---
         try {
             if (dailyEconomyTask != null) dailyEconomyTask.stop();
         } catch (Exception e) {
-            throw new RuntimeException(e);
+            getLogger().warning("[UnityLauncher] dailyEconomyTask.stop() failed: " + e.getMessage());
+            e.printStackTrace();
         }
 
-        // shutdown DB pool
+        // --- shutdown DB pool ---
         if (hikari != null) {
             try { hikari.close(); } catch (Throwable ignore) {}
             hikari = null;
@@ -525,7 +549,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     }
 
     public CountryRegistryJdbc getCountryRegistry() {
-        return countryRegistry;
+        return countryRegistryJdbc;
     }
     /* ===================== DATABASE ===================== */
 
@@ -695,12 +719,12 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         }
     }
 
-    private void safeRegisterListener(String name, Listener listener) {
+    private void safeRegisterListener(Listener listener) {
         if (listener == null) {
-            getLogger().severe("[UL] Attempted to register null listener: " + name);
+            getLogger().severe("[UL] Attempted to register null listener: " + "ChunkActivityEventsListener");
             return;
         }
         getServer().getPluginManager().registerEvents(listener, this);
-        getLogger().info("[UL] Registered listener: " + name + " (" + listener.getClass().getName() + ")");
+        getLogger().info("[UL] Registered listener: " + "ChunkActivityEventsListener" + " (" + listener.getClass().getName() + ")");
     }
 }
