@@ -24,10 +24,10 @@ public class Golden_helmet67 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        16f,
-                        6f,
+                        7f,
+                        15f,
                         "",
-                        "Умереть в течение 3 секунд после ",
+                        "Умереть в течение 5 секунд после ",
                         "спавна",
                         ""
                 ),

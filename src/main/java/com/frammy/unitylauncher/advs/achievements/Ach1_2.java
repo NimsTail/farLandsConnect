@@ -20,14 +20,14 @@ public class Ach1_2 extends BaseAdvancement  {
                 KEY.getKey(),
                 new FancyAdvancementDisplay(
                         Material.HORN_CORAL,
-                        "Жёлтый садовник",
+                        "Жёлтый рыбак",
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        3f,
-                        0f,
+                        1f,
+                        2f,
                         "",
-                        "Вырастить жёлтый коралл",
+                        "Поймать 50 предметов удочкой",
                         "",
                         "Награда: Рамка §6Жёлтый Коралл"
                 ),

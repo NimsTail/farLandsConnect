@@ -24,13 +24,13 @@ public class Feather62 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        16f,
-                        1f,
+                        2f,
+                        15f,
                         "",
                         "Погибнуть, упав с максимальной ",
                         "высоты мира до его минимальной ",
                         "точки",
-                        ""
+                        "Награда: Рамка §bПортал Вардена"
                 ),
                 parent,
                 1

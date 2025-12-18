@@ -24,12 +24,12 @@ public class Sculk68 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        17f,
-                        0f,
+                        1f,
+                        16f,
                         "",
-                        "Уничтожь 10 000 скалковых блоков",
+                        "Уничтожь 1000 скалковых блоков",
                         "",
-                        "Награда: Рамка §5Скалк"
+                        "Награда: 2 Рамки §bУкреплённый Глубинный Сланец"
                 ),
                 parent,
                 1

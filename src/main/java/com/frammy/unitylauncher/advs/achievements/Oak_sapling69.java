@@ -24,12 +24,12 @@ public class Oak_sapling69 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        17f,
-                        1f,
+                        2f,
+                        16f,
                         "",
                         "Получить скалк сенсор",
-                        "",
-                        "Награда: Рамка §bПортал Вардена"
+                        ""
+
                 ),
                 parent,
                 1

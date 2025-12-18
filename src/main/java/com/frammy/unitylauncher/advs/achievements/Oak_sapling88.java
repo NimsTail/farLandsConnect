@@ -24,11 +24,12 @@ public class Oak_sapling88 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        23f,
-                        1f,
+                        2f,
+                        22f,
                         "",
-                        "Провести 10 минут под водой",
-                        ""
+                        "Провести 15 минут под водой",
+                        "",
+                        "Награда: Рамка §5Вода"
                 ),
                 parent,
                 1

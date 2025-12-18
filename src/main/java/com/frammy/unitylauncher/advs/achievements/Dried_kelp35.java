@@ -24,8 +24,8 @@ public class Dried_kelp35 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        10f,
-                        3f,
+                        4f,
+                        9f,
                         "Съесть 2000 жареных ламинарий",
                         "",
                         "Награда: Рамка §5Водоросли"

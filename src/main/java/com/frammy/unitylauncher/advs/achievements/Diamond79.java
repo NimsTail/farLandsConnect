@@ -19,18 +19,18 @@ public class Diamond79 extends BaseAdvancement  {
         super(
                 KEY.getKey(),
                 new FancyAdvancementDisplay(
-                        Material.DIAMOND,
+                        Material.GLOWSTONE,
                         "Распродажа",
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        21f,
-                        1f,
+                        2f,
+                        20f,
                         "",
                         "Продать в общей сумме предметов",
-                        "на 4000 ф. граней",
+                        "на 4000F",
                         "",
-                        "Награда: Рамка §cСпавнер"
+                        "Награда: Рамка §cСветокамень"
                 ),
                 parent,
                 1

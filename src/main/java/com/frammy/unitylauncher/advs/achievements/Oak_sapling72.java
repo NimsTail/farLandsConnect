@@ -24,13 +24,13 @@ public class Oak_sapling72 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        19f,
-                        1f,
+                        2f,
+                        18f,
                         "",
                         "Иметь полный инвентарь только из ",
                         "случайных предметов (ни одного ",
                         "одинакового)",
-                        ""
+                        "Награда: Рамка §6Кирпич"
                 ),
                 parent,
                 1

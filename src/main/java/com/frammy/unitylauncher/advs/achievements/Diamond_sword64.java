@@ -24,12 +24,13 @@ public class Diamond_sword64 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        16f,
-                        3f,
+                        4f,
+                        15f,
                         "",
                         "Умереть от моба и убить его через 30 ",
                         "секунд после респавна ",
-                        ""
+                        "",
+                        "Награда: Рамка §5Искажённая Ножка"
                 ),
                 parent,
                 1

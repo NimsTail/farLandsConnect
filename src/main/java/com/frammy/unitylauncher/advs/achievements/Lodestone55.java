@@ -24,12 +24,12 @@ public class Lodestone55 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        15f,
-                        0f,
+                        1f,
+                        14f,
                         "",
                         "Поставить магнетит в аду",
                         "",
-                        "Награда: Рамка §bМагнетит"
+                        ""
                 ),
                 parent,
                 1

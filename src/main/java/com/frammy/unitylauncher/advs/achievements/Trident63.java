@@ -24,8 +24,8 @@ public class Trident63 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        16f,
-                        2f,
+                        3f,
+                        15f,
                         "",
                         "Быть поражённым молнией",
                         ""

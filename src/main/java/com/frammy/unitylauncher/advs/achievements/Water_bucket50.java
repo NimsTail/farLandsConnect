@@ -24,13 +24,12 @@ public class Water_bucket50 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
+                        3f,
                         6f,
-                        2f,
                         "",
                         "Собрать в ведро всех возможных ",
                         "животных",
-                        "",
-                        "Награда: Рамка §5Вода"
+                        ""
                 ),
                 parent,
                 1

@@ -17,11 +17,11 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 public final class AdvancementsManager implements Listener {
 
-    private final JavaPlugin plugin;
+    private final UnityLauncher plugin;
     private AdvancementTab achievements;
-    private static final String ROOT_BG = "textures/block/stone.png";
+    private static final String ROOT_BG = "textures/block/calcite.png";
 
-    public AdvancementsManager(JavaPlugin plugin) {
+    public AdvancementsManager(UnityLauncher plugin) {
         this.plugin = plugin;
     }
 
@@ -33,7 +33,7 @@ public final class AdvancementsManager implements Listener {
                 achievements,
                 "ach0",
                 new FancyAdvancementDisplay(
-                        Material.GRASS_BLOCK, "Начало",
+                        Material.ITEM_FRAME, "FarLands",
                         AdvancementFrameType.TASK, true, true,
                         0f, 0f, "",
                         "Впервые зайти на сервер", ""

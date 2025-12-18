@@ -24,8 +24,8 @@ public class Oak_sapling82 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        21f,
-                        4f,
+                        5f,
+                        20f,
                         "",
                         "Заплатить 1000 валюты в налогах",
                         ""

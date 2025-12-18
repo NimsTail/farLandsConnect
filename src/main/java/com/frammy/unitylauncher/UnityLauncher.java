@@ -63,6 +63,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     private WebSocketManager webSocketManager;
     private BlueMapIntegration blueMapIntegration;
     private LoginRateLimiter loginLimiter;
+    private AdvancementsManager advancementsManager;
 
     public DiplomacyService diplomacy;
     public CountryRegistryJdbc countryRegistryJdbc;
@@ -339,6 +340,11 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
         // --- server messages (join/quit/advancement phrases) ---
         this.serverMessagesListener = ServerMessagesListener.init(this);
+
+        // --- Я тут втиснусь со своими ачивками, ок? ---
+        advancementsManager = new AdvancementsManager(this);
+        advancementsManager.init();
+
 
         getLogger().info("UnityLauncher enabled!");
     }

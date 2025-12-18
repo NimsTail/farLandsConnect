@@ -24,11 +24,12 @@ public class Oak_sapling81 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        21f,
-                        3f,
+                        4f,
+                        20f,
                         "",
                         "Потерять весь баланс за 1 день",
-                        ""
+                        "",
+                        "Награда: Рамка §6Незеритовый обломок"
                 ),
                 parent,
                 1

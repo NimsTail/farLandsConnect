@@ -24,8 +24,8 @@ public class Oak_sapling44 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
+                        9f,
                         7f,
-                        8f,
                         "",
                         "Управлять страной более 30 дней",
                         ""

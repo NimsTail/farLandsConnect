@@ -24,11 +24,12 @@ public class Oak_sapling47 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        12f,
-                        2f,
+                        3f,
+                        11f,
                         "",
                         "Провести 5 дней ниже Y = 0",
-                        ""
+                        "",
+                        "Награда: Рамка §cСпавнер"
                 ),
                 parent,
                 1

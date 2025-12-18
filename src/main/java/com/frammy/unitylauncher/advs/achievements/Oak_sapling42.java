@@ -24,8 +24,8 @@ public class Oak_sapling42 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
+                        3f,
                         5f,
-                        2f,
                         "",
                         "Пройти 50 км пешком без транспорта ",
                         ""

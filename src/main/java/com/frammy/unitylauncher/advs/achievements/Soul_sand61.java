@@ -19,17 +19,17 @@ public class Soul_sand61 extends BaseAdvancement  {
         super(
                 KEY.getKey(),
                 new FancyAdvancementDisplay(
-                        Material.SOUL_SAND,
+                        Material.WOODEN_SWORD,
                         "Убийца",
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        16f,
-                        0f,
+                        1f,
+                        15f,
                         "",
                         "Убить игрока",
-                        "",
-                        "Награда: Рамка §bПесок Душ"
+                        ""
+
                 ),
                 parent,
                 1

@@ -24,13 +24,13 @@ public class Oak_sapling95 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        15f,
-                        6f,
+                        7f,
+                        14f,
                         "",
                         "Сломать 10 незеритовых топоров, ",
                         "добывая ресурсы",
                         "",
-                        "Награда: Рамка §5Адское Синее Бревно"
+                        ""
                 ),
                 parent,
                 1

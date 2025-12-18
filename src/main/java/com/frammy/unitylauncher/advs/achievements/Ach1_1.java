@@ -19,13 +19,13 @@ public class Ach1_1 extends BaseAdvancement  {
         super(
                 KEY.getKey(),
                 new FancyAdvancementDisplay(
-                        Material.OAK_SAPLING,
+                        Material.CHERRY_LOG,
                         "Вишнёвая Мастерская",
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        2f,
-                        0f,
+                        1f,
+                        1f,
                         "",
                         "Скрафтить все виды предметов из ",
                         "вишнёвой древесины",

@@ -19,13 +19,13 @@ public class Oak_sapling30 extends BaseAdvancement  {
         super(
                 KEY.getKey(),
                 new FancyAdvancementDisplay(
-                        Material.OAK_SAPLING,
+                        Material.CHERRY_LEAVES,
                         "Вишнёвая Выдержка",
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        2f,
-                        2f,
+                        3f,
+                        1f,
                         "",
                         "15 дней находиться в вишневом биоме",
                         "",

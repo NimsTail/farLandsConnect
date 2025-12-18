@@ -25,7 +25,7 @@ public class Oak_sapling41 extends BaseAdvancement  {
                         true,
                         true,
                         7f,
-                        6f,
+                        7f,
                         "",
                         "Управлять страной более 30 дней",
                         ""

@@ -24,12 +24,12 @@ public class Oak_sapling29 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
+                        3f,
                         4f,
-                        2f,
                         "",
                         "Поставить узорчатую вазу",
-                        "",
-                        "Награда: Рамка §6Кирпич"
+                        ""
+
                 ),
                 parent,
                 1

@@ -24,12 +24,11 @@ public class Oak_sapling48 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        9f,
-                        1f,
+                        2f,
+                        3f,
                         "",
                         "Собрать все красители",
-                        "",
-                        "Награда: Все рамки §bКерамика"
+                        ""
                 ),
                 parent,
                 1

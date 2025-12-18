@@ -24,10 +24,10 @@ public class Tropical_fish51 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
+                        4f,
                         6f,
-                        3f,
                         "",
-                        "Выловить 200 тропической рыбы",
+                        "Выловить 250 тропической рыбы",
                         "",
                         "Награда: Рамка §5Текущая Вода"
                 ),

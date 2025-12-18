@@ -24,8 +24,8 @@ public class Ach1_4 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
+                        1f,
                         5f,
-                        0f,
                         "",
                         "Провести весь день в другой стране",
                         " "

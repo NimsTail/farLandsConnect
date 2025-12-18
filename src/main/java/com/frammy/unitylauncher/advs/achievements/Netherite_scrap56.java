@@ -24,12 +24,12 @@ public class Netherite_scrap56 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        15f,
-                        1f,
+                        2f,
+                        14f,
                         "",
                         "Переплавить незеритовый обломок",
-                        "",
-                        "Награда: Рамка §6Незеритовый обломок"
+                        ""
+
                 ),
                 parent,
                 1

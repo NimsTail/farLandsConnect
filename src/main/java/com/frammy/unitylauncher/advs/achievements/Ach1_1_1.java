@@ -19,7 +19,7 @@ public class Ach1_1_1 extends BaseAdvancement  {
         super(
                 KEY.getKey(),
                 new FancyAdvancementDisplay(
-                        Material.OAK_SAPLING,
+                        Material.PINK_PETALS,
                         "Вишнёвая Одиссея",
                         AdvancementFrameType.TASK,
                         true,

@@ -24,8 +24,8 @@ public class Snowball65 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        16f,
-                        4f,
+                        5f,
+                        15f,
                         "",
                         "Умереть от снежка",
                         ""

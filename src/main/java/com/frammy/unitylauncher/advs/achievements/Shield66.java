@@ -19,17 +19,17 @@ public class Shield66 extends BaseAdvancement  {
         super(
                 KEY.getKey(),
                 new FancyAdvancementDisplay(
-                        Material.SHIELD,
+                        Material.LODESTONE,
                         "Потерянная Душа",
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        16f,
-                        5f,
+                        6f,
+                        15f,
                         "",
                         "Умереть на одном и том же месте 3",
                         "раза подряд",
-                        ""
+                        "Награда: Рамка §bМагнетит"
                 ),
                 parent,
                 1

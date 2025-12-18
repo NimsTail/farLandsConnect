@@ -24,7 +24,7 @@ public class Oak_sapling43 extends BaseAdvancement  {
                         AdvancementFrameType.TASK,
                         true,
                         true,
-                        7f,
+                        8f,
                         7f,
                         "",
                         "Выйти из своей страны и ",
