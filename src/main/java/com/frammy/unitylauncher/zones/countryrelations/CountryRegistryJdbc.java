@@ -61,8 +61,7 @@ public class CountryRegistryJdbc {
     /**
      * @param prefix как "§o§d❉Президент" или "&f"
      */ // простая структура одной роли
-        public record RoleInfo(int id, String name, String prefix) {
-    }
+        public record RoleInfo(int id, String name, String prefix, int index) {}
 
     /** Комиссия страны (проценты, напр. 1.25 = 1.25%). Если нет — вернёт fallbackPct. */
     public double getCountryTransferFeePctOr(String countryName, double fallbackPct) {
@@ -652,13 +651,46 @@ public class CountryRegistryJdbc {
         }
     }
 
+
+
+
     private static RoleInfo roleFromJson(JsonObject o) {
         if (o == null) return null;
         Integer id = getInt(o);
         String name = getString(o, "Name");
         String prefix = getString(o, "Prefix");
+
+        int idx = 0;
+        try {
+            if (o.has("Index") && !o.get("Index").isJsonNull()) {
+                JsonElement el = o.get("Index");
+                if (el.isJsonPrimitive()) {
+                    if (el.getAsJsonPrimitive().isNumber()) idx = el.getAsInt();
+                    else if (el.getAsJsonPrimitive().isString()) idx = Integer.parseInt(el.getAsString().trim());
+                }
+            }
+        } catch (Exception ignored) {}
+
         if (id == null) return null;
-        return new RoleInfo(id, name, prefix);
+        return new RoleInfo(id, name, prefix, idx);
+    }
+
+    public int getPlayerRoleIndex(String playerName) {
+        if (playerName == null || playerName.isBlank()) return 0;
+        refreshCacheIfExpired();
+
+        String pLower = playerName.toLowerCase(Locale.ROOT);
+        String country = playerToCountry.get(pLower);
+        if (country == null) return 0;
+
+        Integer rid = playerToRoleId.get(pLower);
+        if (rid == null) return 0;
+
+        Map<Integer, RoleInfo> roles = countryRoleMeta.get(country.toLowerCase(Locale.ROOT));
+        if (roles == null) return 0;
+
+        RoleInfo ri = roles.get(rid);
+        return (ri == null) ? 0 : ri.index();
     }
 
     private static Integer findLeaderRoleIdFromRoles(Map<Integer, RoleInfo> rolesMap) {

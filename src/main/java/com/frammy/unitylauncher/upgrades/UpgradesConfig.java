@@ -1,615 +1,1241 @@
 package com.frammy.unitylauncher.upgrades;
 
+import com.frammy.unitylauncher.UnityLauncher;
 import org.bukkit.Material;
-import org.bukkit.configuration.file.FileConfiguration;
-import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.configuration.file.YamlConfiguration;
 
+import java.io.File;
+import java.io.IOException;
 import java.util.*;
+import java.util.regex.Pattern;
 
+/**
+ * Ⓕ  FARLANDS / UNITYLAUNCHER  —  UpgradesConfig
+ *
+ * Главные принципы:
+ * 1) Мы НЕ перезаписываем существующий конфиг. Добавляем только отсутствующие ключи.
+ * 2) Значения perm для апгрейдов-уровней храним БЕЗ ".1/.2" (base prefix).
+ *    Потому что UpgradeCondition.countryMaxLevel() сам добавляет ".1..N".
+ * 3) Есть минимальная "миграция": если новый ключ отсутствует, а старый есть — переносим.
+ *    Также нормализуем perm-base: срезаем ".<число>" на конце.
+ *
+ * ВАЖНО ПРО КОММЕНТАРИИ:
+ * Bukkit YamlConfiguration НЕ сохраняет YAML-комментарии (# ...) надёжно.
+ * Поэтому описания храним отдельными ключами "*.description" (как в старом конфиге).
+ */
 public final class UpgradesConfig {
-    public final boolean DEBUG;
 
-    // psych support
-    public final int psychSupportLuckTicks;
+    // -------------------------------
+    // Singleton
+    // -------------------------------
+    private static UpgradesConfig INSTANCE;
 
-    // redstone
+    public static UpgradesConfig get() {
+        if (INSTANCE == null) {
+            throw new IllegalStateException("UpgradesConfig.get() called before load().");
+        }
+        return INSTANCE;
+    }
+
+    public static UpgradesConfig load(UnityLauncher plugin) {
+        INSTANCE = new UpgradesConfig(plugin);
+        return INSTANCE;
+    }
+
+    // -------------------------------
+    // Internal
+    // -------------------------------
+    private final UnityLauncher plugin;
+    private final File file;
+    private final YamlConfiguration cfg;
+
+    private static final Pattern TRAILING_DOT_NUMBER = Pattern.compile("\\.\\d+$");
+
+    private UpgradesConfig(UnityLauncher plugin) {
+        this.plugin = plugin;
+        this.file = new File(plugin.getDataFolder(), "upgrades.yml");
+        this.cfg = YamlConfiguration.loadConfiguration(file);
+
+        // 1) Defaults
+        applyHeader();
+        addDefaults(cfg);
+
+        // 2) Migrations / compatibility
+        migrateLegacyKeys(cfg);
+        normalizePermBases(cfg);
+
+        // 3) Ensure defaults are copied only for missing values
+        cfg.options().copyDefaults(true);
+
+        // 4) Save (only fills missing keys + keeps existing)
+        saveQuiet();
+
+        // 5) Read all fields
+        // Core
+        this.debug = cfg.getBoolean("core.debug", false);
+
+        // --- commands
+        this.brandPerm = cfg.getString("commands.brand.perm", "unity.brand");
+
+        // Zone unlocks (zone purchase/build permissions)
+        this.industrialZonePerm = cfg.getString("zones.unlock.industrial.perm", "unity.zone.industrial");
+        this.fieldsZonePerm     = cfg.getString("zones.unlock.fields.perm", "unity.zone.fields");
+        this.colonyZonePerm     = cfg.getString("zones.unlock.colony.perm", "unity.zone.colony");
+        this.parkZonePerm       = cfg.getString("zones.unlock.park.perm", "unity.zone.park");
+        this.bankZonePerm       = cfg.getString("zones.unlock.bank.perm", "unity.zone.bank");
+        this.hospitalZonePerm   = cfg.getString("zones.unlock.hospital.perm", "unity.zone.hospital");
+        this.libraryZonePerm    = cfg.getString("zones.unlock.library.perm", "unity.zone.library");
+        this.churchZonePerm     = cfg.getString("zones.unlock.church.perm", "unity.zone.church");
+
+        // -------------------------------
+        // INDUSTRIAL / LISTENER
+        // -------------------------------
+
+        // ===== redstone (L1/L2)
+        this.rsL1 = readRedstoneLevel("industrial.redstone.level1");
+        this.rsL2 = readRedstoneLevel("industrial.redstone.level2");
+
+        // ===== golden food
+        this.goldenFoodPerm = cfg.getString("fields.goldenFood.perm", "unity.food.golden");
+        this.goldenFoodMsgConsume = cfg.getString("fields.goldenFood.msg_consume", "&cУ вашей страны нет права на эту еду.");
+        this.goldenFoodMsgCraft   = cfg.getString("fields.goldenFood.msg_craft", "&cУ вашей страны нет права крафтить эту еду.");
+
+        this.premiumFoods = new HashSet<>();
+        for (String s : cfg.getStringList("fields.goldenFood.premiumFoods")) {
+            try { premiumFoods.add(Material.valueOf(s.toUpperCase(Locale.ROOT))); }
+            catch (IllegalArgumentException ignored) {}
+        }
+
+        // ===== netherite / beacon locks
+        this.netheritePerm = cfg.getString("industrial.netherite.perm", "unity.netherite");
+        this.netheriteErrmsg = cfg.getString("industrial.netherite.errmsg", "&cВаша страна ещё не открыла незерит.");
+        this.beaconPerm = cfg.getString("industrial.beacon.perm", "unity.beacon");
+        this.beaconErrmsg = cfg.getString("industrial.beacon.errmsg", "&cВаша страна ещё не открыла маяки.");
+
+        // ===== energy saving (economy tick load multiplier)
+        this.energySavingPerm = cfg.getString("industrial.energySaving.perm", "unity.industrial.energy");
+        this.energySavingMultiplier = cfg.getDouble("industrial.energySaving.multiplier", 0.7);
+
+        // ===== furnace ore bonus
+        this.furnacePerm = cfg.getString("industrial.furnaceOreBonus.perm", "unity.furnace.ore_boost");
+        this.furnaceChance = cfg.getDouble("industrial.furnaceOreBonus.chance", 0.10);
+        this.furnaceSfx = cfg.getBoolean("industrial.furnaceOreBonus.sfx", true);
+
+        this.furnaceOutputs = new HashSet<>();
+        for (String s : cfg.getStringList("industrial.furnaceOreBonus.outputs")) {
+            try { furnaceOutputs.add(Material.valueOf(s.toUpperCase(Locale.ROOT))); }
+            catch (IllegalArgumentException ignored) {}
+        }
+
+        // ===== furnace heat boost
+        this.furnaceHeatPerm = cfg.getString("industrial.furnaceHeat.perm", "unity.furnace.boost");
+        this.furnaceHeatRadius = cfg.getInt("industrial.furnaceHeat.radius", 5);
+        this.furnaceHeatMaxPct = cfg.getDouble("industrial.furnaceHeat.max_percent", 40.0);
+
+        // ===== eco fuel
+        this.ecoFuelPerm = cfg.getString("industrial.ecoFuel.perm", "unity.ecofuel");
+        this.ecoFuelMultiplier = cfg.getDouble("industrial.ecoFuel.multiplier", 1.5);
+
+        // ===== hopper smart / turbo
+        this.hopperSmartPermBase = cfg.getString("industrial.hopper.permBase", "unity.hopper");
+        this.hopperSlowModeLvl0 = cfg.getBoolean("industrial.hopper.slow_mode_lvl0", true);
+
+        this.hopperTurboTaskPeriodTicks = cfg.getLong("industrial.hopper.turbo_task_period_ticks", 1L);
+        this.hopperTurboBudgetPerRun = cfg.getInt("industrial.hopper.turbo_budget_per_run", 250);
+        this.hopperTurboEligibilityCacheMs = cfg.getLong("industrial.hopper.turbo_eligibility_cache_ms", 1500L);
+
+        // (твои новые поля остаются — вдруг где-то ещё используются)
+        this.hopperSlowdownLevel0 = cfg.getInt("industrial.hopper.slowdown_level0_ticks", 8);
+        this.hopperTurboLevel2 = cfg.getInt("industrial.hopper.turbo_level2_ticks", 1);
+
+        // ===== TNT quarry + license
+        this.tntPerm = cfg.getString("industrial.tntQuarry.perm", "unity.tnt.quarry");
+        this.tntDupWhitelist = new EnumMap<>(Material.class);
+        var sec = cfg.getConfigurationSection("industrial.tntQuarry.dupWhitelist");
+        if (sec != null) {
+            for (String k : sec.getKeys(false)) {
+                try {
+                    Material m = Material.valueOf(k.toUpperCase(Locale.ROOT));
+                    double prob = cfg.getDouble("industrial.tntQuarry.dupWhitelist." + k, 0.0);
+                    tntDupWhitelist.put(m, prob);
+                } catch (IllegalArgumentException ignored) {}
+            }
+        }
+
+        this.tntLicensePerm = cfg.getString("colony.tntLicense.perm", "unity.tnt.license");
+        this.tntLicenseOres = new HashSet<>();
+        for (String s : cfg.getStringList("colony.tntLicense.ores")) {
+            try { tntLicenseOres.add(Material.valueOf(s.toUpperCase(Locale.ROOT))); }
+            catch (IllegalArgumentException ignored) {}
+        }
+        this.tntLicenseMaxExtra = cfg.getInt("colony.tntLicense.max_extra", 2);
+        this.tntLicenseChancePerExtra = cfg.getDouble("colony.tntLicense.chance_per_extra", 0.25);
+
+        // ===== effects system
+        this.reapplyCooldownMs = cfg.getLong("effects.reapply_cooldown_ms", 700L);
+        this.effectsMaxLevel = cfg.getInt("effects.max_level", 2);
+        this.effectTicks = cfg.getInt("effects.effect_ticks", 220);
+
+        this.permHaste = cfg.getString("effects.perm_haste", "unity.effects.haste");
+        this.permSpeed = cfg.getString("effects.perm_speed", "unity.effects.speed");
+        this.permResist = cfg.getString("effects.perm_resist", "unity.effects.resist");
+
+        // ===== psych support
+        this.psychSupportLuckTicks = cfg.getInt("hospital.psychSupport.luck_duration_ticks", 200);
+
+        // ===== farmland protection
+        this.farmlandPermBase = cfg.getString("fields.farmlandProtect.permBase", "unity.farmland.protect");
+        this.farmlandBigFallThreshold = (float) cfg.getDouble("fields.farmlandProtect.big_fall_threshold", 1.2);
+
+        // ===== greenhouse low light
+        this.cropsLLPermBase = cfg.getString("fields.greenhouseLowLight.permBase", "unity.greenhouse.lowlight");
+        this.cropsLL_ScanPeriodTicks = cfg.getLong("fields.greenhouseLowLight.scan_period_ticks", 40L);
+        this.cropsLL_PerZoneBudget = cfg.getInt("fields.greenhouseLowLight.per_zone_budget", 40);
+        this.cropsLL_MaxPercent = cfg.getDouble("fields.greenhouseLowLight.max_percent", 30.0);
+
+        // ===== bee pollination
+        this.beePollinationPerm = cfg.getString("fields.beePollination.perm", "unity.bee.pollination");
+        this.beePollinationBonusPercent = cfg.getDouble("fields.beePollination.bonus_percent", 10.0);
+        this.beePollinationRadius = cfg.getInt("fields.beePollination.radius", 8);
+
+        // ===== anti phantom
+        this.antiPhantomPermBase = cfg.getString("colony.antiPhantom.permBase", "unity.antiphantom");
+
+        // ===== brew speed
+        this.brewPerm = cfg.getString("industrial.brewSpeed.perm", "unity.brew.speed");
+        this.brewSpeedPercent = cfg.getDouble("industrial.brewSpeed.speed_percent", 30.0);
+
+        // ===== church
+        this.churchBellPerm = cfg.getString("church.peaceBell.perm", "unity.church.bell");
+        this.churchBellStayMinutes = cfg.getInt("church.peaceBell.stay_minutes", 1);
+        this.churchBellCooldownMinutes = cfg.getInt("church.peaceBell.cooldown_minutes", 10);
+        this.churchBellSfx = cfg.getBoolean("church.peaceBell.sfx", true);
+
+        this.churchPilgrimagePerm = cfg.getString("church.pilgrimage.perm", "unity.church.pilgrimage");
+        this.churchPilgrimageStayMinutes = cfg.getInt("church.pilgrimage.stay_minutes", 1);
+        this.churchPilgrimageBuffMinutes = cfg.getInt("church.pilgrimage.buff_minutes", 10);
+        this.churchPilgrimageCooldownMinutes = cfg.getInt("church.pilgrimage.cooldown_minutes", 30);
+        this.churchPilgrimageSfx = cfg.getBoolean("church.pilgrimage.sfx", true);
+        this.churchPilgrimageAmplifier = cfg.getInt("church.pilgrimage.amplifier", 0);
+        this.churchPilgrimageEffects = cfg.getStringList("church.pilgrimage.effects");
+
+        // ===== dust protection (ticks)
+        this.dustProtectionPerm = cfg.getString("industrial.dustProtection.perm", "unity.dust.protection");
+        this.dustProtectionMinY = cfg.getInt("industrial.dustProtection.min_y", 32);
+        this.dustProtectionDurationTicks = cfg.getInt("industrial.dustProtection.duration_ticks", 200);
+
+        // ===== recycler
+        this.recyclerPerm = cfg.getString("industrial.recycler.perm", "unity.recycler");
+        this.recyclerDropChance = cfg.getDouble("industrial.recycler.dropChance", 0.15);
+
+        this.recyclerInputs = new HashSet<>();
+        for (String s : cfg.getStringList("industrial.recycler.inputs")) {
+            try { recyclerInputs.add(Material.valueOf(s.toUpperCase(Locale.ROOT))); }
+            catch (IllegalArgumentException ignored) {}
+        }
+        this.recyclerExtraDrops = new EnumMap<>(Material.class);
+        var ex = cfg.getConfigurationSection("industrial.recycler.extraDrops");
+        if (ex != null) {
+            for (String k : ex.getKeys(false)) {
+                try {
+                    Material m = Material.valueOf(k.toUpperCase(Locale.ROOT));
+                    double prob = cfg.getDouble("industrial.recycler.extraDrops." + k, 0.0);
+                    recyclerExtraDrops.put(m, prob);
+                } catch (IllegalArgumentException ignored) {}
+            }
+        }
+
+        // ===== outpost
+        this.outpostPerm = cfg.getString("colony.outpost.perm", "unity.colony.outpost");
+        this.outpostCullPercent = cfg.getDouble("colony.outpost.raid_cull_percent", 30.0); // percent 0..100
+
+        // ===== livestock old names (aliases)
+        this.livestockPlusPerm = cfg.getString("fields.livestock.plus_perm", "unity.livestock.plus");
+        this.livestockPlusSpeedPercent = cfg.getDouble("fields.livestock.plus_speed_percent", 25.0);
+
+        this.livestockDoublePerm = cfg.getString("fields.livestock.double_perm", "unity.livestock.double");
+        this.livestockDoubleChancePercent = cfg.getDouble("fields.livestock.double_chance_percent", 5.0);
+
+        // ===== loader (minecart)
+        this.loaderPerm = cfg.getString("industrial.loader.perm", "unity.loader");
+        this.loaderRadius = cfg.getInt("industrial.loader.radius", 4);
+        this.loaderSpeedMultiplier = cfg.getDouble("industrial.loader.speed_multiplier", 2.0);
+
+        // ===== food ration
+        this.foodRationPerm = cfg.getString("colony.foodRation.perm", "unity.colony.foodration");
+        this.foodRationPeriodTicks = cfg.getLong("colony.foodRation.period_ticks", 200L);
+        this.foodRationDurationTicks = cfg.getInt("colony.foodRation.duration_ticks", 40);
+        this.foodRationAmplifier = cfg.getInt("colony.foodRation.amplifier", 0);
+
+        // -------------------------------
+        // BANK
+        // -------------------------------
+        this.safeDepositPerm = cfg.getString("bank.safeDeposit.perm", "unity.bank.safedeposit");
+        this.safeDepositMaxPerPlayer = cfg.getInt("bank.safeDeposit.max_per_player", 2);
+
+        this.atmPermBase = cfg.getString("bank.atmNetwork.permBase", "unity.bank.atm");
+        this.atmFeeInBank = cfg.getDouble("bank.atmNetwork.fee_in_bank", 0.0);
+        this.atmFeeInCountry = cfg.getDouble("bank.atmNetwork.fee_in_country", 0.01);
+        this.atmFeeForeign = cfg.getDouble("bank.atmNetwork.fee_foreign", 0.03);
+
+        this.freeTransferPerm = cfg.getString("bank.freeTransfer.perm", "unity.bank.freeTransfer");
+        this.depositInterestPerm = cfg.getString("bank.depositInterest.perm", "unity.bank.interest");
+        this.depositInterestDailyPercent = cfg.getDouble("bank.depositInterest.daily_percent", 0.10);
+
+        // -------------------------------
+        // PARK
+        // -------------------------------
+        this.parkGardenerPerm = cfg.getString("park.gardenerHut.perm", "unity.park.gardener");
+        this.parkGrowthChanceBonus = cfg.getDouble("park.gardenerHut.growth_chance_bonus", 0.20);
+
+        this.parkQuietGuardPerm = cfg.getString("park.quietGuard.perm", "unity.park.quietguard");
+        this.parkQuietGuardRadius = cfg.getInt("park.quietGuard.radius", 12);
+
+        this.parkPondBedsPerm = cfg.getString("park.pondBeds.perm", "unity.park.pondbeds");
+        this.parkSaturationBonus = cfg.getDouble("park.pondBeds.saturation_bonus", 0.6);
+        this.parkSaturationCooldownMs = cfg.getLong("park.pondBeds.cooldown_ms", 8000L);
+
+        this.parkQuietHourPerm = cfg.getString("park.quietHour.perm", "unity.park.quiethour");
+
+        this.parkBenchesPerm = cfg.getString("park.benches.perm", "unity.park.benches");
+        this.parkBenchRadius = cfg.getInt("park.benches.radius", 8);
+        this.parkBenchRegenSeconds = cfg.getInt("park.benches.regen_seconds", 4);
+
+        // -------------------------------
+        // HOSPITAL
+        // -------------------------------
+        this.hospitalPsychSupportPerm = cfg.getString("hospital.psychSupport.perm", "unity.hospital.psych");
+        this.hospitalPsychSupportLuckDurationTicks = cfg.getInt("hospital.psychSupport.luck_duration_ticks", 200);
+
+        this.hospitalDietPerm = cfg.getString("hospital.diet.perm", "unity.hospital.diet");
+        this.hospitalDietSaturationBonus = cfg.getDouble("hospital.diet.saturation_bonus", 0.8);
+
+        this.hospitalRegenPulsePerm = cfg.getString("hospital.regenPulse.perm", "unity.hospital.regen");
+        this.hospitalRegenPulsePeriodTicks = cfg.getLong("hospital.regenPulse.period_ticks", 200L);
+        this.hospitalRegenPulseDurationTicks = cfg.getInt("hospital.regenPulse.duration_ticks", 80);
+        this.hospitalRegenPulseAmplifier = cfg.getInt("hospital.regenPulse.amplifier", 0);
+
+        this.hospitalSanitaryPerm = cfg.getString("hospital.sanitaryZone.perm", "unity.hospital.sanitary");
+        this.hospitalSanitaryRadius = cfg.getInt("hospital.sanitaryZone.radius", 50);
+        this.hospitalSanitarySpawnMultiplier = cfg.getDouble("hospital.sanitaryZone.spawn_multiplier", 0.5);
+
+        this.hospitalBloodGiftPerm = cfg.getString("hospital.bloodGift.perm", "unity.hospital.bloodgift");
+        this.hospitalBloodGiftAbsorptionEnabled =
+                cfg.getBoolean("hospital.bloodGift.absorption.enabled", true);
+        this.hospitalBloodGiftAbsorptionAmplifier =
+                cfg.getInt("hospital.bloodGift.absorption.amplifier", 0);
+
+        this.hospitalBloodGiftRegenEnabled =
+                cfg.getBoolean("hospital.bloodGift.regen.enabled", true);
+        this.hospitalBloodGiftRegenTicks =
+                cfg.getInt("hospital.bloodGift.regen.ticks", 20 * 10);
+        this.hospitalBloodGiftRegenAmplifier =
+                cfg.getInt("hospital.bloodGift.regen.amplifier", 0);
+        this.hospitalBloodGiftDurationMinutes =
+                cfg.getInt("hospital.bloodGift.duration_minutes", 10);
+
+        this.hospitalTriagePerm = cfg.getString("hospital.triage.perm", "unity.hospital.triage");
+        this.hospitalTriageReducePercent = cfg.getInt("hospital.triage.reduce_percent", 50);
+
+        // Safe Zone (damage reduction inside hospital)
+        this.hospitalSafeZonePerm = cfg.getString("hospital.safeZone.perm", "unity.hospital.safezone");
+        this.hospitalSafeZoneDamageMultiplier = cfg.getDouble("hospital.safeZone.damage_multiplier", 0.80);
+
+        // -------------------------------
+        // LIBRARY
+        // -------------------------------
+        this.libraryScrollsPerm = cfg.getString("library.scrollsOfEconomy.perm", "unity.library.scrolls");
+        this.libraryScrollsExpCostMultiplier = cfg.getDouble("library.scrollsOfEconomy.exp_cost_multiplier", 0.80);
+
+        this.libraryCalmPerm = cfg.getString("library.calm.perm", "unity.library.calm");
+        this.libraryCalmChanceToCancelHunger = cfg.getDouble("library.calm.cancel_hunger_chance", 0.25);
+
+        this.libraryEducationPerm = cfg.getString("library.educationInitiative.perm", "unity.library.education");
+        this.libraryEducationRewardMultiplier = cfg.getDouble("library.educationInitiative.reward_multiplier", 1.25);
+
+        // -------------------------------
+        // STATE
+        // -------------------------------
+        this.stateContractsPerm = cfg.getString("state.contracts.perm", "unity.state.contracts");
+        this.stateContractsMaxActive = cfg.getInt("state.contracts.max_active", 3);
+
+        this.stateLuxuryTaxPerm = cfg.getString("state.luxuryTax.perm", "unity.state.luxuryTax");
+        this.stateLuxuryTaxPercent = cfg.getDouble("state.luxuryTax.tax_percent", 0.05);
+        this.stateLuxuryTaxItems = new HashSet<>();
+        for (String s : cfg.getStringList("state.luxuryTax.items")) {
+            try { this.stateLuxuryTaxItems.add(Material.valueOf(s.toUpperCase(Locale.ROOT))); }
+            catch (IllegalArgumentException ignored) {}
+        }
+
+        this.stateTollRoadsPerm = cfg.getString("state.tollRoads.perm", "unity.state.toll");
+        this.stateTollRoadsFee = cfg.getDouble("state.tollRoads.fee", 5.0);
+
+        this.stateExportRebatePerm = cfg.getString("state.exportRebate.perm", "unity.state.exportRebate");
+        this.stateExportRebatePercent = cfg.getDouble("state.exportRebate.percent", 0.10);
+
+        this.stateResourceFocusPerm = cfg.getString("state.resourceFocus.perm", "unity.state.resourceFocus");
+        this.stateResourceFocusBonusPercent = cfg.getInt("state.resourceFocus.bonus_percent", 20);
+        this.stateResourceFocusPenaltyPercent = cfg.getInt("state.resourceFocus.penalty_percent", 10);
+
+        this.statePropagandaPerm = cfg.getString("state.propaganda.perm", "unity.state.propaganda");
+        this.statePropagandaPeriodTicks = cfg.getLong("state.propaganda.period_ticks", 1200L);
+        this.statePropagandaTemplates = cfg.getStringList("state.propaganda.templates");
+
+        this.stateCensorshipPerm = cfg.getString("state.censorship.perm", "unity.state.censorship");
+        this.stateCensorshipTriggerWords = cfg.getStringList("state.censorship.trigger_words");
+
+        this.stateCurfewPerm = cfg.getString("state.curfew.perm", "unity.state.curfew");
+        this.stateCurfewStartHour = cfg.getInt("state.curfew.start_hour", 23);
+        this.stateCurfewEndHour   = cfg.getInt("state.curfew.end_hour", 6);
+
+        this.stateRepairGuildPerm = cfg.getString("state.repairGuild.perm", "unity.state.repairGuild");
+        this.stateRepairGuildReturnPercent = cfg.getInt("state.repairGuild.return_percent", 10);
+
+        this.stateTradingZonePerm = cfg.getString("state.tradingZone.perm", "unity.state.tradingZone");
+        this.stateTradingZoneExtraSlots = cfg.getInt("state.tradingZone.extra_slots", 2);
+
+        this.stateSamplerPerm = cfg.getString("state.sampler.perm", "unity.state.sampler");
+        this.stateSamplerCooldownHours = cfg.getInt("state.sampler.cooldown_hours", 24);
+
+        this.stateHappyHourPerm = cfg.getString("state.happyHour.perm", "unity.state.happyHour");
+        this.stateHappyHourDiscountPercent = cfg.getInt("state.happyHour.discount_percent", 15);
+
+    }
+
+    // -------------------------------
+    // Public fields (read-only)
+    // -------------------------------
+
+    // Core
+    public final boolean debug;
+
+    // --- commands
+    public final String brandPerm;
+
+    // Zone unlock
+    public final String industrialZonePerm;
+    public final String fieldsZonePerm;
+    public final String colonyZonePerm;
+    public final String parkZonePerm;
+    public final String bankZonePerm;
+    public final String hospitalZonePerm;
+    public final String libraryZonePerm;
+    public final String churchZonePerm;
+
+    // Redstone L1/L2
     public record RedstoneLevelCfg(String perm, String errmsg, Set<Material> allowed) {}
-
     public final RedstoneLevelCfg rsL1, rsL2;
 
-    // golden food
-    public final String goldenFoodPerm, goldenFoodMsgConsume, goldenFoodMsgCraft;
+    // Golden food
+    public final String goldenFoodPerm;
+    public final String goldenFoodMsgConsume;
+    public final String goldenFoodMsgCraft;
     public final Set<Material> premiumFoods;
 
-    // furnace ore bonus
-    public final String furnacePerm, furnaceErrmsg;
+    // Netherite / beacon
+    public final String netheritePerm, netheriteErrmsg;
+    public final String beaconPerm, beaconErrmsg;
+
+    // Energy saving (chunk economy tick load)
+    public final String energySavingPerm;
+    public final double energySavingMultiplier;
+
+    // Furnace ore bonus
+    public final String furnacePerm;
     public final double furnaceChance;
     public final boolean furnaceSfx;
     public final Set<Material> furnaceOutputs;
 
-    // furnace heat boost
-    public final String furnaceHeatPerm, furnaceHeatErrmsg;
+    // Furnace heat
+    public final String furnaceHeatPerm;
     public final int furnaceHeatRadius;
     public final double furnaceHeatMaxPct;
 
-    // hopper
-    public final String hopperSmartPermBase, hopperErrmsg;
-    public final int hopperTurboBudgetPerRun, hopperTurboTaskPeriodTicks;
-    public final long hopperTurboEligibilityCacheMs;
-    public final boolean hopperSlowModeLvl0;
-
-    // tnt
-    public final String tntPerm, tntErrmsg;
-    public final Map<Material, Double> tntDupWhitelist;
-
-    // effects
-    public final long reapplyCooldownMs;
-    public final int effectTicks;
-    public final String permHaste, permSpeed, permResist;
-    public final int effectsMaxLevel;
-
-    // anti-phantom
-    public final String antiPhantomPermBase, antiPhantomErrmsg;
-
-    // brew fast
-    public final String brewPerm, brewErrmsg;
-    public final double brewSpeedPercent;
-
-    // Signs
-    public final String atmFile;
-    public final String atmPerm;
-    public final String signsPrefix;
-    public final String msgSignUpdatedAll, msgSignBankCreated;
-    public final String errNotOwner, errNoMoney, errInvalidFormat;
-    public final double costShopListUpdate, costBankCreate;
-
-    // church — Peace Bell
-    public final String churchBellPerm;
-    public final boolean churchBellSfx;
-    public final int churchBellStayMinutes;
-    public final int churchBellCooldownMinutes;
-
-    // church — Pilgrimage
-    public final String churchPilgrimagePerm;
-    public final boolean churchPilgrimageSfx;
-    public final int churchPilgrimageStayMinutes;
-    public final int churchPilgrimageBuffMinutes;
-    public final int churchPilgrimageAmplifier; // 0 => уровень I
-    public final java.util.Set<String> churchPilgrimageEffects; // названия Bukkit-эффектов
-    public final int churchPilgrimageCooldownMinutes; // 0 = без кулдауна
-
-    // eco fuel (Экотопливо)
+    // Eco fuel
     public final String ecoFuelPerm;
     public final double ecoFuelMultiplier;
 
-    // dust protection (Пыльезащита)
+    // Hopper
+    public final String hopperSmartPermBase;
+    public final boolean hopperSlowModeLvl0;
+    public final long hopperTurboTaskPeriodTicks;
+    public final int hopperTurboBudgetPerRun;
+    public final long hopperTurboEligibilityCacheMs;
+
+    // (kept from your newer design)
+    public final int hopperSlowdownLevel0;
+    public final int hopperTurboLevel2;
+
+    // TNT
+    public final String tntPerm;
+    public final Map<Material, Double> tntDupWhitelist;
+
+    public final String tntLicensePerm;
+    public final Set<Material> tntLicenseOres;
+    public final int tntLicenseMaxExtra;
+    public final double tntLicenseChancePerExtra;
+
+    // Effects system
+    public final long reapplyCooldownMs;
+    public final String permHaste;
+    public final String permSpeed;
+    public final String permResist;
+    public final int effectsMaxLevel;
+    public final int effectTicks;
+
+    // Psych support
+    public final int psychSupportLuckTicks;
+
+    // Farmland
+    public final String farmlandPermBase;
+    public final float farmlandBigFallThreshold;
+
+    // Greenhouse Low-Light
+    public final String cropsLLPermBase;
+    public final long cropsLL_ScanPeriodTicks;
+    public final int cropsLL_PerZoneBudget;
+    public final double cropsLL_MaxPercent;
+
+    // Bee pollination
+    public final String beePollinationPerm;
+    public final double beePollinationBonusPercent;
+    public final int beePollinationRadius;
+
+    // Anti phantom
+    public final String antiPhantomPermBase;
+
+    // Brew
+    public final String brewPerm;
+    public final double brewSpeedPercent;
+
+    // Church
+    public final String churchBellPerm;
+    public final int churchBellStayMinutes;
+    public final boolean churchBellSfx;
+    public final int churchBellCooldownMinutes;
+
+    public final String churchPilgrimagePerm;
+    public final int churchPilgrimageStayMinutes;
+    public final int churchPilgrimageCooldownMinutes;
+    public final boolean churchPilgrimageSfx;
+    public final int churchPilgrimageAmplifier;
+    public final int churchPilgrimageBuffMinutes;
+    public final List<String> churchPilgrimageEffects;
+
+    // Dust protection
     public final String dustProtectionPerm;
     public final int dustProtectionMinY;
     public final int dustProtectionDurationTicks;
 
-    // industrial recycler (Промышленный переработчик)
+    // Recycler
     public final String recyclerPerm;
+    public final double recyclerDropChance;
     public final Set<Material> recyclerInputs;
     public final Map<Material, Double> recyclerExtraDrops;
 
-    // farmland
-    public final String farmlandPermBase, farmlandErrmsg;
-    public final float farmlandBigFallThreshold;
-
-    // livestock (Скотоводство+ и Скотоводство++)
-    public final String livestockPlusPerm, livestockDoublePerm;
-    public final double livestockPlusSpeedPercent;      // % ускорения роста
-    public final double livestockDoubleChancePercent;   // % шанса двойни
-
-    // crops low light / hydroponics
-    public final String cropsLLPermBase;
-    public final int    cropsLL_ScanPeriodTicks;
-    public final int    cropsLL_PerZoneBudget;
-    public final double cropsLL_MaxPercent;
-
-    // bee pollination
-    public final String beePollinationPerm;
-    public final int    beePollinationRadius;
-    public final double beePollinationBonusPercent;
-
-    // colony / колониальные апгрейды
-    public final String colonyZonePerm;
-
-    // outpost (Форпост)
+    // Outpost
     public final String outpostPerm;
     public final double outpostCullPercent;
 
-    // food ration (Продовольственный пай)
+    // Livestock (old names expected by listener)
+    public final String livestockPlusPerm;
+    public final double livestockPlusSpeedPercent;
+    public final String livestockDoublePerm;
+    public final double livestockDoubleChancePercent;
+
+    // Loader
+    public final String loaderPerm;
+    public final int loaderRadius;
+    public final double loaderSpeedMultiplier;
+
+    // Food ration
     public final String foodRationPerm;
-    public final int foodRationPeriodTicks;
+    public final long foodRationPeriodTicks;
     public final int foodRationDurationTicks;
     public final int foodRationAmplifier;
 
-    // TNT license (ТНТ-Лицензия)
-    public final String tntLicensePerm;
-    public final Set<Material> tntLicenseOres;
-    public final double tntLicenseChancePerExtra; // 0..1
-    public final int tntLicenseMaxExtra;
+    // Bank
+    public final String safeDepositPerm;
+    public final int safeDepositMaxPerPlayer;
 
-    private UpgradesConfig(JavaPlugin plugin, FileConfiguration c) {
-        // 1) дефолты — чтобы при первом запуске получить полный файл
-        addDefaults(c);
-        plugin.saveConfig();
+    public final String atmPermBase; // base prefix
+    public final double atmFeeInBank;
+    public final double atmFeeInCountry;
+    public final double atmFeeForeign;
 
-        DEBUG = c.getBoolean("upgrades.debug", false);
+    public final String freeTransferPerm;
+    public final String depositInterestPerm;
+    public final double depositInterestDailyPercent;
 
-        psychSupportLuckTicks = Math.max(0, c.getInt("upgrades.psychSupport.luck_ticks", 600));
+    // Park
+    public final String parkGardenerPerm;
+    public final double parkGrowthChanceBonus;
 
-        rsL1 = new RedstoneLevelCfg(
-                c.getString("upgrades.redstone.level1.perm", "unity.upgrade.redstone.1"),
-                color(c.getString("upgrades.redstone.level1.errmsg", "&cНужен апгрейд 'Редстоун I'.")),
-                toMaterialSet(c.getStringList("upgrades.redstone.level1.allowed"))
-        );
-        rsL2 = new RedstoneLevelCfg(
-                c.getString("upgrades.redstone.level2.perm", "unity.upgrade.redstone.2"),
-                color(c.getString("upgrades.redstone.level2.errmsg", "&cНужен апгрейд 'Редстоун II'.")),
-                toMaterialSet(c.getStringList("upgrades.redstone.level2.allowed"))
-        );
+    public final String parkQuietGuardPerm;
+    public final int parkQuietGuardRadius;
 
-        goldenFoodPerm       = c.getString("upgrades.goldenFood.perm", "unity.food.golden.1");
-        goldenFoodMsgConsume = color(c.getString("upgrades.goldenFood.errmsg_consume", "&cНужен апгрейд &6Золотая пища I"));
-        goldenFoodMsgCraft   = color(c.getString("upgrades.goldenFood.errmsg_craft",   "&cКрафт заблокирован. Нужен &6Золотая пища I"));
-        premiumFoods         = toMaterialSet(c.getStringList("upgrades.goldenFood.premiumFoods"));
+    public final String parkPondBedsPerm;
+    public final double parkSaturationBonus;
+    public final long parkSaturationCooldownMs;
 
-        furnacePerm     = c.getString("upgrades.furnace.perm", "unity.furnace.ore_boost.1");
-        furnaceErrmsg   = color(c.getString("upgrades.furnace.errmsg", ""));
-        furnaceChance   = c.getDouble("upgrades.furnace.chance", 0.15);
-        furnaceSfx      = c.getBoolean("upgrades.furnace.sfx", true);
-        furnaceOutputs  = toMaterialSet(c.getStringList("upgrades.furnace.outputs"));
+    public final String parkQuietHourPerm;
 
-        furnaceHeatPerm   = c.getString("upgrades.furnaceHeat.perm", "unity.furnace.boost.1");
-        furnaceHeatErrmsg = color(c.getString("upgrades.furnaceHeat.errmsg", ""));
-        furnaceHeatRadius = Math.max(1, c.getInt("upgrades.furnaceHeat.radius", 6));
-        furnaceHeatMaxPct = Math.max(0.0, c.getDouble("upgrades.furnaceHeat.max_percent", 15.0));
+    public final String parkBenchesPerm;
+    public final int parkBenchRadius;
+    public final int parkBenchRegenSeconds;
 
-        hopperSmartPermBase        = c.getString("upgrades.hopper.perm", "unity.hopper.smart");
-        hopperErrmsg               = color(c.getString("upgrades.hopper.errmsg", ""));
-        hopperTurboBudgetPerRun    = c.getInt("upgrades.hopper.turboBudgetPerRun", 50);
-        hopperTurboTaskPeriodTicks = c.getInt("upgrades.hopper.turboTaskPeriodTicks", 2);
-        hopperTurboEligibilityCacheMs = c.getLong("upgrades.hopper.turboEligibilityCacheMs", 1000L);
-        hopperSlowModeLvl0         = c.getBoolean("upgrades.hopper.slowMode_lvl0_everyOtherTick", true);
+    // Hospital
+    public final String hospitalPsychSupportPerm;
+    public final int hospitalPsychSupportLuckDurationTicks;
 
-        tntPerm         = c.getString("upgrades.tntQuarry.perm", "unity.tnt.quarry.1");
-        tntErrmsg       = color(c.getString("upgrades.tntQuarry.errmsg", ""));
-        tntDupWhitelist = toMaterialDoubleMap(c.getConfigurationSection("upgrades.tntQuarry.dupWhitelist"));
+    public final String hospitalDietPerm;
+    public final double hospitalDietSaturationBonus;
 
-        reapplyCooldownMs = c.getLong("upgrades.effects.reapplyCooldownMs", 4000);
-        int seconds       = c.getInt("upgrades.effects.effectSeconds", 12);
-        effectTicks       = 20 * Math.max(1, seconds);
-        permHaste         = c.getString("upgrades.effects.perms.haste", "unity.zone.haste");
-        permSpeed         = c.getString("upgrades.effects.perms.speed", "unity.zone.speed");
-        permResist        = c.getString("upgrades.effects.perms.resistance", "unity.zone.resistance");
-        effectsMaxLevel   = c.getInt("upgrades.effects.maxLevel", 2);
+    public final String hospitalRegenPulsePerm;
+    public final long hospitalRegenPulsePeriodTicks;
+    public final int hospitalRegenPulseDurationTicks;
+    public final int hospitalRegenPulseAmplifier;
 
-        antiPhantomPermBase = Optional.ofNullable(c.getString("upgrades.antiPhantom.perm_base"))
-                .filter(s -> !s.isBlank()).orElse("unity.anti.phantom");
-        antiPhantomErrmsg   = color(c.getString("upgrades.antiPhantom.errmsg", ""));
+    public final String hospitalSanitaryPerm;
+    public final int hospitalSanitaryRadius;
+    public final double hospitalSanitarySpawnMultiplier;
 
-        brewPerm        = c.getString("upgrades.brew.perm", "unity.brew.speed");
-        brewErrmsg      = color(c.getString("upgrades.brew.errmsg", ""));
-        brewSpeedPercent= Math.max(0.0, c.getDouble("upgrades.brew.speed_percent", 25.0));
+    public final String hospitalBloodGiftPerm;
+    public final boolean hospitalBloodGiftAbsorptionEnabled;
+    public final int hospitalBloodGiftAbsorptionAmplifier; // clamp до 0
 
-        // Signs (для отдельного файла с табличками)
-        atmFile        = c.getString("upgrades.atm.file", "atm_limits.yml");
+    public final boolean hospitalBloodGiftRegenEnabled;
+    public final int hospitalBloodGiftRegenTicks;
+    public final int hospitalBloodGiftRegenAmplifier;
+    public final int hospitalBloodGiftDurationMinutes;
 
-        String atmCfg = c.getString("upgrades.atm.permBase", null);
-        if (atmCfg == null) {
-            atmCfg = c.getString("upgrades.atm.limit", "unity.atm.limit.5"); // старый ключ/дефолт
-        }
-        if (atmCfg.matches(".+\\.\\d+$")) {
-            // срежем завершающую цифру уровня → "unity.atm.limit"
-            atmCfg = atmCfg.replaceFirst("\\.\\d+$", "");
-        }
-        atmPerm    = atmCfg.isBlank() ? "unity.atm.limit" : atmCfg;
+    public final String hospitalTriagePerm;
+    public final int hospitalTriageReducePercent;
 
-        signsPrefix        = color(c.getString("signs.log.prefix", "&7[&6UL&7/&aSigns&7]&r "));
-        msgSignUpdatedAll  = color(c.getString("signs.log.success.updated_all_shop_list", "&aОбновлены все &eSHOP_LIST &aтаблички в радиусе."));
-        msgSignBankCreated = color(c.getString("signs.log.success.created_bank_sign", "&aБанковская табличка создана."));
-        errNotOwner        = color(c.getString("signs.log.error.not_owner", "&cВы не владелец этой зоны."));
-        errNoMoney         = color(c.getString("signs.log.error.no_money", "&cНедостаточно средств: нужно &e%cost%&c."));
-        errInvalidFormat   = color(c.getString("signs.log.error.invalid_format", "&cНеверный формат таблички."));
-        costShopListUpdate = c.getDouble("signs.balance.shop_list_update_cost", 25.0);
-        costBankCreate     = c.getDouble("signs.balance.bank_create_cost", 50.0);
+    public final String hospitalSafeZonePerm;
+    public final double hospitalSafeZoneDamageMultiplier;
 
-        // ===== Church: Peace Bell & Pilgrimage =====
-        churchBellPerm            = c.getString("upgrades.church.peaceBell.perm", "unity.church.bell.1");
-        churchBellSfx             = c.getBoolean("upgrades.church.peaceBell.sfx", true);
-        churchBellStayMinutes     = Math.max(1, c.getInt("upgrades.church.peaceBell.stay_minutes", 2));
-        churchBellCooldownMinutes = Math.max(0, c.getInt("upgrades.church.peaceBell.cooldown_minutes", 20));
+    // Library
+    public final String libraryScrollsPerm;
+    public final double libraryScrollsExpCostMultiplier;
 
-        churchPilgrimagePerm            = c.getString("upgrades.church.pilgrimage.perm", "unity.church.pilgrimage.1");
-        churchPilgrimageSfx             = c.getBoolean("upgrades.church.pilgrimage.sfx", true);
-        churchPilgrimageStayMinutes     = Math.max(1, c.getInt("upgrades.church.pilgrimage.stay_minutes", 5));
-        churchPilgrimageBuffMinutes     = Math.max(1, c.getInt("upgrades.church.pilgrimage.buff_minutes", 30));
-        churchPilgrimageAmplifier       = Math.max(0, c.getInt("upgrades.church.pilgrimage.amplifier", 0));
-        churchPilgrimageCooldownMinutes = Math.max(0, c.getInt("upgrades.church.pilgrimage.cooldown_minutes", 0));
-        churchPilgrimageEffects         = new java.util.LinkedHashSet<>(c.getStringList("upgrades.church.pilgrimage.effects"));
+    public final String libraryCalmPerm;
+    public final double libraryCalmChanceToCancelHunger;
 
-        ecoFuelPerm      = c.getString("upgrades.ecoFuel.perm", "unity.furnace.ecofuel");
-        ecoFuelMultiplier = Math.max(1.0, c.getDouble("upgrades.ecoFuel.multiplier", 2.0));
+    public final String libraryEducationPerm;
+    public final double libraryEducationRewardMultiplier;
 
-        dustProtectionPerm = c.getString("upgrades.dustProtection.perm", "unity.industrial.dust");
-        dustProtectionMinY = c.getInt("upgrades.dustProtection.min_y", 40);
-        int dustSec        = c.getInt("upgrades.dustProtection.duration_seconds", 30);
-        dustProtectionDurationTicks = 20 * Math.max(1, dustSec);
+    // State
+    public final String stateContractsPerm;
+    public final int stateContractsMaxActive;
 
-        recyclerPerm     = c.getString("upgrades.recycler.perm", "unity.industrial.recycler");
-        recyclerInputs   = toMaterialSet(c.getStringList("upgrades.recycler.inputs"));
-        recyclerExtraDrops = toMaterialDoubleMap(c.getConfigurationSection("upgrades.recycler.extraDrops"));
+    public final String stateLuxuryTaxPerm;
+    public final double stateLuxuryTaxPercent;
+    public final Set<Material> stateLuxuryTaxItems;
 
-        farmlandPermBase       = c.getString("upgrades.farmland.permBase", "unity.zone.farmland");
-        farmlandErrmsg         = color(c.getString("upgrades.farmland.errmsg", ""));
-        farmlandBigFallThreshold = (float) c.getDouble("upgrades.farmland.bigFallThreshold", 5.0);
+    public final String stateTollRoadsPerm;
+    public final double stateTollRoadsFee;
 
-        // livestock
-        livestockPlusPerm            = c.getString("upgrades.livestock.plus.perm", "unity.fields.livestock.plus");
-        livestockPlusSpeedPercent    = Math.max(0.0, c.getDouble("upgrades.livestock.plus.speed_percent", 25.0));
-        livestockDoublePerm          = c.getString("upgrades.livestock.double.perm", "unity.fields.livestock.double");
-        livestockDoubleChancePercent = Math.max(0.0, c.getDouble("upgrades.livestock.double.chance_percent", 5.0));
+    public final String stateExportRebatePerm;
+    public final double stateExportRebatePercent;
 
-        // hydroponics / crops low light
-        cropsLLPermBase      = c.getString("upgrades.cropsLowLight.perm", "unity.crops.lowlight");
-        cropsLL_ScanPeriodTicks = Math.max(5, c.getInt("upgrades.cropsLowLight.scan_period_ticks", 40));
-        cropsLL_PerZoneBudget   = Math.max(1, c.getInt("upgrades.cropsLowLight.per_zone_budget", 24));
-        cropsLL_MaxPercent      = Math.max(0.0, c.getDouble("upgrades.cropsLowLight.max_percent", 15.0));
+    public final String stateResourceFocusPerm;
+    public final int stateResourceFocusBonusPercent;
+    public final int stateResourceFocusPenaltyPercent;
 
-        // bee pollination
-        beePollinationPerm        = c.getString("upgrades.beePollination.perm", "unity.fields.bee.pollination");
-        beePollinationRadius      = Math.max(1, c.getInt("upgrades.beePollination.radius", 5));
-        beePollinationBonusPercent= Math.max(0.0, c.getDouble("upgrades.beePollination.bonus_percent", 10.0));
+    public final String statePropagandaPerm;
+    public final long statePropagandaPeriodTicks;
+    public final List<String> statePropagandaTemplates;
 
-        // === Colony zone / Колониальный апгрейд ===
-        colonyZonePerm = c.getString("upgrades.colonyZone.perm", "unity.zone.colony");
+    public final String stateCensorshipPerm;
+    public final List<String> stateCensorshipTriggerWords;
 
-        // === Outpost / Форпост ===
-        outpostPerm = c.getString("upgrades.outpost.perm", "unity.colony.outpost");
-        outpostCullPercent = Math.max(0.0, Math.min(100.0,
-                c.getDouble("upgrades.outpost.cull_percent", 15.0)));
+    public final String stateCurfewPerm;
+    public final int stateCurfewStartHour;
+    public final int stateCurfewEndHour;
 
-        // === Food Ration / Продовольственный пай ===
-        foodRationPerm = c.getString("upgrades.foodRation.perm", "unity.colony.food.ration");
-        int foodPeriodSec = c.getInt("upgrades.foodRation.period_seconds", 30);
-        foodRationPeriodTicks = 20 * Math.max(1, foodPeriodSec);
-        int foodDurSec = c.getInt("upgrades.foodRation.duration_seconds", 5);
-        foodRationDurationTicks = 20 * Math.max(1, foodDurSec);
-        foodRationAmplifier = Math.max(0, c.getInt("upgrades.foodRation.amplifier", 0)); // 0 = Saturation I
+    public final String stateRepairGuildPerm;
+    public final int stateRepairGuildReturnPercent;
 
-        // === TNT License / ТНТ-Лицензия ===
-        tntLicensePerm = c.getString("upgrades.tntLicense.perm", "unity.tnt.license");
-        tntLicenseOres = toMaterialSet(c.getStringList("upgrades.tntLicense.ores"));
-        tntLicenseChancePerExtra = Math.max(0.0, Math.min(1.0,
-                c.getDouble("upgrades.tntLicense.chance_per_extra", 0.4)));
-        tntLicenseMaxExtra = Math.max(1, c.getInt("upgrades.tntLicense.max_extra", 2));
+    public final String stateTradingZonePerm;
+    public final int stateTradingZoneExtraSlots;
 
+    public final String stateSamplerPerm;
+    public final int stateSamplerCooldownHours;
+
+    public final String stateHappyHourPerm;
+    public final int stateHappyHourDiscountPercent;
+
+    // -------------------------------
+    // Defaults + Header
+    // -------------------------------
+    private void applyHeader() {
+        cfg.options().header(String.join("\n",
+                "ⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻ",
+                "Ⓕ   FARLANDS / UnityLauncher — Upgrades Configuration",
+                "Ⓕ",
+                "Ⓕ  Правила:",
+                "Ⓕ   • Значения *.perm / *.permBase для апгрейдов-уровней — БЕЗ '.1'.",
+                "Ⓕ     (Уровни добавляет код: base.1, base.2 ...)",
+                "Ⓕ   • Этот файл НЕ перезаписывает существующие значения. Добавляет только отсутствующие ключи.",
+                "Ⓕ   • Описания ключей лежат в отдельных *.description (это намеренно, из-за ограничений YamlConfiguration).",
+                "Ⓕ",
+                "Ⓕ  Группы:",
+                "Ⓕ   core, commands, zones.unlock, industrial, fields, colony, bank, park, hospital, library, state, church, churchV2",
+                "ⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻⒻ",
+                ""
+        ));
     }
 
-    public static UpgradesConfig load(JavaPlugin plugin) {
-        plugin.saveDefaultConfig();      // создаст ресурс, если его нет
-        plugin.reloadConfig();
-        FileConfiguration cfg = plugin.getConfig();
-        return new UpgradesConfig(plugin, cfg);
-    }
+    private static void addDefaults(YamlConfiguration c) {
+        // --- core
+        c.addDefault("core.debug", false);
+        c.addDefault("core.description",
+                "Общие настройки апгрейдов. debug=true включает более подробные логи (для отладки).");
 
-    private static void addDefaults(FileConfiguration c) {
-        // === Общие ===
-        c.addDefault("upgrades.debug", false);
-        c.addDefault("upgrades.psychSupport.luck_ticks", 600);
-        c.addDefault("upgrades.psychSupport.description",
-                "Психподдержка: даёт всем игрокам эффект LUCK I на указанное количество тиков после респавна.");
+        // --- commands
+        c.addDefault("commands.brand.perm", "unity.brand");
+        c.addDefault("commands.brand.description",
+                "Brand Marking (/brand): пермишен на использование команды маркировки (лор 'произведено игроком').");
 
-        // === Industrial core: право на INDUSTRIAL-зоны ===
-        c.addDefault("upgrades.industrialZone.description",
-                "Индустриальная зона: разрешает покупать и устанавливать зоны типа INDUSTRIAL. " +
-                        "Проверяется в логике создания зон.");
-        c.addDefault("upgrades.industrialZone.perm", "unity.zone.industrial");
+        // --- zones.unlock
+        c.addDefault("zones.unlock.description",
+                "Разрешения на покупку/создание зон. Эти perm обычно выдаются стране/колонии, чтобы открыть тип зоны.");
 
-        // === Redstone ===
-        c.addDefault("upgrades.redstone.description",
-                "Базовый/Продвинутый редстоун: ограничивает, какие редстоун-блоки можно ставить без апгрейда. " +
-                        "Список allowed определяет доступные блоки на каждом уровне.");
-        c.addDefault("upgrades.redstone.level1.perm", "unity.upgrade.redstone.1");
-        c.addDefault("upgrades.redstone.level1.errmsg", "&cНужен апгрейд 'Редстоун I'.");
-        c.addDefault("upgrades.redstone.level1.allowed", Arrays.asList(
-                "REDSTONE", "REPEATER", "REDSTONE_TORCH"
-        ));
+        c.addDefault("zones.unlock.industrial.perm", "unity.zone.industrial");
+        c.addDefault("zones.unlock.industrial.description",
+                "Industrial Zone: открывает возможность покупать/создавать зоны типа INDUSTRIAL.");
 
-        c.addDefault("upgrades.redstone.level2.perm", "unity.upgrade.redstone.2");
-        c.addDefault("upgrades.redstone.level2.errmsg", "&cНужен апгрейд 'Редстоун II'.");
-        c.addDefault("upgrades.redstone.level2.allowed", Arrays.asList(
-                "COMPARATOR", "OBSERVER", "PISTON", "STICKY_PISTON"
-        ));
+        c.addDefault("zones.unlock.fields.perm", "unity.zone.fields");
+        c.addDefault("zones.unlock.fields.description",
+                "Fields/Greenhouse Zone: открывает возможность покупать/создавать сельхоз-зоны (FIELDS/GREENHOUSE).");
 
-        // === Golden Food ===
-        c.addDefault("upgrades.goldenFood.description",
-                "Золотая пища: без апгрейда игрок не может есть/крафтить премиум-еду (premiumFoods). " +
-                        "С апгрейдом ограничения снимаются.");
-        c.addDefault("upgrades.goldenFood.perm", "unity.food.golden.1");
-        c.addDefault("upgrades.goldenFood.errmsg_consume", "&cНужен апггрейд &6Золотая пища I");
-        c.addDefault("upgrades.goldenFood.errmsg_craft", "&cКрафт заблокирован. Нужен &6Золотая пища I");
-        c.addDefault("upgrades.goldenFood.premiumFoods", Arrays.asList(
-                "GOLDEN_APPLE", "ENCHANTED_GOLDEN_APPLE", "GOLDEN_CARROT"
-        ));
+        c.addDefault("zones.unlock.colony.perm", "unity.zone.colony");
+        c.addDefault("zones.unlock.colony.description",
+                "Colony Zone: открывает возможность покупать/создавать зоны типа COLONY.");
 
-        // === Furnace Ore Bonus ===
-        c.addDefault("upgrades.furnace.description",
-                "Бонус к выплавке руды: при апгрейде печи в стране/колонии дают шанс (chance) " +
-                        "получить +1 к результату выплавки для указанных outputs. sfx включает визуальные эффекты.");
-        c.addDefault("upgrades.furnace.perm", "unity.furnace.ore_boost.1");
-        c.addDefault("upgrades.furnace.errmsg", "");
-        c.addDefault("upgrades.furnace.chance", 0.15);
-        c.addDefault("upgrades.furnace.sfx", true);
-        c.addDefault("upgrades.furnace.outputs", Arrays.asList(
-                "IRON_INGOT", "GOLD_INGOT", "COPPER_INGOT", "NETHERITE_SCRAP"
-        ));
+        c.addDefault("zones.unlock.park.perm", "unity.zone.park");
+        c.addDefault("zones.unlock.park.description",
+                "Park Zone: открывает возможность покупать/создавать зоны типа PARK.");
 
-        // === Furnace Heat Boost (Геотермальный буст) ===
-        c.addDefault("upgrades.furnaceHeat.description",
-                "Геотермальный буст: печи рядом с лавой/магмой работают быстрее. " +
-                        "radius — радиус поиска источника тепла, max_percent — максимум ускорения.");
-        c.addDefault("upgrades.furnaceHeat.perm", "unity.furnace.boost.1");
-        c.addDefault("upgrades.furnaceHeat.errmsg", "");
-        c.addDefault("upgrades.furnaceHeat.radius", 6);
-        c.addDefault("upgrades.furnaceHeat.max_percent", 15.0);
+        c.addDefault("zones.unlock.bank.perm", "unity.zone.bank");
+        c.addDefault("zones.unlock.bank.description",
+                "Bank Zone: открывает возможность покупать/создавать зоны типа BANK.");
 
-        // === EcoFuel (Экотопливо) ===
-        c.addDefault("upgrades.ecoFuel.description",
-                "Экотопливо: при апгрейде страны топливо БАМБУК в печах горит дольше (multiplier раз).");
-        c.addDefault("upgrades.ecoFuel.perm", "unity.furnace.ecofuel");
-        c.addDefault("upgrades.ecoFuel.multiplier", 2.0);
+        c.addDefault("zones.unlock.hospital.perm", "unity.zone.hospital");
+        c.addDefault("zones.unlock.hospital.description",
+                "Hospital Zone: открывает возможность покупать/создавать зоны типа HOSPITAL.");
 
-        // === Hopper Smart / Turbo (Умные воронки) ===
-        c.addDefault("upgrades.hopper.description",
-                "Умные воронки: Lvl 0 (нет апгрейда) — замедление воронок (slowMode_lvl0_everyOtherTick). " +
-                        "Lvl 2 и зона INDUSTRIAL — турбо-режим, runTurboTick() делает дополнительные операции переноса.");
-        c.addDefault("upgrades.hopper.perm", "unity.hopper.smart");
-        c.addDefault("upgrades.hopper.errmsg", "");
-        c.addDefault("upgrades.hopper.turboBudgetPerRun", 50);
-        c.addDefault("upgrades.hopper.turboTaskPeriodTicks", 2);
-        c.addDefault("upgrades.hopper.turboEligibilityCacheMs", 1000L);
-        c.addDefault("upgrades.hopper.slowMode_lvl0_everyOtherTick", true);
+        c.addDefault("zones.unlock.library.perm", "unity.zone.library");
+        c.addDefault("zones.unlock.library.description",
+                "Library Zone: открывает возможность покупать/создавать зоны типа LIBRARY.");
 
-        // === TNT Quarry ===
-        c.addDefault("upgrades.tntQuarry.description",
-                "Промышленный взрыв (TNT Quarry): при взрыве TNT в стране с апгрейдом даёт шанс дополнительного дропа " +
-                        "для whitelisted блоков (dupWhitelist: материал -> шанс).");
-        c.addDefault("upgrades.tntQuarry.perm", "unity.tnt.quarry.1");
-        c.addDefault("upgrades.tntQuarry.errmsg", "");
-        c.addDefault("upgrades.tntQuarry.dupWhitelist", new java.util.HashMap<String, Double>() {{
-            put("DIAMOND_ORE", 0.10);
-            put("RAW_IRON_BLOCK", 0.12);
-            put("RAW_GOLD_BLOCK", 0.12);
-            put("RAW_COPPER_BLOCK", 0.12);
-            put("ANCIENT_DEBRIS", 0.05);
-        }});
+        c.addDefault("zones.unlock.church.perm", "unity.zone.church");
+        c.addDefault("zones.unlock.church.description",
+                "Church Zone: открывает возможность покупать/создавать зоны типа CHURCH (если/когда включено в логике зон).");
 
-        // === Industrial Recycler (Промышленный переработчик) ===
-        c.addDefault("upgrades.recycler.description",
-                "Промышленный переработчик: при добыче 'мусорных' блоков (inputs) в индустриальной зоне " +
-                        "даёт шанс дополнительного дропа из extraDrops. Работает только при апгрейде страны.");
-        c.addDefault("upgrades.recycler.perm", "unity.industrial.recycler");
-        c.addDefault("upgrades.recycler.inputs", Arrays.asList(
-                "STONE", "COBBLESTONE", "DEEPSLATE", "COBBLED_DEEPSLATE"
-        ));
-        c.addDefault("upgrades.recycler.extraDrops", new java.util.LinkedHashMap<String, Double>() {{
-            put("IRON_INGOT", 0.02);
-            put("GOLD_INGOT", 0.01);
-            put("DIAMOND", 0.005);
-            put("ANCIENT_DEBRIS", 0.001);
-        }});
+        // --- industrial
 
-        // === Effects (Мотивация и прочее) ===
-        c.addDefault("upgrades.effects.description",
-                "Эффекты в своей стране/колонии: при нахождении в зоне своего государства " +
-                        "выдаются эффекты HASTE/SPEED/RESISTANCE. Пермишены берутся из upgrades.effects.perms.*, " +
-                        "maxLevel задаёт потолок уровня.");
-        c.addDefault("upgrades.effects.reapplyCooldownMs", 4000);
-        c.addDefault("upgrades.effects.effectSeconds", 12);
-        c.addDefault("upgrades.effects.perms.haste", "unity.zone.haste");         // «Мотивация»
-        c.addDefault("upgrades.effects.perms.speed", "unity.zone.speed");
-        c.addDefault("upgrades.effects.perms.resistance", "unity.zone.resistance");
-        c.addDefault("upgrades.effects.maxLevel", 2);
-        c.addDefault("upgrades.motivation.description",
-                "Мотивация: эффект Haste в своей стране/колонии. Использует perms.haste из блока upgrades.effects.");
+        // Redstone levels
+        c.addDefault("industrial.redstone.level1.perm", "unity.redstone.1");
+        c.addDefault("industrial.redstone.level1.errmsg", "&cНужен апгрейд редстоуна L1.");
+        c.addDefault("industrial.redstone.level1.allowed", List.of("PISTON", "STICKY_PISTON", "OBSERVER"));
 
-        // === Dust Protection (Пыльезащита) ===
-        c.addDefault("upgrades.dustProtection.description",
-                "Пыльезащита: рабочим в индустриальной зоне при спуске ниже min_y выдаётся NIGHT_VISION " +
-                        "на duration_seconds секунд, если у страны есть апгрейд.");
-        c.addDefault("upgrades.dustProtection.perm", "unity.industrial.dust");
-        c.addDefault("upgrades.dustProtection.min_y", 40);
-        c.addDefault("upgrades.dustProtection.duration_seconds", 30);
+        c.addDefault("industrial.redstone.level2.perm", "unity.redstone.2");
+        c.addDefault("industrial.redstone.level2.errmsg", "&cНужен апгрейд редстоуна L2.");
+        c.addDefault("industrial.redstone.level2.allowed", List.of("DISPENSER", "DROPPER", "HOPPER"));
 
-        // === Anti-Phantom ===
-        c.addDefault("upgrades.antiPhantom.description",
-                "Анти-фантом: в своей стране/колонии с апгрейдом фантомы не спавнятся рядом с игроком. " +
-                        "Замораживает TIME_SINCE_REST для защищённых игроков.");
-        c.addDefault("upgrades.antiPhantom.perm_base", "unity.anti.phantom");
-        c.addDefault("upgrades.antiPhantom.errmsg", "");
+        // Golden food
+        c.addDefault("fields.goldenFood.perm", "unity.food.golden");
+        c.addDefault("fields.goldenFood.premiumFoods", List.of("GOLDEN_APPLE", "ENCHANTED_GOLDEN_APPLE"));
+        c.addDefault("fields.goldenFood.msg_consume", "&cУ вашей страны нет права есть это.");
+        c.addDefault("fields.goldenFood.msg_craft", "&cУ вашей страны нет права крафтить это.");
 
-        // === Brew Fast (Алхимия) ===
-        c.addDefault("upgrades.brew.description",
-                "Алхимия: в стране с апгрейдом стойки варят зелья быстрее на указанный процент (speed_percent). " +
-                        "Реализовано в runBrewTick().");
-        c.addDefault("upgrades.brew.perm", "unity.brew.speed");
-        c.addDefault("upgrades.brew.errmsg", "");
-        c.addDefault("upgrades.brew.speed_percent", 25.0);
+        // Netherite / Beacon
+        c.addDefault("industrial.netherite.perm", "unity.netherite");
+        c.addDefault("industrial.netherite.errmsg", "&cВаша страна ещё не открыла незерит.");
+        c.addDefault("industrial.beacon.perm", "unity.beacon");
+        c.addDefault("industrial.beacon.errmsg", "&cВаша страна ещё не открыла маяки.");
 
-        // === Brand (Маркировка бренда) ===
-        c.addDefault("upgrades.brand.description",
-                "Маркировка бренда: позволяет использовать механику бренда (лор с производителем) для предметов. " +
-                        "Проверяется в BrandCommand / соответствующей логике.");
-        c.addDefault("upgrades.brand.perm", "unity.industrial.brand");
-
-        // === Netherite (Незеритовое улучшение) ===
-        c.addDefault("upgrades.netherite.description",
-                "Незеритовое улучшение: открывает доступ к незериту (крафт/использование). " +
-                        "Требует отдельной логики ограничений.");
-        c.addDefault("upgrades.netherite.perm", "unity.industrial.netherite");
-
-        // === Beacon (Маяк) ===
-        c.addDefault("upgrades.beacon.description",
-                "Маяк: открывает возможность крафта и установки маяков. Проверяется отдельной логикой.");
-        c.addDefault("upgrades.beacon.perm", "unity.industrial.beacon");
-
-        // === Energy Saving (Энергосбережение) ===
-        c.addDefault("upgrades.energySaving.description",
+        // Energy Saving (Энергосбережение)
+        c.addDefault("industrial.energySaving.description",
                 "Энергосбережение: уменьшает стоимость активности редстоуна/механизмов в системе экономики чанков. " +
                         "multiplier < 1.0 уменьшает расход.");
-        c.addDefault("upgrades.energySaving.perm", "unity.industrial.energy");
-        c.addDefault("upgrades.energySaving.multiplier", 0.7);
+        c.addDefault("industrial.energySaving.perm", "unity.industrial.energy");
+        c.addDefault("industrial.energySaving.multiplier", 0.7);
 
-        // === Loader (Шлюз-погрузчик) ===
-        c.addDefault("upgrades.loader.description",
-                "Шлюз-погрузчик: ускоряет загрузку/выгрузку вагонеток с сундуком рядом с медными блоками. " +
-                        "Реализуется в отдельной логике работы рельсов.");
-        c.addDefault("upgrades.loader.perm", "unity.industrial.loader");
+        // Furnace ore bonus
+        c.addDefault("industrial.furnaceOreBonus.perm", "unity.furnace.ore_boost");
+        c.addDefault("industrial.furnaceOreBonus.chance", 0.10);
+        c.addDefault("industrial.furnaceOreBonus.sfx", true);
+        c.addDefault("industrial.furnaceOreBonus.outputs", List.of("IRON_INGOT", "GOLD_INGOT", "COPPER_INGOT"));
 
-        // === Signs / ATM ===
-        c.addDefault("upgrades.atm.description",
-                "ATM/банкоматы: отдельный YAML atm_limits.yml описывает лимиты. " +
-                        "atm.permBase задаёт базовый префикс пермишенов лимитов. cost* — цены действий с табличками.");
-        c.addDefault("upgrades.atm.file", "atm_limits.yml");
-        c.addDefault("upgrades.atm.limit", "unity.atm.limit.5");
-        c.addDefault("signs.log.prefix", "&7[&6UL&7/&aSigns&7]&r ");
-        c.addDefault("signs.log.success.updated_all_shop_list", "&aОбновлены все &eSHOP_LIST &aтаблички в радиусе.");
-        c.addDefault("signs.log.success.created_bank_sign", "&aБанковская табличка создана.");
-        c.addDefault("signs.log.error.not_owner", "&cВы не владелец этой зоны.");
-        c.addDefault("signs.log.error.no_money", "&cНедостаточно средств: нужно &e%cost%&c.");
-        c.addDefault("signs.log.error.invalid_format", "&cНеверный формат таблички.");
-        c.addDefault("signs.balance.shop_list_update_cost", 25.0);
-        c.addDefault("signs.balance.bank_create_cost", 50.0);
+        // Furnace heat
+        c.addDefault("industrial.furnaceHeat.perm", "unity.furnace.boost");
+        c.addDefault("industrial.furnaceHeat.radius", 5);
+        c.addDefault("industrial.furnaceHeat.max_percent", 40.0);
 
-        // === Church: Мирный колокол ===
-        c.addDefault("upgrades.church.peaceBell.description",
-                "Мирный колокол: после нахождения в церкви не менее stay_minutes " +
-                        "снимает с игрока негативные эффекты и запускает cooldown_minutes пер-церковь.");
-        c.addDefault("upgrades.church.peaceBell.perm", "unity.church.bell.1");
-        c.addDefault("upgrades.church.peaceBell.sfx", true);
-        c.addDefault("upgrades.church.peaceBell.stay_minutes", 2);
-        c.addDefault("upgrades.church.peaceBell.cooldown_minutes", 20);
+        // Eco fuel
+        c.addDefault("industrial.ecoFuel.perm", "unity.ecofuel");
+        c.addDefault("industrial.ecoFuel.multiplier", 1.5);
 
-        // === Church: Паломничество ===
-        c.addDefault("upgrades.church.pilgrimage.description",
-                "Паломничество: если игрок достаточно долго находится в церкви и является гражданином страны зоны, " +
-                        "он получает случайный положительный эффект из списка effects на buff_minutes. " +
-                        "cooldown_minutes — индивидуальный кулдаун, amplifier — уровень эффекта.");
-        c.addDefault("upgrades.church.pilgrimage.perm", "unity.church.pilgrimage.1");
-        c.addDefault("upgrades.church.pilgrimage.sfx", true);
-        c.addDefault("upgrades.church.pilgrimage.stay_minutes", 5);
-        c.addDefault("upgrades.church.pilgrimage.buff_minutes", 30);
-        c.addDefault("upgrades.church.pilgrimage.amplifier", 0);
-        c.addDefault("upgrades.church.pilgrimage.cooldown_minutes", 0);
-        c.addDefault("upgrades.church.pilgrimage.effects", Arrays.asList(
-                "LUCK", "NIGHT_VISION", "WATER_BREATHING", "FIRE_RESISTANCE", "FAST_DIGGING"
+        // Hopper
+        c.addDefault("industrial.hopper.permBase", "unity.hopper");
+        c.addDefault("industrial.hopper.slow_mode_lvl0", true);
+        c.addDefault("industrial.hopper.turbo_task_period_ticks", 1L);
+        c.addDefault("industrial.hopper.turbo_budget_per_run", 250);
+        c.addDefault("industrial.hopper.turbo_eligibility_cache_ms", 1500L);
+
+        // Kept from newer design
+        c.addDefault("industrial.hopper.slowdown_level0_ticks", 8);
+        c.addDefault("industrial.hopper.turbo_level2_ticks", 1);
+
+        // TNT
+        c.addDefault("industrial.tntQuarry.perm", "unity.tnt.quarry");
+        c.addDefault("industrial.tntQuarry.dupWhitelist.STONE", 0.05);
+
+        c.addDefault("colony.tntLicense.perm", "unity.tnt.license");
+        c.addDefault("colony.tntLicense.ores", List.of("DIAMOND_ORE", "DEEPSLATE_DIAMOND_ORE"));
+        c.addDefault("colony.tntLicense.max_extra", 2);
+        c.addDefault("colony.tntLicense.chance_per_extra", 0.25);
+
+        // Effects
+        c.addDefault("effects.reapply_cooldown_ms", 700L);
+        c.addDefault("effects.max_level", 2);
+        c.addDefault("effects.effect_ticks", 220);
+        c.addDefault("effects.perm_haste", "unity.effects.haste");
+        c.addDefault("effects.perm_speed", "unity.effects.speed");
+        c.addDefault("effects.perm_resist", "unity.effects.resist");
+
+        // Psych support (uses hospital key)
+        c.addDefault("hospital.psychSupport.luck_duration_ticks", 200);
+
+        // Farmland
+        c.addDefault("fields.farmlandProtect.permBase", "unity.farmland.protect");
+        c.addDefault("fields.farmlandProtect.big_fall_threshold", 1.2);
+
+        // Greenhouse low-light
+        c.addDefault("fields.greenhouseLowLight.permBase", "unity.greenhouse.lowlight");
+        c.addDefault("fields.greenhouseLowLight.scan_period_ticks", 40L);
+        c.addDefault("fields.greenhouseLowLight.per_zone_budget", 40);
+        c.addDefault("fields.greenhouseLowLight.max_percent", 30.0);
+
+        // Bees
+        c.addDefault("fields.beePollination.perm", "unity.bee.pollination");
+        c.addDefault("fields.beePollination.bonus_percent", 10.0);
+        c.addDefault("fields.beePollination.radius", 8);
+
+        // Anti phantom
+        c.addDefault("colony.antiPhantom.permBase", "unity.antiphantom");
+
+        // Brew
+        c.addDefault("industrial.brewSpeed.perm", "unity.brew.speed");
+        c.addDefault("industrial.brewSpeed.speed_percent", 30.0);
+
+        // Church
+        c.addDefault("church.peaceBell.perm", "unity.church.bell");
+        c.addDefault("church.peaceBell.stay_minutes", 1);
+        c.addDefault("church.peaceBell.cooldown_minutes", 10);
+        c.addDefault("church.peaceBell.sfx", true);
+
+        c.addDefault("church.pilgrimage.perm", "unity.church.pilgrimage");
+        c.addDefault("church.pilgrimage.stay_minutes", 1);
+        c.addDefault("church.pilgrimage.buff_minutes", 10);
+        c.addDefault("church.pilgrimage.cooldown_minutes", 30);
+        c.addDefault("church.pilgrimage.sfx", true);
+        c.addDefault("church.pilgrimage.amplifier", 0);
+        c.addDefault("church.pilgrimage.effects", List.of("SPEED", "REGENERATION"));
+
+        // Dust protection
+        c.addDefault("industrial.dustProtection.perm", "unity.dust.protection");
+        c.addDefault("industrial.dustProtection.min_y", 32);
+        c.addDefault("industrial.dustProtection.duration_ticks", 200);
+
+        // Recycler
+        c.addDefault("industrial.recycler.perm", "unity.recycler");
+        c.addDefault("industrial.recycler.dropChance", 0.15);
+        c.addDefault("industrial.recycler.inputs", List.of("COBBLESTONE", "GRAVEL"));
+        c.addDefault("industrial.recycler.extraDrops.FLINT", 0.05);
+
+        // Outpost
+        c.addDefault("colony.outpost.perm", "unity.colony.outpost");
+        c.addDefault("colony.outpost.raid_cull_percent", 30.0);
+
+        // Livestock (old aliases used by listener)
+        c.addDefault("fields.livestock.plus_perm", "unity.livestock.plus");
+        c.addDefault("fields.livestock.plus_speed_percent", 25.0);
+        c.addDefault("fields.livestock.double_perm", "unity.livestock.double");
+        c.addDefault("fields.livestock.double_chance_percent", 5.0);
+
+        // Loader
+        c.addDefault("industrial.loader.perm", "unity.loader");
+        c.addDefault("industrial.loader.radius", 4);
+        c.addDefault("industrial.loader.speed_multiplier", 2.0);
+
+        // Food ration
+        c.addDefault("colony.foodRation.perm", "unity.colony.foodration");
+        c.addDefault("colony.foodRation.period_ticks", 200L);
+        c.addDefault("colony.foodRation.duration_ticks", 40);
+        c.addDefault("colony.foodRation.amplifier", 0);
+
+        // --- fields
+        c.addDefault("fields.description",
+                "Апгрейды сельхоз-зоны (FIELDS/GREENHOUSE): элитная еда, грядки, скотоводство, гидропоника, пчёлы.");
+
+        c.addDefault("fields.goldenFood.perm", "unity.food.golden"); // base!
+        c.addDefault("fields.goldenFood.description",
+                "Chef / Golden Food: список premiumFoods — предметы, которые считаются 'элитной едой'. "
+                        + "При отсутствии апгрейда их можно запретить (по механике слушателей).");
+        c.addDefault("fields.goldenFood.premiumFoods", List.of(
+                "GOLDEN_APPLE", "ENCHANTED_GOLDEN_APPLE"
         ));
 
-        // === Fields zone / Сельхоз-зона ===
-        c.addDefault("upgrades.fieldsZone.description",
-                "Сельхоз-зона: разрешает покупать и устанавливать зоны полей/теплиц (GREENHOUSE / FIELDS). " +
-                        "Проверяется в логике создания зон.");
-        c.addDefault("upgrades.fieldsZone.perm", "unity.zone.fields");
+        c.addDefault("fields.farmlandProtect.permBase", "unity.farmland.protect"); // base
+        c.addDefault("fields.farmlandProtect.description",
+                "Non-Trample Soil: защита грядок от вытаптывания/ломания. "
+                        + "permBase используется как префикс уровней (base.1, base.2...).");
 
-        // === Шеф (элитная еда) — завязан на goldenFood ===
-        c.addDefault("upgrades.chef.description",
-                "Шеф: элитная еда (золотая морковь, золотое яблоко и т.д.). " +
-                        "Реализация через upgrades.goldenFood.* и апгрейд страны goldenFood.");
+        c.addDefault("fields.livestock.permBase", "unity.livestock"); // base
+        c.addDefault("fields.livestock.description",
+                "Livestock+/Livestock++: ускорение роста животных и шанс двойни. "
+                        + "growth_multiplier — во сколько раз быстрее растут (например 1.25 = +25%). "
+                        + "twin_chance — шанс двойни (0.05 = 5%).");
+        c.addDefault("fields.livestock.growth_multiplier", 1.25);
+        c.addDefault("fields.livestock.twin_chance", 0.05);
 
-        // === Livestock / Скотоводство ===
-        c.addDefault("upgrades.livestock.plus.description",
-                "Скотоводство+: детёныши животных в сельхоз-зонах растут быстрее на указанный процент. " +
-                        "Реализуется через уменьшение времени до взросления.");
-        c.addDefault("upgrades.livestock.plus.perm", "unity.fields.livestock.plus");
-        c.addDefault("upgrades.livestock.plus.speed_percent", 25.0); // 20–30%, остановимся на 25 по умолчанию
+        c.addDefault("fields.hydroponics.perm", "unity.hydroponics");
+        c.addDefault("fields.hydroponics.description",
+                "Hydroponics (рост при низком свете): max_percent — потолок бонуса роста в процентах.");
+        c.addDefault("fields.hydroponics.max_percent", 30);
 
-        c.addDefault("upgrades.livestock.double.description",
-                "Скотоводство++: при размножении животных в сельхоз-зонах есть шанс родить двойню.");
-        c.addDefault("upgrades.livestock.double.perm", "unity.fields.livestock.double");
-        c.addDefault("upgrades.livestock.double.chance_percent", 5.0);
+        c.addDefault("fields.beePollination.perm", "unity.bee.pollination");
+        c.addDefault("fields.beePollination.description",
+                "Bee Pollination: увеличивает шанс/эффект роста рядом с ульями. "
+                        + "bonus_percent — величина бонуса в процентах.");
+        c.addDefault("fields.beePollination.bonus_percent", 10);
 
-        // === Farmland Protection / Нетрамбованная почва ===
-        c.addDefault("upgrades.farmland.description",
-                "Нетрамбованная почва: защита грядок от вытоптывания. " +
-                        "Lv1 — защита от малых падений, Lv2 — полная защита. " +
-                        "bigFallThreshold — минимальная высота сильного удара.");
-        c.addDefault("upgrades.farmland.permBase", "unity.zone.farmland");
-        c.addDefault("upgrades.farmland.errmsg", "");
-        c.addDefault("upgrades.farmland.bigFallThreshold", 5.0);
+        // --- bank
+        c.addDefault("bank.description",
+                "Апгрейды банка: личные сейфы, банкоматы, комиссии, бесплатные переводы, проценты по вкладам.");
 
-        // === Hydroponics / Гидропоника (cropsLowLight) ===
-        c.addDefault("upgrades.cropsLowLight.description",
-                "Гидропоника: рост растений при низком уровне света под стеклянной крышей в теплицах (GREENHOUSE). " +
-                        "Работает только при наличии апгрейда у страны.");
-        c.addDefault("upgrades.cropsLowLight.perm", "unity.crops.lowlight");
-        c.addDefault("upgrades.cropsLowLight.scan_period_ticks", 40);
-        c.addDefault("upgrades.cropsLowLight.per_zone_budget", 24);
-        c.addDefault("upgrades.cropsLowLight.max_percent", 15.0);
+        c.addDefault("bank.safeDeposit.perm", "unity.bank.safedeposit");
+        c.addDefault("bank.safeDeposit.description",
+                "Safe Deposit Boxes: разрешение на личные сейфы-сундуки. max_per_player — лимит сейфов на игрока.");
+        c.addDefault("bank.safeDeposit.max_per_player", 2);
 
-        // === Bee Pollination / Пчелиное опыление ===
-        c.addDefault("upgrades.beePollination.description",
-                "Пчелиное опыление: если рядом с грядками в теплице есть улей/улья, " +
-                        "шанс ростка от гидропоники увеличивается на бонусный процент.");
-        c.addDefault("upgrades.beePollination.perm", "unity.fields.bee.pollination");
-        c.addDefault("upgrades.beePollination.radius", 5);
-        c.addDefault("upgrades.beePollination.bonus_percent", 10.0);
+        c.addDefault("bank.atmNetwork.permBase", "unity.bank.atm"); // base
+        c.addDefault("bank.atmNetwork.description",
+                "ATM Network: настройки комиссий при операциях через банкоматы. "
+                        + "fee_in_bank — комиссия в банке, fee_in_country — внутри своей страны, fee_foreign — в чужой стране. "
+                        + "Значения в долях (0.03 = 3%).");
+        c.addDefault("bank.atmNetwork.fee_in_bank", 0.0);
+        c.addDefault("bank.atmNetwork.fee_in_country", 0.01);
+        c.addDefault("bank.atmNetwork.fee_foreign", 0.03);
 
-        // === Colony zone / Колониальный апгрейд ===
-        c.addDefault("upgrades.colonyZone.description",
-                "Колониальный апгрейд: разрешает создавать зоны типа COLONY. " +
-                        "Проверяется в логике создания зон.");
-        c.addDefault("upgrades.colonyZone.perm", "unity.zone.colony");
+        c.addDefault("bank.freeTransfer.perm", "unity.bank.freeTransfer");
+        c.addDefault("bank.freeTransfer.description",
+                "Free Transfer: разрешение на переводы без комиссии (или с пониженной комиссией — зависит от логики менеджера).");
 
-        // === Outpost / Форпост ===
-        c.addDefault("upgrades.outpost.description",
-                "Форпост: усиленная защита от рейдов в колониях. " +
-                        "Часть рейдеров из волн не спавнится, что делает волны ощутимо слабее.");
-        c.addDefault("upgrades.outpost.perm", "unity.colony.outpost");
-        c.addDefault("upgrades.outpost.cull_percent", 15.0); // ~минус 15% рейдеров
+        c.addDefault("bank.depositInterest.perm", "unity.bank.interest");
+        c.addDefault("bank.depositInterest.description",
+                "Deposit Interest: проценты на вклад. daily_percent — дневной процент в долях (0.10 = 10%/день).");
+        c.addDefault("bank.depositInterest.daily_percent", 0.10);
 
-        // === Food Ration / Продовольственный пай ===
-        c.addDefault("upgrades.foodRation.description",
-                "Продовольственный пай: граждане в своих колониях периодически получают эффект Saturation I, " +
-                        "что замедляет расход голода.");
-        c.addDefault("upgrades.foodRation.perm", "unity.colony.food.ration");
-        c.addDefault("upgrades.foodRation.period_seconds", 30);
-        c.addDefault("upgrades.foodRation.duration_seconds", 5);
-        c.addDefault("upgrades.foodRation.amplifier", 0); // Saturation I
+        // --- park
+        c.addDefault("park.description",
+                "Апгрейды парка: рост растений, 'тихий' радиус, пруды/клумбы, комендантский час, скамейки (реген/эффекты).");
 
-        // === TNT License / ТНТ-Лицензия ===
-        c.addDefault("upgrades.tntLicense.description",
-                "ТНТ-Лицензия: в колониях взрывы TNT дают шанс дополнительных 'удачных' выпадений руды, " +
-                        "подобно зачарованию Fortune.");
-        c.addDefault("upgrades.tntLicense.perm", "unity.tnt.license");
-        c.addDefault("upgrades.tntLicense.ores", Arrays.asList(
-                "COAL_ORE", "IRON_ORE", "COPPER_ORE", "GOLD_ORE", "REDSTONE_ORE",
-                "LAPIS_ORE", "DIAMOND_ORE", "EMERALD_ORE",
-                "DEEPSLATE_COAL_ORE", "DEEPSLATE_IRON_ORE", "DEEPSLATE_COPPER_ORE",
-                "DEEPSLATE_GOLD_ORE", "DEEPSLATE_REDSTONE_ORE", "DEEPSLATE_LAPIS_ORE",
-                "DEEPSLATE_DIAMOND_ORE", "DEEPSLATE_EMERALD_ORE"
+        c.addDefault("park.gardenerHut.perm", "unity.park.gardener");
+        c.addDefault("park.gardenerHut.description",
+                "Gardener's Hut: повышает шанс/скорость роста растений. growth_chance_bonus — бонус в долях (0.20 = +20%).");
+        c.addDefault("park.gardenerHut.growth_chance_bonus", 0.20);
+
+        c.addDefault("park.quietGuard.perm", "unity.park.quietguard");
+        c.addDefault("park.quietGuard.description",
+                "Quiet Guard: радиус подавления/смягчения громких событий (зависит от обработчика). radius — радиус действия.");
+        c.addDefault("park.quietGuard.radius", 12);
+
+        c.addDefault("park.pondBeds.perm", "unity.park.pondbeds");
+        c.addDefault("park.pondBeds.description",
+                "Pond & Flowerbeds: бонус насыщения/сатурации. saturation_bonus — сколько добавлять, cooldown_ms — откат в мс.");
+        c.addDefault("park.pondBeds.saturation_bonus", 0.6);
+        c.addDefault("park.pondBeds.cooldown_ms", 8000L);
+
+        c.addDefault("park.quietHour.perm", "unity.park.quiethour");
+        c.addDefault("park.quietHour.description",
+                "Quiet Hour: ночной режим парка (например запрет спавна монстров) — зависит от обработчика.");
+
+        c.addDefault("park.benches.perm", "unity.park.benches");
+        c.addDefault("park.benches.description",
+                "Benches: эффекты/реген возле скамеек. radius — радиус, regen_seconds — период/частота регена (сек).");
+        c.addDefault("park.benches.radius", 8);
+        c.addDefault("park.benches.regen_seconds", 4);
+
+        // --- hospital
+        c.addDefault("hospital.description",
+                "Апгрейды госпиталя: психподдержка, диета, реген-пульс, санитарная зона, дар крови, триаж, safe-zone.");
+
+        c.addDefault("hospital.psychSupport.perm", "unity.hospital.psych");
+        c.addDefault("hospital.psychSupport.description",
+                "Psych Support: эффект Luck после смерти/респавна. luck_duration_ticks — длительность в тиках.");
+        c.addDefault("hospital.psychSupport.luck_duration_ticks", 200);
+
+        c.addDefault("hospital.diet.perm", "unity.hospital.diet");
+        c.addDefault("hospital.diet.description",
+                "Diet: бонус к сатурации при еде в зоне. saturation_bonus — сколько добавлять.");
+        c.addDefault("hospital.diet.saturation_bonus", 0.8);
+
+        c.addDefault("hospital.regenPulse.perm", "unity.hospital.regen");
+        c.addDefault("hospital.regenPulse.description",
+                "Regen Pulse: периодический Regeneration в зоне. period_ticks — период, duration_ticks — длительность, amplifier — уровень эффекта.");
+        c.addDefault("hospital.regenPulse.period_ticks", 200L);
+        c.addDefault("hospital.regenPulse.duration_ticks", 80);
+        c.addDefault("hospital.regenPulse.amplifier", 0);
+
+        c.addDefault("hospital.sanitaryZone.perm", "unity.hospital.sanitary");
+        c.addDefault("hospital.sanitaryZone.description",
+                "Sanitary Zone: снижает спавн мобов в радиусе. radius — радиус, spawn_multiplier — множитель (0.5 = в 2 раза меньше).");
+        c.addDefault("hospital.sanitaryZone.radius", 50);
+        c.addDefault("hospital.sanitaryZone.spawn_multiplier", 0.5);
+
+        c.addDefault("hospital.bloodGift.perm", "unity.hospital.bloodgift");
+        c.addDefault("hospital.bloodGift.absorption.enabled", true);
+        c.addDefault("hospital.bloodGift.absorption.amplifier", 0); // 0 = +2 сердца (max)
+
+        c.addDefault("hospital.bloodGift.regen.enabled", true);
+        c.addDefault("hospital.bloodGift.regen.ticks", 20 * 10); // 10 секунд
+        c.addDefault("hospital.bloodGift.regen.amplifier", 0);   // Regen I
+        c.addDefault("hospital.bloodGift.duration_minutes", 10);
+        c.addDefault("hospital.bloodGift.duration_minutes.description",
+                "Длительность эффекта 'Дар крови' в минутах (Absorption + опционально Regeneration).");
+
+        c.addDefault("hospital.triage.perm", "unity.hospital.triage");
+        c.addDefault("hospital.triage.description",
+                "Triage: сокращает длительность дебаффов на reduce_percent процентов (50 = -50% длительности).");
+        c.addDefault("hospital.triage.reduce_percent", 50);
+
+        c.addDefault("hospital.safeZone.perm", "unity.hospital.safezone");
+        c.addDefault("hospital.safeZone.description",
+                "Safe Zone: снижает входящий урон в зоне госпиталя. damage_multiplier (0.80 = -20% урона).");
+        c.addDefault("hospital.safeZone.damage_multiplier", 0.80);
+
+        // --- library
+        c.addDefault("library.description",
+                "Апгрейды библиотеки: скидки на зачарование, спокойствие (голод), бонусы к наградам (education).");
+
+        c.addDefault("library.scrollsOfEconomy.perm", "unity.library.scrolls");
+        c.addDefault("library.scrollsOfEconomy.description",
+                "Scrolls of Economy: снижает стоимость зачарования. exp_cost_multiplier (0.80 = -20% опыта/стоимости).");
+        c.addDefault("library.scrollsOfEconomy.exp_cost_multiplier", 0.80);
+
+        c.addDefault("library.calm.perm", "unity.library.calm");
+        c.addDefault("library.calm.description",
+                "Calm: шанс не тратить голод/уменьшать расход. cancel_hunger_chance (0.25 = 25% отменить списание).");
+        c.addDefault("library.calm.cancel_hunger_chance", 0.25);
+
+        c.addDefault("library.educationInitiative.perm", "unity.library.education");
+        c.addDefault("library.educationInitiative.description",
+                "Education Initiative: увеличивает награды (квесты/активности) reward_multiplier (1.25 = +25%).");
+        c.addDefault("library.educationInitiative.reward_multiplier", 1.25);
+
+        // --- state
+        c.addDefault("state.description",
+                "Государственные апгрейды: контракты, налоги, пошлины, фокус ресурсов, пропаганда, цензура, комендантский час, гильдия ремонта и т.д.");
+
+        c.addDefault("state.contracts.perm", "unity.state.contracts");
+        c.addDefault("state.contracts.description",
+                "State Contracts: разрешение на гос.заказы. max_active — максимум активных контрактов.");
+        c.addDefault("state.contracts.max_active", 3);
+
+        c.addDefault("state.luxuryTax.perm", "unity.state.luxuryTax");
+        c.addDefault("state.luxuryTax.description",
+                "Luxury Tax: налог на роскошь. tax_percent — доля (0.05 = 5%). items — список материалов, попадающих под налог.");
+        c.addDefault("state.luxuryTax.tax_percent", 0.05);
+        c.addDefault("state.luxuryTax.items", List.of("NETHERITE_INGOT", "DIAMOND", "EMERALD", "NETHERITE_BLOCK"));
+
+        c.addDefault("state.tollRoads.perm", "unity.state.toll");
+        c.addDefault("state.tollRoads.description",
+                "Toll Roads: пошлина при пересечении границ/зон. fee — фиксированная сумма (зависит от экономики).");
+        c.addDefault("state.tollRoads.fee", 5.0);
+
+        c.addDefault("state.exportRebate.perm", "unity.state.exportRebate");
+        c.addDefault("state.exportRebate.description",
+                "Export Rebate: возврат налога/сборов при экспорте. percent — доля возврата (0.10 = 10%).");
+        c.addDefault("state.exportRebate.percent", 0.10);
+
+        c.addDefault("state.resourceFocus.perm", "unity.state.resourceFocus");
+        c.addDefault("state.resourceFocus.description",
+                "Resource Focus: бонус к выбранному ресурсу и штраф к остальным. bonus_percent/penalty_percent — проценты.");
+        c.addDefault("state.resourceFocus.bonus_percent", 20);
+        c.addDefault("state.resourceFocus.penalty_percent", 10);
+
+        c.addDefault("state.propaganda.perm", "unity.state.propaganda");
+        c.addDefault("state.propaganda.description",
+                "Party Propaganda: авто-объявления в чат по шаблонам. period_ticks — период рассылки, templates — список сообщений.");
+        c.addDefault("state.propaganda.period_ticks", 1200L);
+        c.addDefault("state.propaganda.templates", List.of(
+                "&aГосударство напоминает: работай, отдыхай, не лагай.",
+                "&eНовости дня: налогов больше не стало... пока что."
         ));
-        c.addDefault("upgrades.tntLicense.chance_per_extra", 0.4); // 40% шанс на +1 за попытку
-        c.addDefault("upgrades.tntLicense.max_extra", 2);
 
+        c.addDefault("state.censorship.perm", "unity.state.censorship");
+        c.addDefault("state.censorship.description",
+                "Censorship: фильтрация чата/табличек по trigger_words (слова-триггеры).");
+        c.addDefault("state.censorship.trigger_words", List.of("badword1", "badword2"));
 
-        // Финализируем дефолты
-        c.options().copyDefaults(true);
+        c.addDefault("state.curfew.perm", "unity.state.curfew");
+        c.addDefault("state.curfew.description",
+                "Curfew: ограничения/эффекты ночью. start_hour/end_hour — часы (0..23).");
+        c.addDefault("state.curfew.start_hour", 23);
+        c.addDefault("state.curfew.end_hour", 6);
+
+        c.addDefault("state.repairGuild.perm", "unity.state.repairGuild");
+        c.addDefault("state.repairGuild.description",
+                "Repair Guild: возврат части материалов при поломке инструментов. return_percent — процент возврата.");
+        c.addDefault("state.repairGuild.return_percent", 10);
+
+        c.addDefault("state.tradingZone.perm", "unity.state.tradingZone");
+        c.addDefault("state.tradingZone.description",
+                "Trading Zone: расширяет лимиты/слоты торговли. extra_slots — сколько дополнительных слотов выдавать.");
+        c.addDefault("state.tradingZone.extra_slots", 2);
+
+        c.addDefault("state.sampler.perm", "unity.state.sampler");
+        c.addDefault("state.sampler.description",
+                "Sampler: 'образцы товаров' с кулдауном. cooldown_hours — откат в часах.");
+        c.addDefault("state.sampler.cooldown_hours", 24);
+
+        c.addDefault("state.happyHour.perm", "unity.state.happyHour");
+        c.addDefault("state.happyHour.description",
+                "Happy Hour: скидки в определённые часы. discount_percent — величина скидки в процентах.");
+        c.addDefault("state.happyHour.discount_percent", 15);
+
     }
 
-    // ==== utils ====
-    private static Set<Material> toMaterialSet(List<String> list) {
-        Set<Material> out = EnumSet.noneOf(Material.class);
-        for (String s : list) { Material m = safeMat(s); if (m != null) out.add(m); }
-        return out;
+    // -------------------------------
+    // Migration + normalization
+    // -------------------------------
+    private static void migrateLegacyKeys(YamlConfiguration c) {
+        // Переносы: только если новый ключ пустой/отсутствует, а старый есть.
+        // Пример: если раньше было upgrades.goldenFood.perm -> теперь fields.goldenFood.perm
+
+        // Map<oldKey, newKey>
+        Map<String, String> moves = new LinkedHashMap<>();
+        moves.put("upgrades.goldenFood.perm", "fields.goldenFood.perm");
+        moves.put("upgrades.goldenFood.premiumFoods", "fields.goldenFood.premiumFoods");
+
+        moves.put("upgrades.furnace.perm", "industrial.furnaceOreBonus.perm");
+        moves.put("upgrades.furnace.chance", "industrial.furnaceOreBonus.chance");
+        moves.put("upgrades.furnace.outputs", "industrial.furnaceOreBonus.outputs");
+
+        moves.put("upgrades.furnaceHeat.perm", "industrial.furnaceHeat.perm");
+        moves.put("upgrades.furnaceHeat.radius", "industrial.furnaceHeat.radius");
+        moves.put("upgrades.furnaceHeat.max_percent", "industrial.furnaceHeat.max_percent");
+
+        moves.put("upgrades.tntQuarry.perm", "industrial.tntQuarry.perm");
+        moves.put("upgrades.tntQuarry.dupWhitelist", "industrial.tntQuarry.dupWhitelist");
+
+        moves.put("upgrades.bank.safeDeposit.perm", "bank.safeDeposit.perm");
+        moves.put("upgrades.bank.safeDeposit.max_per_player", "bank.safeDeposit.max_per_player");
+
+        moves.put("upgrades.bank.atmNetwork.permBase", "bank.atmNetwork.permBase");
+        moves.put("upgrades.bank.atmNetwork.fee_in_bank", "bank.atmNetwork.fee_in_bank");
+        moves.put("upgrades.bank.atmNetwork.fee_in_country", "bank.atmNetwork.fee_in_country");
+        moves.put("upgrades.bank.atmNetwork.fee_foreign", "bank.atmNetwork.fee_foreign");
+
+        moves.put("upgrades.hospital.safeZone.perm", "hospital.safeZone.perm");
+        moves.put("upgrades.hospital.safeZone.damageMultiplier", "hospital.safeZone.damage_multiplier");
+
+        // Церковь: старые пути (если были)
+        moves.put("upgrades.church.peaceBell.perm", "church.peaceBell.perm");
+        moves.put("upgrades.church.pilgrimage.perm", "church.pilgrimage.perm");
+
+        // (опционально) миграции старых description → новые *.description
+        moves.put("upgrades.industrialZone.description", "zones.unlock.industrial.description");
+        moves.put("upgrades.fieldsZone.description", "zones.unlock.fields.description");
+        moves.put("upgrades.colonyZone.description", "zones.unlock.colony.description");
+
+        moves.put("upgrades.goldenFood.description", "fields.goldenFood.description");
+        moves.put("upgrades.furnace.description", "industrial.furnaceOreBonus.description");
+        moves.put("upgrades.furnaceHeat.description", "industrial.furnaceHeat.description");
+        moves.put("upgrades.ecoFuel.description", "industrial.ecoFuel.description");
+        moves.put("upgrades.tntQuarry.description", "industrial.tntQuarry.description");
+        moves.put("upgrades.recycler.description", "industrial.recycler.description");
+        moves.put("upgrades.dustProtection.description", "industrial.dustProtection.description");
+        moves.put("upgrades.brew.description", "industrial.brewSpeed.description");
+        moves.put("upgrades.brand.description", "commands.brand.description");
+        moves.put("upgrades.netherite.description", "industrial.netherite.description");
+        moves.put("upgrades.beacon.description", "industrial.beacon.description");
+        moves.put("upgrades.energySaving.description", "industrial.energySaving.description");
+        moves.put("upgrades.energySaving.perm", "industrial.energySaving.perm");
+        moves.put("upgrades.energySaving.multiplier", "industrial.energySaving.multiplier");
+
+        moves.put("upgrades.outpost.description", "colony.outpost.description");
+        moves.put("upgrades.foodRation.description", "colony.foodRation.description");
+        moves.put("upgrades.tntLicense.description", "colony.tntLicense.description");
+
+        moves.put("upgrades.church.peaceBell.description", "church.peaceBell.description");
+        moves.put("upgrades.church.pilgrimage.description", "church.pilgrimage.description");
+
+        for (Map.Entry<String, String> e : moves.entrySet()) {
+            String oldKey = e.getKey();
+            String newKey = e.getValue();
+            if (c.contains(newKey)) continue;
+            if (!c.contains(oldKey)) continue;
+
+            Object val = c.get(oldKey);
+            c.set(newKey, val);
+        }
     }
-    private static Map<Material, Double> toMaterialDoubleMap(org.bukkit.configuration.ConfigurationSection sec) {
-        Map<Material, Double> out = new HashMap<>(); if (sec == null) return out;
-        for (String k : sec.getKeys(false)) { Material m = safeMat(k); if (m != null) out.put(m, sec.getDouble(k, 0.0)); }
-        return out;
+    // ===== Helpers =====
+    private RedstoneLevelCfg readRedstoneLevel(String basePath) {
+        String perm = cfg.getString(basePath + ".perm", "");
+        String msg  = cfg.getString(basePath + ".errmsg", "");
+        Set<Material> allowed = EnumSet.noneOf(Material.class);
+        for (String s : cfg.getStringList(basePath + ".allowed")) {
+            try { allowed.add(Material.valueOf(s.toUpperCase(Locale.ROOT))); }
+            catch (IllegalArgumentException ignored) {}
+        }
+        return new RedstoneLevelCfg(perm, msg, allowed);
     }
-    private static Material safeMat(String name) { try { return Material.valueOf(name.trim()); } catch (Exception e) { return null; } }
-    private static String color(String s) { return org.bukkit.ChatColor.translateAlternateColorCodes('&', s == null ? "" : s); }
+
+    private static void normalizePermBases(YamlConfiguration c) {
+        // Срезаем ".1" у значений perm/permBase, если кто-то оставил старый дефолт или руками прописал.
+        // Делаем точечно по известным ключам, чтобы не сломать что-то чужое.
+
+        List<String> permKeys = List.of(
+                "fields.goldenFood.perm",
+                "industrial.furnaceOreBonus.perm",
+                "industrial.furnaceHeat.perm",
+                "industrial.tntQuarry.perm",
+                "industrial.hopper.permBase",
+                "industrial.energySaving.perm",
+                "colony.tntLicense.perm",
+                "colony.foodRation.perm",
+                "church.peaceBell.perm",
+                "church.pilgrimage.perm",
+                "bank.atmNetwork.permBase"
+
+        );
+
+        for (String k : permKeys) {
+            String v = c.getString(k);
+            if (v == null) continue;
+            String trimmed = TRAILING_DOT_NUMBER.matcher(v).replaceAll("");
+            if (!trimmed.equals(v)) {
+                c.set(k, trimmed);
+            }
+        }
+    }
+
+    private void saveQuiet() {
+        try {
+            if (!plugin.getDataFolder().exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                plugin.getDataFolder().mkdirs();
+            }
+            cfg.save(file);
+        } catch (IOException ex) {
+            plugin.getLogger().warning("[UpgradesConfig] Failed to save upgrades.yml: " + ex.getMessage());
+        }
+    }
 }

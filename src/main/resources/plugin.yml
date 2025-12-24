@@ -29,6 +29,11 @@ commands:
     usage: /login <password>
     aliases: [l]
     permission: unitylauncher.auth.login
+  state:
+    description: Государственные апгрейды
+    usage: /state <contract|focus|sampler|happyhour|recycle>
+    permission: unitylauncher.state
+    permission-message: "&cНет прав: unitylauncher.state"
 
 permissions:
   unity.brand:
@@ -41,4 +46,9 @@ permissions:
   unitylauncher.auth.register:
     default: true
   unitylauncher.auth.login:
+    default: true
+  unitylauncher.state:
+    default: true
+  unitylauncher.state.happyhour:
+    description: Настройка Happy Hour (проверка по роли страны внутри команды)
     default: true

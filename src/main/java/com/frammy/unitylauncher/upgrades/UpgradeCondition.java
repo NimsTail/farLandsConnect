@@ -16,8 +16,9 @@ public final class UpgradeCondition {
 
     private UpgradeCondition() {}
 
-    public static boolean DEBUG = true;
+    public static boolean DEBUG = false;
     private static void d(String msg) {
+        DEBUG = UpgradesListener.DEBUG;
         if (DEBUG) Bukkit.getLogger().info("[UL/UpgradeCondition] " + msg);
     }
 
@@ -209,9 +210,9 @@ public final class UpgradeCondition {
         return false;
     }
 
-    public static boolean isInsideCountryOrColony(Location loc) {
+    public static boolean notInsideCountryOrColony(Location loc) {
         ZoneInfo z = zoneAt(loc);
-        return z != null && (z.getType() == ZoneType.COUNTRY || z.getType() == ZoneType.COLONY);
+        return z == null || (z.getType() != ZoneType.COUNTRY && z.getType() != ZoneType.COLONY);
     }
 
     public static boolean hasRedstoneUnlocked(Player p) {

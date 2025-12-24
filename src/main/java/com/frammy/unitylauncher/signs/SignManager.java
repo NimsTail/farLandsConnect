@@ -68,6 +68,13 @@ public class SignManager implements Listener {
     private final Map<Location, Location> containerToSourceSign = new HashMap<>();
     private static UpgradesConfig C;
 
+    // --- локальные сообщения/префикс (раньше брались из другого конфига, которого больше нет)
+    private static final String ATM_EXTRA_FILE_NAME = "atm-extra.yml";
+    private static final String ERR_NOT_OWNER = ChatColor.RED + "Вы не владелец этой таблички.";
+    private static final String ERR_INVALID_FORMAT = ChatColor.RED + "Неверный формат. Проверьте количество/цену.";
+    private static final String MSG_SIGN_UPDATED_ALL = ChatColor.GREEN + "Список товаров обновлён.";
+    private static final String MSG_SIGN_BANK_CREATED = ChatColor.GREEN + "Банкомат установлен.";
+
     public SignManager(UnityLauncher unityLauncher, File dataFolder, ZoneManager zoneManager, BlueMapIntegration blueMapIntegration, UnityCommands unityCommands) {
         this.unityLauncher = unityLauncher;
         this.dataFolder = dataFolder;
@@ -111,7 +118,7 @@ public class SignManager implements Listener {
 
 
     private int getBaseAtmLimitForCountry(String countryCanonical) {
-        return countryMaxLevel(countryCanonical, C.atmPerm, 40);
+        return countryMaxLevel(countryCanonical, C.atmPermBase, 40);
     }
 
     private void reloadAtmExtraIfNeeded() {
@@ -119,7 +126,9 @@ public class SignManager implements Listener {
         if ((now - atmExtraCacheLoadedAt) < 10_000L) return; // анти-спам: не чаще раз в 10 сек
 
         atmExtraCache.clear();
-        File f = new File(getDataFolder(), C.atmFile);
+        // Раньше имя файла бралось из конфига, но в текущем UpgradesConfig этого поля нет.
+        // Поэтому используем фиксированное имя (можно позже вынести в отдельный конфиг).
+        File f = new File(getDataFolder(), ATM_EXTRA_FILE_NAME);
         if (!f.exists()) { atmExtraCacheLoadedAt = now; return; }
 
         try {
@@ -165,28 +174,24 @@ public class SignManager implements Listener {
         String[] oldLines = sign.getLines();
         String[] newLines = e.getLines();
 
-        if (genericSignList.containsKey(sign.getLocation())) {
-            if (genericSignList.get(sign.getLocation()).getSignState() == SignState.SHOP_DEFINED && genericSignList.get(sign.getLocation()).getSignCategory().equals(SignCategory.SHOP_SOURCE)) {
-                p.sendMessage(ChatColor.RED + "Для редактирования таблички присядь и нажми ЛКМ.");
-                e.setCancelled(true);
-                resumeScrolling(sign.getLocation());
-                return;
-            }
-        }
-
         if (!e.getBlock().getType().toString().contains("HANGING")) {
             if (genericSignList.containsKey(sign.getLocation())) {
-                resumeScrolling(sign.getLocation());
-            }
-            if (genericSignList.containsKey(sign.getLocation())) {
+                if (genericSignList.get(sign.getLocation()).getSignState() == SignState.SHOP_DEFINED && genericSignList.get(sign.getLocation()).getSignCategory().equals(SignCategory.SHOP_SOURCE)) {
+                    p.sendMessage(ChatColor.RED + "Для редактирования таблички присядь и нажми ЛКМ.");
+                    e.setCancelled(true);
+                    resumeScrolling(sign.getLocation());
+                    return;
+                }
                 if (genericSignList.get(sign.getLocation()).getOwnerName().equals(p.getName())) {
+                    resumeScrolling(sign.getLocation());
                     if (!oldLines[0].equals(newLines[0])) {
                         p.sendMessage(ChatColor.RED + "Изменение первой строки невозможно. "  + ChatColor.GRAY + "\nДля изменения цели таблички сломайте её и установите с новыми параметрами.");
                         e.setCancelled(true);
                         return;
                     }
                 } else {
-                    sendPrefixed(p, C.errNotOwner);
+                    sendPrefixed(p, ERR_NOT_OWNER);
+                    e.setCancelled(true);
                     return;
                 }
             }
@@ -221,6 +226,7 @@ public class SignManager implements Listener {
                                 p.sendMessage(ChatColor.GRAY + "Координаты источника установлены.\n" +
                                         "Чтобы выбрать другое хранилище — кликните ЛКМ по табличке, затем откройте нужное хранилище.");//
                                 genericSignList.put(sign.getLocation(), new SignVariables(p.getName(), Arrays.asList(line0, line1, "<Количество>", "<Цена>"), List.of(0), true, false, SignCategory.SHOP_SOURCE, SignState.SHOP_UNDEFINED, null));
+                                containerToSourceSign.put(loc, sign.getLocation());
                             } else {
                                 e.setCancelled(true);
                                 p.sendMessage(ChatColor.RED + "Поблизости не найдено ни одного хранилища!");
@@ -258,7 +264,7 @@ public class SignManager implements Listener {
                             // ⏳ ОТЛОЖЕННО обновляем список товаров, чтобы успела сохраниться табличка
                             Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> updateAllRelatedShopListSigns(sign.getLocation()));
 
-                            sendPrefixed(p, C.msgSignUpdatedAll);
+                            sendPrefixed(p, MSG_SIGN_UPDATED_ALL);
                             break;
 
                         case "help":
@@ -269,6 +275,7 @@ public class SignManager implements Listener {
                             break;
                         default:
                             p.sendMessage(ChatColor.RED + "Отсутствуют параметры на 2-ой строке таблички.");
+                            e.setCancelled(true);
                             break;
                     }
                 }
@@ -277,6 +284,7 @@ public class SignManager implements Listener {
                 // Свисающие таблички нельзя — оставляем твою проверку выше
                 if (e.getBlock().getType().toString().contains("HANGING")) {
                     p.sendMessage(ChatColor.RED + "Свисающие таблички нельзя использовать в качестве банковского автомата!");
+                    e.setCancelled(true);
                     return;
                 }
 
@@ -300,7 +308,7 @@ public class SignManager implements Listener {
                 Bukkit.getLogger().info("[ATM] pc=" + pc
                         + " allowed=" + getAllowedAtm(pc)
                         + " have=" + countExistingAtmForCountry(pc)
-                        + " base=" + C.atmPerm);
+                        + " base=" + C.atmPermBase);
 
                 // Создаём ATM
                 UnityCommands.getInstance().getPlayerInfo(p.getName(), data -> {
@@ -324,7 +332,7 @@ public class SignManager implements Listener {
 
                             makeSignScrollingLines(e.getBlock().getLocation(), linesToScroll, 6, 13);
 
-                            sendPrefixed(p, C.msgSignBankCreated + ChatColor.GRAY + " (" + (have + 1) + "/" + allowed + ")");
+                            sendPrefixed(p, MSG_SIGN_BANK_CREATED + ChatColor.GRAY + " (" + (have + 1) + "/" + allowed + ")");
 
                             String markerID = "marker_" + UUID.randomUUID();
                             SignVariables vars = new SignVariables(
@@ -349,6 +357,7 @@ public class SignManager implements Listener {
 
                 // Свисающие таблички тоже запрещаем
                 if (e.getBlock().getType().toString().contains("HANGING")) {
+                    e.setCancelled(true);
                     p.sendMessage(ChatColor.RED + "Свисающие таблички нельзя использовать в качестве мусорного приёмника!");
                     return;
                 }
@@ -400,6 +409,7 @@ public class SignManager implements Listener {
 
         } else {
             if (Objects.requireNonNull(e.getLine(0)).equalsIgnoreCase("ATM")) {
+                e.setCancelled(true);
                 p.sendMessage(ChatColor.RED + "Свисающие таблички нельзя использовать в качестве банковского автомата!");
             }
         }
@@ -544,13 +554,13 @@ public class SignManager implements Listener {
         }
 
         // Магазинные таблички редактирует ТОЛЬКО владелец
-        if (sv0.getSignCategory() == SignCategory.SHOP_SOURCE || sv0.getSignCategory() == SignCategory.SHOP_LIST) {
-            // редактирование/привязка только владельцу
-            boolean isOwner = sv0.getOwnerName().equalsIgnoreCase(p.getName());
+            if (sv0.getSignCategory() == SignCategory.SHOP_SOURCE || sv0.getSignCategory() == SignCategory.SHOP_LIST) {
+                // редактирование/привязка только владельцу
+                boolean isOwner = sv0.getOwnerName().equalsIgnoreCase(p.getName());
 
             // SHIFT+ПКМ — выбрать сундук
             if (action == Action.RIGHT_CLICK_BLOCK && p.isSneaking()) {
-                if (!isOwner) { sendPrefixed(p, C.errNotOwner); e.setCancelled(true); return; }
+                if (!isOwner) { sendPrefixed(p, ERR_NOT_OWNER); e.setCancelled(true); return; }
                 if (sv0.getSignCategory() == SignCategory.SHOP_SOURCE) {
                     // включаем режим выбора сундука
                     signSelectionMap.put(p, b);
@@ -562,7 +572,7 @@ public class SignManager implements Listener {
 
             // ПКМ без шифта — редактирование 2 и 3 строки владельцем
             if (action == Action.RIGHT_CLICK_BLOCK && !p.isSneaking()) {
-                if (!isOwner) { sendPrefixed(p, C.errNotOwner); e.setCancelled(true); return; }
+                if (!isOwner) { sendPrefixed(p, ERR_NOT_OWNER); e.setCancelled(true); return; }
                 // просто ставим паузу прокрутки — как у тебя, редактировать игрок будет руками строки 2 и 3
                 pauseScrolling(loc);
                 return;
@@ -608,7 +618,7 @@ public class SignManager implements Listener {
                     if (p.isSneaking()) {
                         if (!sign.getLine(2).isEmpty() && !sign.getLine(3).isEmpty()) {
                             if (getContainerLocation(sign) == null) {
-                                sendPrefixed(p, C.errInvalidFormat);
+                                sendPrefixed(p, ERR_INVALID_FORMAT);
                                 return;
                             }
                             double price;
@@ -618,7 +628,7 @@ public class SignManager implements Listener {
                                 price = Double.parseDouble(ChatColor.stripColor(sign.getLine(3)));
 
                             } catch (NumberFormatException exc) {
-                                sendPrefixed(p, C.errInvalidFormat);
+                                sendPrefixed(p, ERR_INVALID_FORMAT);
                                 sign.setLine(2, "<Количество>");
                                 sign.setLine(3, "<Цена>");
                                 sign.update();
@@ -900,7 +910,7 @@ public class SignManager implements Listener {
         final String opener = (p != null) ? p.getName() : null;
 
         // === DEBUG-флаг из конфига (если есть)
-        final boolean DEBUG = (C != null && C.DEBUG);
+        final boolean DEBUG = (C != null && C.debug);
 
         // === 1) РЕЖИМ ПРИВЯЗКИ (включён ранее Shift+ПКМ по SHOP_SOURCE)
         if (p != null && signSelectionMap.containsKey(p)) {
@@ -996,7 +1006,7 @@ public class SignManager implements Listener {
         final Player player = event.getPlayer();
 
         // === 0) DEBUG флаг (необязательно)
-        final boolean DEBUG = (C != null && C.DEBUG);
+        final boolean DEBUG = (C != null && C.debug);
 
         // Если блок — в SHOP-зоне, где игрок НЕ владелец — запрещаем ломать таблички магазина и привязанные контейнеры
         if (zoneManager.getShopZoneAt(brokenBlock.getLocation()) != null
@@ -1025,7 +1035,7 @@ public class SignManager implements Listener {
                 }
 
                 // ВАЖНО: запрещаем только если табличка реально ПРИКРЕПЛЕНА к этому блоку
-                if (!isAttachedToBlock(nb, brokenBlock)) continue;
+                if (isNotAttachedToBlock(nb, brokenBlock)) continue;
 
                 event.setCancelled(true);
                 player.sendMessage(ChatColor.RED + "В магазине ломать может только владелец SHOP-зоны.");
@@ -1075,7 +1085,7 @@ public class SignManager implements Listener {
             final SignVariables sv = genericSignList.get(signLoc);
             if (sv == null) continue; // не наша
 
-            if (!isAttachedToBlock(nb, brokenBlock)) continue; // табличка не висит на этом блоке
+            if (isNotAttachedToBlock(nb, brokenBlock)) continue; // табличка не висит на этом блоке
 
             // Право на удаление
             if (!sv.getOwnerName().equalsIgnoreCase(player.getName())) {
@@ -1160,17 +1170,13 @@ public class SignManager implements Listener {
         List<String> items = signPages.get(loc);
         if (items == null) return;
 
-        List<String> allStrings = new ArrayList<>();
-        for (List<String> list : signPages.values()) {
-            allStrings.addAll(list);
-        }
-
-        if (allStrings.size() < 3) {
-            int toAdd = 3 - allStrings.size();
+        if (items.size() < 3) {
+            int toAdd = 3 - items.size();
             for (int i = 0; i < toAdd; i++) {
-                signPages.get(loc).add("  "); // добавляем пустые строки
+                items.add("  ");
             }
         }
+
 
         int current = playerScrollIndex.getOrDefault(player.getUniqueId(), 0);
 
@@ -1813,9 +1819,9 @@ public class SignManager implements Listener {
         return signBlock.getRelative(BlockFace.DOWN);
     }
 
-    private boolean isAttachedToBlock(Block signBlock, Block possibleSupportingBlock) {
+    private boolean isNotAttachedToBlock(Block signBlock, Block possibleSupportingBlock) {
         Block support = getSignSupportBlock(signBlock);
-        return support != null && support.equals(possibleSupportingBlock);
+        return support == null || !support.equals(possibleSupportingBlock);
     }
 
 
@@ -1897,13 +1903,36 @@ public class SignManager implements Listener {
                     if (w == null) continue;
                     Location loc = new Location(w, s.x(), s.y(), s.z());
 
-                    // Если запись существует — обновим поля; иначе пропустим (не знаем твой конструктор)
                     SignVariables vars = genericSignList.get(loc);
                     if (vars != null) {
-                        if (s.category() != null) vars.setSignCategory(s.category());
-                        if (s.ownerName() != null) vars.setOwnerName(s.ownerName());
-                        // label — если у тебя есть соответствующее поле/метод — примени тут
+                        if (s.category() != null) {
+                            vars.setSignCategory(s.category());
+                        }
+                        if (s.ownerName() != null) {
+                            vars.setOwnerName(s.ownerName());
+                        }
+
+                        // НАКОНЕЦ-ТО ИСПОЛЬЗУЕМ label
+                        String label = s.label();
+                        if (label != null && !label.isBlank()) {
+                            // Обновляем первую строку "логической" таблички
+                            java.util.List<String> text = vars.getSignText();
+                            if (text == null) text = new java.util.ArrayList<>();
+                            else text = new java.util.ArrayList<>(text); // копия, чтобы не словить UnsupportedOperation
+
+                            while (text.size() < 4) text.add(""); // страховка по размерам
+                            text.set(0, label);
+                            vars.setSignText(text);
+
+                            // И, если в мире реально стоит табличка, синхронизируем блок
+                            org.bukkit.block.Block block = loc.getBlock();
+                            if (block.getState() instanceof org.bukkit.block.Sign sign) {
+                                sign.setLine(0, label);
+                                sign.update();
+                            }
+                        }
                     }
+
                 }
 
                 idx.set(end);
@@ -1998,7 +2027,11 @@ public class SignManager implements Listener {
         try { return Integer.parseInt(String.valueOf(o)); } catch (Exception e) { return null; }
     }
 
-    private String prefix() { return (C != null ? C.signsPrefix : ""); }
+    private String prefix() {
+        // Старый код тянул signsPrefix из конфига апгрейдов, но в текущем UpgradesConfig такого ключа нет.
+        // Используем безопасный дефолт, чтобы методы sendPrefixed() работали.
+        return ChatColor.DARK_GRAY + "[" + unityLauncher.getName() + "] " + ChatColor.RESET;
+    }
 
     private void sendPrefixed(Player p, String msg) {
         if (msg == null || msg.isEmpty()) return;

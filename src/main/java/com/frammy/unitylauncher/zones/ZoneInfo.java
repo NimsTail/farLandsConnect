@@ -212,4 +212,27 @@ public class ZoneInfo {
         return new Location(w, x, y, z);
     }
 
+    /** Центр зоны (примерно): центр AABB по XZ + y по highestBlock. */
+    public Location getCenter() {
+        World w = getWorld();
+        if (w == null) return null;
+
+        BoundingBox bb = getBoundingBoxXZ();
+        double cx = (bb.getMinX() + bb.getMaxX()) / 2.0;
+        double cz = (bb.getMinZ() + bb.getMaxZ()) / 2.0;
+
+        int y = w.getHighestBlockYAt((int) Math.floor(cx), (int) Math.floor(cz));
+        return new Location(w, cx, y, cz);
+    }
+
+    /** Быстрый центр XZ (если кому-то нужен только 2D). */
+    public org.bukkit.util.Vector getCenterXZ() {
+        BoundingBox bb = getBoundingBoxXZ();
+        return new org.bukkit.util.Vector(
+                (bb.getMinX() + bb.getMaxX()) / 2.0,
+                0,
+                (bb.getMinZ() + bb.getMaxZ()) / 2.0
+        );
+    }
+
 }

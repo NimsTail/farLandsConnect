@@ -35,6 +35,8 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
+import static com.frammy.unitylauncher.upgrades.UpgradeCondition.countryMaxLevel;
+
 /**
  * UpgradesListener — оптимизированный под конфиг.
  * Все тексты/параметры/пермишены читаются из UpgradesConfig (C).
@@ -69,10 +71,10 @@ public class UpgradesListener implements Listener {
 
     // ===== Регистрация/перезапуск =====
 
-    public static void registerAll(JavaPlugin plugin) {
+    public static void registerAll(UnityLauncher plugin) {
         // грузим конфиг
         C = UpgradesConfig.load(plugin);
-        DEBUG = C.DEBUG;
+        DEBUG = C.debug;
         d("registerAll() using config, DEBUG=" + DEBUG);
 
         // регистрируем листенер
@@ -121,7 +123,7 @@ public class UpgradesListener implements Listener {
 
     }
 
-    public static void reload(JavaPlugin plugin) {
+    public static void reload(UnityLauncher plugin) {
         // 1) перечитать конфиг плагина (вызовем из команды в UnityLauncher, но дубль не мешает)
         try {
             plugin.reloadConfig();
@@ -182,7 +184,7 @@ public class UpgradesListener implements Listener {
 
     private static boolean hasGoldenFoodUnlock(Player p) {
         String pc = UpgradeCondition.playerCountryCanonical(p.getName());
-        return UpgradeCondition.countryMaxLevel(pc, C.goldenFoodPerm, 1) >= 1;
+        return countryMaxLevel(pc, C.goldenFoodPerm, 1) >= 1;
     }
 
     @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
@@ -191,6 +193,7 @@ public class UpgradesListener implements Listener {
         Player p = e.getPlayer();
         if (hasGoldenFoodUnlock(p)) return;
         e.setCancelled(true);
+        assert C.goldenFoodMsgConsume != null;
         if (!C.goldenFoodMsgConsume.isEmpty()) p.sendMessage(C.goldenFoodMsgConsume);
         p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 0.8f, 0.5f);
     }
@@ -198,12 +201,110 @@ public class UpgradesListener implements Listener {
     @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
     public void onCraft(CraftItemEvent e) {
         ItemStack result = e.getCurrentItem();
-        if (result == null || !C.premiumFoods.contains(result.getType())) return;
+        if (result == null) return;
         if (!(e.getWhoClicked() instanceof Player p)) return;
-        if (hasGoldenFoodUnlock(p)) return;
-        e.setCancelled(true);
-        if (!C.goldenFoodMsgCraft.isEmpty()) p.sendMessage(C.goldenFoodMsgCraft);
-        p.playSound(p.getLocation(), Sound.UI_BUTTON_CLICK, 0.7f, 0.8f);
+
+        // Золотая еда
+        if (C.premiumFoods.contains(result.getType())) {
+            if (!hasGoldenFoodUnlock(p)) {
+                e.setCancelled(true);
+                assert C.goldenFoodMsgCraft != null;
+                if (!C.goldenFoodMsgCraft.isEmpty()) p.sendMessage(C.goldenFoodMsgCraft);
+                p.playSound(p.getLocation(), Sound.UI_BUTTON_CLICK, 0.7f, 0.8f);
+                return;
+            }
+        }
+
+        // Незерит - блокировка крафта
+        if (isNetheriteItem(result.getType())) {
+            if (!hasNetheriteUnlock(p)) {
+                e.setCancelled(true);
+                assert C.netheriteErrmsg != null;
+                if (!C.netheriteErrmsg.isEmpty()) p.sendMessage(C.netheriteErrmsg);
+                p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 0.8f, 0.5f);
+                return;
+            }
+        }
+
+        // Маяк - блокировка крафта
+        if (result.getType() == Material.BEACON) {
+            if (!hasBeaconUnlock(p)) {
+                e.setCancelled(true);
+                assert C.beaconErrmsg != null;
+                if (!C.beaconErrmsg.isEmpty()) p.sendMessage(C.beaconErrmsg);
+                p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 0.8f, 0.5f);
+            }
+        }
+    }
+
+    // =====================================================================
+    //  НЕЗЕРИТ и МАЯК — проверка апгрейда
+    // =====================================================================
+
+    private static boolean isNetheriteItem(Material m) {
+        return m == Material.NETHERITE_INGOT
+                || m == Material.NETHERITE_BLOCK
+                || m == Material.NETHERITE_SWORD
+                || m == Material.NETHERITE_PICKAXE
+                || m == Material.NETHERITE_AXE
+                || m == Material.NETHERITE_SHOVEL
+                || m == Material.NETHERITE_HOE
+                || m == Material.NETHERITE_HELMET
+                || m == Material.NETHERITE_CHESTPLATE
+                || m == Material.NETHERITE_LEGGINGS
+                || m == Material.NETHERITE_BOOTS;
+    }
+
+    private static boolean hasNetheriteUnlock(Player p) {
+        String pc = UpgradeCondition.playerCountryCanonical(p.getName());
+        return countryMaxLevel(pc, C.netheritePerm, 1) >= 1;
+    }
+
+    private static boolean hasBeaconUnlock(Player p) {
+        String pc = UpgradeCondition.playerCountryCanonical(p.getName());
+        return countryMaxLevel(pc, C.beaconPerm, 1) >= 1;
+    }
+
+    // Блокировка размещения незерита и маяков
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
+    public void onPlaceNetheriteBeacon(BlockPlaceEvent e) {
+        Player p = e.getPlayer();
+        Material m = e.getBlockPlaced().getType();
+
+        if (m == Material.NETHERITE_BLOCK && !hasNetheriteUnlock(p)) {
+            e.setCancelled(true);
+            assert C.netheriteErrmsg != null;
+            if (!C.netheriteErrmsg.isEmpty()) p.sendMessage(C.netheriteErrmsg);
+            p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 0.8f, 0.5f);
+            return;
+        }
+
+        if (m == Material.BEACON && !hasBeaconUnlock(p)) {
+            e.setCancelled(true);
+            assert C.beaconErrmsg != null;
+            if (!C.beaconErrmsg.isEmpty()) p.sendMessage(C.beaconErrmsg);
+            p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 0.8f, 0.5f);
+        }
+    }
+
+    // Блокировка экипировки незеритовой брони/инструментов
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
+    public void onNetheriteEquip(PlayerInteractEvent e) {
+        if (e.getAction() != Action.RIGHT_CLICK_AIR && e.getAction() != Action.RIGHT_CLICK_BLOCK) return;
+        ItemStack item = e.getItem();
+        if (item == null) return;
+
+        Material m = item.getType();
+        if (m == Material.NETHERITE_HELMET || m == Material.NETHERITE_CHESTPLATE
+                || m == Material.NETHERITE_LEGGINGS || m == Material.NETHERITE_BOOTS) {
+            Player p = e.getPlayer();
+            if (!hasNetheriteUnlock(p)) {
+                e.setCancelled(true);
+                assert C.netheriteErrmsg != null;
+                if (!C.netheriteErrmsg.isEmpty()) p.sendMessage(C.netheriteErrmsg);
+                p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_BASS, 0.8f, 0.5f);
+            }
+        }
     }
 
     // =====================================================================
@@ -214,11 +315,11 @@ public class UpgradesListener implements Listener {
     public void onFurnaceSmelt(FurnaceSmeltEvent e) {
         Block block = e.getBlock();
         Location loc = block.getLocation();
-        if (!UpgradeCondition.isInsideCountryOrColony(loc)) return;
+        if (UpgradeCondition.notInsideCountryOrColony(loc)) return;
 
         String country = UpgradeCondition.locationCountryOwner(loc);
         if (country == null || country.isBlank()) return;
-        if (UpgradeCondition.countryMaxLevel(country, C.furnacePerm, 1) < 1) return;
+        if (countryMaxLevel(country, C.furnacePerm, 1) < 1) return;
 
         ItemStack result = e.getResult();
         if (result.getType().isAir()) return;
@@ -253,7 +354,7 @@ public class UpgradesListener implements Listener {
         if (loc == null) return;
 
         String country = UpgradeCondition.locationCountryOwner(loc);
-        int hopperLvl = UpgradeCondition.countryMaxLevel(country, C.hopperSmartPermBase, 2);
+        int hopperLvl = countryMaxLevel(country, C.hopperSmartPermBase, 2);
 
         d("onHopperMove at " + loc + " country=" + country + " hopperLvl=" + hopperLvl);
 
@@ -324,7 +425,7 @@ public class UpgradesListener implements Listener {
 
     private static boolean computeTurboEligibility(Location loc) {
         String country = UpgradeCondition.locationCountryOwner(loc);
-        int hopperLvl = UpgradeCondition.countryMaxLevel(country, C.hopperSmartPermBase, 2);
+        int hopperLvl = countryMaxLevel(country, C.hopperSmartPermBase, 2);
         if (hopperLvl < 2) return false;
         return UpgradeCondition.isInsideZoneTypeRaw(loc, ZoneType.INDUSTRIAL);
     }
@@ -539,8 +640,8 @@ public class UpgradesListener implements Listener {
         ZoneInfo z = UpgradeCondition.zoneAt(loc);
         ZoneType zt = (z != null ? z.getType() : null);
 
-        boolean hasQuarry  = UpgradeCondition.countryMaxLevel(country, C.tntPerm, 1) >= 1;
-        boolean hasLicense = UpgradeCondition.countryMaxLevel(country, C.tntLicensePerm, 1) >= 1;
+        boolean hasQuarry  = countryMaxLevel(country, C.tntPerm, 1) >= 1;
+        boolean hasLicense = countryMaxLevel(country, C.tntLicensePerm, 1) >= 1;
 
         if (!hasQuarry && !hasLicense) return;
 
@@ -652,9 +753,9 @@ public class UpgradesListener implements Listener {
         String zc = UpgradeCondition.zoneCountryCanonical(z);
         if (pc == null || !pc.equals(zc)) { lastApplied.put(p.getUniqueId(), now); return; }
 
-        int hasteLvl = UpgradeCondition.countryMaxLevel(pc, C.permHaste, C.effectsMaxLevel);
-        int speedLvl = UpgradeCondition.countryMaxLevel(pc, C.permSpeed, C.effectsMaxLevel);
-        int resLvl   = UpgradeCondition.countryMaxLevel(pc, C.permResist, C.effectsMaxLevel);
+        int hasteLvl = countryMaxLevel(pc, C.permHaste, C.effectsMaxLevel);
+        int speedLvl = countryMaxLevel(pc, C.permSpeed, C.effectsMaxLevel);
+        int resLvl   = countryMaxLevel(pc, C.permResist, C.effectsMaxLevel);
 
         applyOrRemove(p, PotionEffectType.HASTE,      hasteLvl > 0 ? hasteLvl - 1 : -1);
         applyOrRemove(p, PotionEffectType.SPEED,      speedLvl > 0 ? speedLvl - 1 : -1);
@@ -683,7 +784,7 @@ public class UpgradesListener implements Listener {
         String country = UpgradeCondition.locationCountryOwner(b.getLocation());
         if (country == null || country.isBlank()) return;
 
-        int lvl = UpgradeCondition.countryMaxLevel(country, C.farmlandPermBase, 2);
+        int lvl = countryMaxLevel(country, C.farmlandPermBase, 2);
         if (lvl <= 0) return;
 
         // Lv2: полная защита
@@ -707,7 +808,7 @@ public class UpgradesListener implements Listener {
         String country = UpgradeCondition.locationCountryOwner(block.getLocation());
         if (country == null || country.isBlank()) return;
 
-        int lvl = UpgradeCondition.countryMaxLevel(country, C.farmlandPermBase, 2);
+        int lvl = countryMaxLevel(country, C.farmlandPermBase, 2);
         if (lvl <= 0) return;
 
         if (lvl >= 2) { e.setCancelled(true); if (DEBUG) d("Farmland protect L2 (PHYSICAL)"); return; }
@@ -730,14 +831,14 @@ public class UpgradesListener implements Listener {
         Location loc = block.getLocation();
 
         // Должны быть в стране/колонии
-        if (!UpgradeCondition.isInsideCountryOrColony(loc)) return;
+        if (UpgradeCondition.notInsideCountryOrColony(loc)) return;
 
         // Проверка ноды (отдельная или общая с C.furnacePerm)
         String country = UpgradeCondition.locationCountryOwner(loc);
         if (country == null || country.isBlank()) return;
 
         String permBase = (C.furnaceHeatPerm != null && !C.furnaceHeatPerm.isBlank()) ? C.furnaceHeatPerm : C.furnacePerm;
-        if (UpgradeCondition.countryMaxLevel(country, permBase, 1) < 1) return;
+        if (countryMaxLevel(country, permBase, 1) < 1) return;
 
         // Находим ближайший источник тепла в кубе радиуса R
         final int R = Math.max(1, C.furnaceHeatRadius);
@@ -888,7 +989,7 @@ public class UpgradesListener implements Listener {
             // у зоны должна быть страна и у неё — апгрейд теплиц
             String country = UpgradeCondition.zoneCountryCanonical(z);
             if (country == null || country.isBlank()) continue;
-            if (UpgradeCondition.countryMaxLevel(country, C.cropsLLPermBase, 1) < 1) continue;
+            if (countryMaxLevel(country, C.cropsLLPermBase, 1) < 1) continue;
 
             // бюджет попыток на зону
             int budget = C.cropsLL_PerZoneBudget;
@@ -914,7 +1015,7 @@ public class UpgradesListener implements Listener {
 
                     // Пчелиное опыление: при апгрейде страны и ульях рядом увеличиваем шанс
                     if (C.beePollinationBonusPercent > 0.0 &&
-                            UpgradeCondition.countryMaxLevel(country, C.beePollinationPerm, 1) >= 1 &&
+                            countryMaxLevel(country, C.beePollinationPerm, 1) >= 1 &&
                             hasBeeHiveNearby(b, C.beePollinationRadius)) {
 
                         chance = Math.min(100.0, chance + C.beePollinationBonusPercent);
@@ -956,13 +1057,12 @@ public class UpgradesListener implements Listener {
         String zc = UpgradeCondition.zoneCountryCanonical(z);
         if (pc == null || !pc.equals(zc)) return false;
 
-        return UpgradeCondition.countryMaxLevel(pc, C.antiPhantomPermBase, 1) >= 1;
+        return countryMaxLevel(pc, C.antiPhantomPermBase, 1) >= 1;
     }
 
     @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
     public void onPhantomPreSpawn(PhantomPreSpawnEvent e) {
         // У этого ивента нет прямого Player-виновника — найдём ближайшего
-        var phantom = e.getSpawningEntity(); // ещё не заспавнился полностью, но позиция есть
         Player nearest = getNearest(e);
 
         if (nearest != null && antiPhantomEligible(nearest)) {
@@ -1072,11 +1172,11 @@ public class UpgradesListener implements Listener {
 
             // проверка «это своя страна/колония» + апгрейд страны
             Location loc = b.getLocation();
-            if (!UpgradeCondition.isInsideCountryOrColony(loc)) { it.remove(); continue; }
+            if (UpgradeCondition.notInsideCountryOrColony(loc)) { it.remove(); continue; }
 
             String country = UpgradeCondition.locationCountryOwner(loc);
             if (country == null || country.isBlank()) { it.remove(); continue; }
-            if (UpgradeCondition.countryMaxLevel(country, C.brewPerm, 1) < 1) { it.remove(); continue; }
+            if (countryMaxLevel(country, C.brewPerm, 1) < 1) { it.remove(); continue; }
 
             int time = bs.getBrewingTime(); // тики до готовности (обычно 400..1 во время процесса)
             if (time <= 1) continue;        // не варит сейчас
@@ -1140,8 +1240,8 @@ public class UpgradesListener implements Listener {
         }
 
         // апгрейды страны (через perms из конфига)
-        boolean bellEnabled = UpgradeCondition.countryMaxLevel(pc, C.churchBellPerm, 1) >= 1;
-        boolean pilgEnabled = UpgradeCondition.countryMaxLevel(pc, C.churchPilgrimagePerm, 1) >= 1;
+        boolean bellEnabled = countryMaxLevel(pc, C.churchBellPerm, 1) >= 1;
+        boolean pilgEnabled = countryMaxLevel(pc, C.churchPilgrimagePerm, 1) >= 1;
 
         // Если ни один апгрейд не включён — сбрасываем трекер
         if (!bellEnabled && !pilgEnabled) {
@@ -1249,13 +1349,13 @@ public class UpgradesListener implements Listener {
         Location loc = block.getLocation();
 
         // Должны быть в стране/колонии
-        if (!UpgradeCondition.isInsideCountryOrColony(loc)) return;
+        if (UpgradeCondition.notInsideCountryOrColony(loc)) return;
 
         String country = UpgradeCondition.locationCountryOwner(loc);
         if (country == null || country.isBlank()) return;
 
         // Страна должна иметь апгрейд Экотопливо
-        if (UpgradeCondition.countryMaxLevel(country, C.ecoFuelPerm, 1) < 1) return;
+        if (countryMaxLevel(country, C.ecoFuelPerm, 1) < 1) return;
 
         ItemStack fuel = e.getFuel();
         if (fuel.getType() != Material.BAMBOO) return;
@@ -1286,7 +1386,7 @@ public class UpgradesListener implements Listener {
         String zc = UpgradeCondition.zoneCountryCanonical(z);
         if (pc == null || !pc.equals(zc)) return;
 
-        if (UpgradeCondition.countryMaxLevel(pc, C.dustProtectionPerm, 1) < 1) return;
+        if (countryMaxLevel(pc, C.dustProtectionPerm, 1) < 1) return;
 
         p.addPotionEffect(new PotionEffect(
                 PotionEffectType.NIGHT_VISION,
@@ -1316,7 +1416,7 @@ public class UpgradesListener implements Listener {
 
         String country = UpgradeCondition.zoneCountryCanonical(z);
         if (country == null || country.isBlank()) return;
-        if (UpgradeCondition.countryMaxLevel(country, C.recyclerPerm, 1) < 1) return;
+        if (countryMaxLevel(country, C.recyclerPerm, 1) < 1) return;
 
         var rnd = ThreadLocalRandom.current();
 
@@ -1329,6 +1429,31 @@ public class UpgradesListener implements Listener {
                 b.getWorld().dropItemNaturally(loc, new ItemStack(dropMat, 1));
                 if (DEBUG) d("Recycler: extra " + dropMat + " at " + loc + " from " + type + " country=" + country);
             }
+        }
+    }
+
+    // =====================================================================
+    //  ФОРПОСТ — ослабление рейдов в колониях
+    // =====================================================================
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
+    public void onRaidMobSpawn(CreatureSpawnEvent e) {
+        // Проверяем, что это спавн рейдера
+        if (e.getSpawnReason() != CreatureSpawnEvent.SpawnReason.RAID) return;
+
+        Location loc = e.getLocation();
+        ZoneInfo z = UpgradeCondition.zoneAt(loc);
+        if (z == null || z.getType() != ZoneType.COLONY) return;
+
+        // Проверяем апгрейд страны
+        String country = UpgradeCondition.zoneCountryCanonical(z);
+        if (country == null || country.isBlank()) return;
+        if (countryMaxLevel(country, C.outpostPerm, 1) < 1) return;
+
+        // Шанс отменить спавн (процент из конфига)
+        if (ThreadLocalRandom.current().nextDouble(100.0) < C.outpostCullPercent) {
+            e.setCancelled(true);
+            if (DEBUG) d("Outpost: cancelled raid mob spawn at " + loc + " country=" + country);
         }
     }
 
@@ -1348,7 +1473,7 @@ public class UpgradesListener implements Listener {
         if (country == null || country.isBlank()) return;
 
         // Скотоводство+ — ускоренный рост детёнышей
-        if (UpgradeCondition.countryMaxLevel(country, C.livestockPlusPerm, 1) >= 1) {
+        if (countryMaxLevel(country, C.livestockPlusPerm, 1) >= 1) {
             int age = baby.getAge(); // у новорождённого обычно отрицательный (ticks до взросления)
             if (age < 0 && C.livestockPlusSpeedPercent > 0.0) {
                 double k = Math.max(0.0, Math.min(1.0, C.livestockPlusSpeedPercent / 100.0));
@@ -1360,7 +1485,7 @@ public class UpgradesListener implements Listener {
         }
 
         // Скотоводство++ — шанс двойни
-        if (UpgradeCondition.countryMaxLevel(country, C.livestockDoublePerm, 1) >= 1) {
+        if (countryMaxLevel(country, C.livestockDoublePerm, 1) >= 1) {
             if (C.livestockDoubleChancePercent > 0.0 &&
                     ThreadLocalRandom.current().nextDouble(100.0) < C.livestockDoubleChancePercent) {
 
@@ -1372,6 +1497,110 @@ public class UpgradesListener implements Listener {
                 }
             }
         }
+    }
+
+    // =====================================================================
+    //  ШЛЮЗ-ПОГРУЗЧИК — ускорение загрузки/выгрузки вагонеток
+    // =====================================================================
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
+    public void onMinecartInventoryMove(InventoryMoveItemEvent e) {
+        // Проверяем, что один из участников — вагонетка с инвентарём
+        InventoryHolder source = e.getSource().getHolder();
+        InventoryHolder dest = e.getDestination().getHolder();
+
+        boolean isMinecartSource = source instanceof org.bukkit.entity.minecart.StorageMinecart
+                || source instanceof org.bukkit.entity.minecart.HopperMinecart;
+        boolean isMinecartDest = dest instanceof org.bukkit.entity.minecart.StorageMinecart
+                || dest instanceof org.bukkit.entity.minecart.HopperMinecart;
+
+        if (!isMinecartSource && !isMinecartDest) return;
+
+        // Получаем локацию
+        Location loc;
+        if (isMinecartSource) {
+            loc = ((org.bukkit.entity.Entity) source).getLocation();
+        } else {
+            loc = ((org.bukkit.entity.Entity) dest).getLocation();
+        }
+
+        // Проверяем апгрейд страны
+        String country = UpgradeCondition.locationCountryOwner(loc);
+        if (country == null || country.isBlank()) return;
+        if (countryMaxLevel(country, C.loaderPerm, 1) < 1) return;
+
+        // Проверяем наличие медного блока рядом
+        if (!hasCopperBlockNearby(loc, C.loaderRadius)) return;
+
+        // Ускоряем: передаём дополнительные предметы
+        int extraTransfers = (int) (C.loaderSpeedMultiplier - 1.0);
+        if (extraTransfers <= 0) return;
+
+        Inventory srcInv = e.getSource();
+        Inventory dstInv = e.getDestination();
+
+        for (int i = 0; i < extraTransfers; i++) {
+            // Находим первый не-пустой слот в источнике
+            ItemStack toMove = null;
+            int srcSlot = -1;
+            for (int j = 0; j < srcInv.getSize(); j++) {
+                ItemStack it = srcInv.getItem(j);
+                if (it != null && !it.getType().isAir() && it.getAmount() > 0) {
+                    toMove = it;
+                    srcSlot = j;
+                    break;
+                }
+            }
+            if (toMove == null) break;
+
+            ItemStack oneItem = toMove.clone();
+            oneItem.setAmount(1);
+
+            var leftover = dstInv.addItem(oneItem);
+            if (!leftover.isEmpty()) break; // нет места
+
+            int newAmt = toMove.getAmount() - 1;
+            if (newAmt <= 0) {
+                srcInv.setItem(srcSlot, null);
+            } else {
+                toMove.setAmount(newAmt);
+                srcInv.setItem(srcSlot, toMove);
+            }
+        }
+
+        if (DEBUG) d("Loader: accelerated minecart transfer at " + loc + " country=" + country);
+    }
+
+    private static boolean hasCopperBlockNearby(Location center, int radius) {
+        World w = center.getWorld();
+        int cx = center.getBlockX(), cy = center.getBlockY(), cz = center.getBlockZ();
+
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -radius; dy <= radius; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    Material m = w.getBlockAt(cx + dx, cy + dy, cz + dz).getType();
+                    if (m == Material.COPPER_BLOCK
+                            || m == Material.EXPOSED_COPPER
+                            || m == Material.WEATHERED_COPPER
+                            || m == Material.OXIDIZED_COPPER
+                            || m == Material.WAXED_COPPER_BLOCK
+                            || m == Material.WAXED_EXPOSED_COPPER
+                            || m == Material.WAXED_WEATHERED_COPPER
+                            || m == Material.WAXED_OXIDIZED_COPPER
+                            || m == Material.CUT_COPPER
+                            || m == Material.EXPOSED_CUT_COPPER
+                            || m == Material.WEATHERED_CUT_COPPER
+                            || m == Material.OXIDIZED_CUT_COPPER
+                            || m == Material.WAXED_CUT_COPPER
+                            || m == Material.WAXED_EXPOSED_CUT_COPPER
+                            || m == Material.WAXED_WEATHERED_CUT_COPPER
+                            || m == Material.WAXED_OXIDIZED_CUT_COPPER) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     // =====================================================================
@@ -1392,7 +1621,7 @@ public class UpgradesListener implements Listener {
             String zc = UpgradeCondition.zoneCountryCanonical(z);
             if (pc == null || !pc.equals(zc)) continue;
 
-            if (UpgradeCondition.countryMaxLevel(pc, C.foodRationPerm, 1) < 1) continue;
+            if (countryMaxLevel(pc, C.foodRationPerm, 1) < 1) continue;
 
             // Можно ограничить только голодных, но это не обязательно
             if (p.getFoodLevel() >= 20) continue;
@@ -1410,29 +1639,4 @@ public class UpgradesListener implements Listener {
         }
     }
 
-    // =====================================================================
-    //  Форпост — защиты от рейдов в колониях
-    // =====================================================================
-
-    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
-    public void onRaiderSpawn(CreatureSpawnEvent e) {
-        if (e.getSpawnReason() != CreatureSpawnEvent.SpawnReason.RAID) return;
-
-        Location loc = e.getLocation();
-        ZoneInfo z = UpgradeCondition.zoneAt(loc);
-        if (z == null || z.getType() != ZoneType.COLONY) return;
-
-        String country = UpgradeCondition.zoneCountryCanonical(z);
-        if (country == null || country.isBlank()) return;
-
-        if (UpgradeCondition.countryMaxLevel(country, C.outpostPerm, 1) < 1) return;
-
-        double pKill = C.outpostCullPercent;
-        if (pKill <= 0.0) return;
-
-        if (ThreadLocalRandom.current().nextDouble(100.0) < pKill) {
-            e.setCancelled(true);
-            if (DEBUG) d("Outpost: cancelled raider spawn at " + loc + " in colony zone " + z.getID());
-        }
-    }
 }

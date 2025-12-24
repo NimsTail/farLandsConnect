@@ -5,3 +5,4 @@ public class AdvancementTabNamespaces {
 public static String achievements_NAMESPACE = "achievements";
 
 }
+

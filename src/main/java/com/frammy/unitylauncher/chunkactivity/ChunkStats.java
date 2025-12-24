@@ -57,7 +57,7 @@ public class ChunkStats {
             return;
         }
 
-        timeSpent       = (long) Math.round(timeSpent * decay);
+        timeSpent       = Math.round(timeSpent * decay);
         blocksPlaced    = (int)  Math.round(blocksPlaced * decay);
         blocksBroken    = (int)  Math.round(blocksBroken * decay);
         itemDrops       = (int)  Math.round(itemDrops * decay);

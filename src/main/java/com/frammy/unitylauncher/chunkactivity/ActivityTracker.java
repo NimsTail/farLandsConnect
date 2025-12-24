@@ -163,8 +163,35 @@ public class ActivityTracker implements Listener {
         if (loadUnits <= 0) return;
         ChunkStats s = statsFor(chunk);
         if (s == null) return;
-        s.tickLoad += loadUnits;
+
+        // Применяем множитель энергосбережения из апгрейда (если есть)
+        double finalLoad = loadUnits * getEnergySavingMultiplier(chunk);
+
+        s.tickLoad += finalLoad;
         s.lastUpdated = System.currentTimeMillis();
+    }
+
+    /** Получить множитель энергосбережения для чанка (из апгрейда страны). */
+    private double getEnergySavingMultiplier(Chunk chunk) {
+        try {
+            var upgradesConfig = com.frammy.unitylauncher.upgrades.UpgradesConfig.get();
+            var location = chunk.getBlock(8, 64, 8).getLocation();
+            String country = com.frammy.unitylauncher.upgrades.UpgradeCondition.locationCountryOwner(location);
+
+            if (country != null && !country.isBlank()) {
+                int level = com.frammy.unitylauncher.upgrades.UpgradeCondition.countryMaxLevel(
+                    country,
+                    upgradesConfig.energySavingPerm,
+                    1
+                );
+                if (level >= 1) {
+                    return upgradesConfig.energySavingMultiplier;
+                }
+            }
+        } catch (Throwable ignored) {
+            // если что-то сломалось, возвращаем 1.0 (без бонуса)
+        }
+        return 1.0;
     }
 
     /** Активность игроков в чанке (дискретные события). */

@@ -43,7 +43,7 @@ public class SignVariables {
     public String getMarkerID() {return markerID;}
 
 
-    public void setConfigurtable(boolean isConfigurable) {
+    public void setConfigurable(boolean isConfigurable) {
         this.isConfigurable = isConfigurable;
     }
     public void setPaused(boolean isPaused) {

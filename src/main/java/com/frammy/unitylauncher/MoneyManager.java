@@ -164,14 +164,21 @@ public class MoneyManager implements Listener {
                 }
                 String country = data.countryName;
 
-                // TODO: когда появится нормальный API баланса страны — заменить этот блок
                 new BukkitRunnable(){ @Override public void run(){
-                    Map<String, Object> updates = new HashMap<>();
-                    updates.put("money", round2(data.money + deposited));
-                    UnityCommands.getInstance().mergeAndUpdatePlayerData(player.getName(), "GeneralData", updates);
-                    player.sendMessage(ChatColor.RED + "Взнос в казну страны [" + country + "] пока не настроен.");
-                    player.sendMessage(ChatColor.GRAY + "Сумма " + ChatColor.YELLOW + deposited + ChatColor.GRAY + " Ⓕ возвращена на твой счёт.");
+                    // 1) Зачисляем в казну страны (атомарно в БД)
+                    UnityLauncher.getInstance()
+                            .getCountryRegistryJdbc() // <- см. ниже как добавить геттер
+                            .addCountryMoney(country, deposited);
+
+                    // 2) Сообщение игроку
+                    new BukkitRunnable(){ @Override public void run(){
+                        player.sendMessage(ChatColor.GRAY + "В казну страны [" + ChatColor.YELLOW + country
+                                + ChatColor.GRAY + "] внесено " + ChatColor.YELLOW + round2(deposited)
+                                + ChatColor.GRAY + " Ⓕ.");
+                    }}.runTask(UnityLauncher.getInstance());
+
                 }}.runTaskAsynchronously(UnityLauncher.getInstance());
+
             });
         }
     }
@@ -453,4 +460,36 @@ public class MoneyManager implements Listener {
         String v = String.format(java.util.Locale.ROOT, "%.2f", value);
         return v + "|" + ver + "|" + mat.name();
     }
+
+    public void tryWithdraw(String playerName, double amount, java.util.function.Consumer<Boolean> cb) {
+        if (playerName == null || playerName.isBlank() || amount <= 0) {
+            if (cb != null) cb.accept(false);
+            return;
+        }
+
+        long amountCents = toCents(amount);
+        if (amountCents <= 0) { if (cb != null) cb.accept(false); return; }
+
+        UnityCommands.getInstance().getPlayerInfo(playerName, data -> {
+            if (data == null) { if (cb != null) cb.accept(false); return; }
+
+            long curCents = toCents(data.money);
+            if (curCents < amountCents) {
+                if (cb != null) cb.accept(false);
+                return;
+            }
+
+            long newCents = curCents - amountCents;
+
+            new BukkitRunnable() {
+                @Override public void run() {
+                    Map<String, Object> upd = new HashMap<>();
+                    upd.put("money", centsToDouble(newCents));
+                    UnityCommands.getInstance().mergeAndUpdatePlayerData(playerName, "GeneralData", upd);
+                    if (cb != null) cb.accept(true);
+                }
+            }.runTaskAsynchronously(UnityLauncher.getInstance());
+        });
+    }
+
 }

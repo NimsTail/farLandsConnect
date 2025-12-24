@@ -9,6 +9,7 @@ import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.tab.LuckPermsPrefixService;
 import com.frammy.unitylauncher.tab.TabPrefixService;
 import com.frammy.unitylauncher.upgrades.BrandCommand;
+import com.frammy.unitylauncher.upgrades.HospitalUpgradesManager;
 import com.frammy.unitylauncher.upgrades.UpgradesConfig;
 import com.frammy.unitylauncher.upgrades.UpgradesListener;
 import com.frammy.unitylauncher.zones.ZoneActivityCalculations;
@@ -37,12 +38,10 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 import javax.sql.DataSource;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.PrintWriter;
-import java.io.StringWriter;
+import java.io.*;
 import java.sql.*;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class UnityLauncher extends JavaPlugin implements Listener {
@@ -52,7 +51,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     public static UnityLauncher getInstance() { return instance; }
 
     // === managers / services ===
-    private final Set<Player> awaitingCorrectCommand = new HashSet<>();
+    private final Set<UUID> awaitingCorrectCommand = ConcurrentHashMap.newKeySet();
     public final List<String> commandCategories = new ArrayList<>();
     public LuckPermsPrefixService luckPermsPrefixService;
     public MoneyManager moneyManager;
@@ -63,7 +62,6 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     private WebSocketManager webSocketManager;
     private BlueMapIntegration blueMapIntegration;
     private LoginRateLimiter loginLimiter;
-    private AdvancementsManager advancementsManager;
 
     public DiplomacyService diplomacy;
     public CountryRegistryJdbc countryRegistryJdbc;
@@ -75,6 +73,11 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     private UpgradesConfig upgradesConfig;
     private ZonesEconomyConfig zonesEconomyConfig;
     private DailyEconomyTask dailyEconomyTask;
+    private com.frammy.unitylauncher.upgrades.BankUpgradesManager bankUpgradesManager;
+    private com.frammy.unitylauncher.upgrades.ParkUpgradesManager parkUpgradesManager;
+    private com.frammy.unitylauncher.upgrades.HospitalUpgradesManager hospitalUpgradesManager;
+    private com.frammy.unitylauncher.upgrades.LibraryUpgradesManager libraryUpgradesManager;
+    private com.frammy.unitylauncher.upgrades.StateUpgradesManager stateUpgradesManager;
 
     // server messages (join/quit/advancement)
     private ServerMessagesListener serverMessagesListener;
@@ -92,7 +95,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     public ZoneManager getZoneManager() { return zoneManager; }
     public ZoneActivityCalculations getZoneActivityCalculations() { return zoneActivityCalculations; }
     public DataSource getDataSource() { return hikari; }
-    public Set<Player> getAwaitingCorrectCommand() { return awaitingCorrectCommand; }
+    public Set<UUID> getAwaitingCorrectCommand() { return awaitingCorrectCommand; }
     public CountryRegistryJdbc getCountryRegistryJdbc() { return countryRegistryJdbc; }
     public AuthListener getAuthListener() { return authListener; }
     public AuthService getAuthService() { return authService; }
@@ -291,12 +294,29 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
         // --- main config + upgrades + zones ---
         saveDefaultConfig();
-        UpgradesListener.registerAll(this);
+        // Создаём конфиг платных дорог из resources, если его нет
+        saveResource("toll_roads.yml", false);
+        saveResource("state_upgrades.yml", false);
+
+        // Создаём файл данных StateUpgrades, если его нет (пустой)
+        createIfMissing("state_upgrades_data.yml");
+
+        this.upgradesConfig = UpgradesConfig.load(this);
         zoneManager.loadZonesFromConfig();
         getLogger().info("[UL] Zones loaded: " + zoneManager.getZones().size());
 
+        UpgradesListener.registerAll(this);
+
+        this.hospitalUpgradesManager = new HospitalUpgradesManager(this, zoneManager, upgradesConfig);
+        getServer().getPluginManager().registerEvents(this.hospitalUpgradesManager, this);
+
+        zoneManager.setHospitalUpgradesManager(this.hospitalUpgradesManager);
+        this.hospitalUpgradesManager.rebuildSanitaryIndex();
+
+        this.hospitalUpgradesManager.start();
+
         // --- /brand команда ---
-        BrandCommand brandCmd = new BrandCommand();
+        BrandCommand brandCmd = new BrandCommand(this, upgradesConfig);
         Objects.requireNonNull(getCommand("brand"), "command 'brand' not found in plugin.yml")
                 .setExecutor(brandCmd);
         Objects.requireNonNull(getCommand("brand"), "command 'brand' not found in plugin.yml")
@@ -323,12 +343,41 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         });
         this.luckPermsPrefixService = new LuckPermsPrefixService(this);
 
-        this.upgradesConfig = UpgradesConfig.load(this);
         this.zonesEconomyConfig = ZonesEconomyConfig.load(this);
 
         UserActivityJdbc userActivityJdbc = new UserActivityJdbc(this);
         this.dailyEconomyTask = new DailyEconomyTask(this, countryRegistryJdbc, userActivityJdbc, zonesEconomyConfig);
         this.dailyEconomyTask.start();
+
+        new com.frammy.unitylauncher.upgrades.ColonyFoodRationTask(this, upgradesConfig).start();
+
+        // --- Bank upgrades manager ---
+        this.bankUpgradesManager = new com.frammy.unitylauncher.upgrades.BankUpgradesManager(this, zoneManager, upgradesConfig);
+        getServer().getPluginManager().registerEvents(this.bankUpgradesManager, this);
+        this.bankUpgradesManager.start();
+
+        // --- Park upgrades manager ---
+        this.parkUpgradesManager = new com.frammy.unitylauncher.upgrades.ParkUpgradesManager(this, zoneManager, upgradesConfig);
+        getServer().getPluginManager().registerEvents(this.parkUpgradesManager, this);
+        this.parkUpgradesManager.start();
+
+        // --- Library upgrades manager ---
+        this.libraryUpgradesManager = new com.frammy.unitylauncher.upgrades.LibraryUpgradesManager(this, zoneManager, upgradesConfig);
+        getServer().getPluginManager().registerEvents(this.libraryUpgradesManager, this);
+        this.libraryUpgradesManager.start();
+
+        // --- State upgrades manager ---
+        this.stateUpgradesManager = new com.frammy.unitylauncher.upgrades.StateUpgradesManager(this, zoneManager, upgradesConfig, moneyManager, countryRelationshipDao);
+        getServer().getPluginManager().registerEvents(this.stateUpgradesManager, this);
+        this.stateUpgradesManager.start();
+
+        // --- State upgrades commands ---
+        com.frammy.unitylauncher.upgrades.StateUpgradesCommands stateCmd =
+                new com.frammy.unitylauncher.upgrades.StateUpgradesCommands(this.stateUpgradesManager);
+        Objects.requireNonNull(getCommand("state"), "command 'state' not found in plugin.yml")
+                .setExecutor(stateCmd);
+        Objects.requireNonNull(getCommand("state"), "command 'state' not found in plugin.yml")
+                .setTabCompleter(stateCmd);
 
         // --- AUTH ---
         this.authService  = new AuthService();
@@ -342,9 +391,8 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         this.serverMessagesListener = ServerMessagesListener.init(this);
 
         // --- Я тут втиснусь со своими ачивками, ок? ---
-        advancementsManager = new AdvancementsManager(this);
+        AdvancementsManager advancementsManager = new AdvancementsManager(this);
         advancementsManager.init();
-
 
         getLogger().info("UnityLauncher enabled!");
     }
@@ -440,6 +488,46 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             e.printStackTrace();
         }
 
+        // --- stop bank upgrades manager ---
+        try {
+            if (bankUpgradesManager != null) bankUpgradesManager.stop();
+        } catch (Exception e) {
+            getLogger().warning("[UnityLauncher] bankUpgradesManager.stop() failed: " + e.getMessage());
+            e.printStackTrace();
+        }
+
+        // --- stop park upgrades manager ---
+        try {
+            if (parkUpgradesManager != null) parkUpgradesManager.stop();
+        } catch (Exception e) {
+            getLogger().warning("[UnityLauncher] parkUpgradesManager.stop() failed: " + e.getMessage());
+            e.printStackTrace();
+        }
+
+        // --- stop hospital upgrades manager ---
+        try {
+            if (hospitalUpgradesManager != null) hospitalUpgradesManager.stop();
+        } catch (Exception e) {
+            getLogger().warning("[UnityLauncher] hospitalUpgradesManager.stop() failed: " + e.getMessage());
+            e.printStackTrace();
+        }
+
+        // --- stop library upgrades manager ---
+        try {
+            if (libraryUpgradesManager != null) libraryUpgradesManager.stop();
+        } catch (Exception e) {
+            getLogger().warning("[UnityLauncher] libraryUpgradesManager.stop() failed: " + e.getMessage());
+            e.printStackTrace();
+        }
+
+        // --- stop state upgrades manager ---
+        try {
+            if (stateUpgradesManager != null) stateUpgradesManager.stop();
+        } catch (Exception e) {
+            getLogger().warning("[UnityLauncher] stateUpgradesManager.stop() failed: " + e.getMessage());
+            e.printStackTrace();
+        }
+
         // --- shutdown DB pool ---
         if (hikari != null) {
             try { hikari.close(); } catch (Throwable ignore) {}
@@ -458,15 +546,18 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     @EventHandler
     public void onChat(AsyncPlayerChatEvent event) {
         String message = event.getMessage();
-        if (message.startsWith("fps://")) {
-            event.setCancelled(true);
+        if (!message.startsWith("fps://")) return;
 
-            TextComponent clickableMessage = new TextComponent("§a" + message);
-            clickableMessage.setHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, new Text("§aОткрыть ссылку §7" + message)));
-            clickableMessage.setClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/ul fpslink " + message));
+        event.setCancelled(true);
 
-            event.getPlayer().spigot().sendMessage(clickableMessage);
-        }
+        Player p = event.getPlayer();
+        TextComponent clickableMessage = new TextComponent("§a" + message);
+        clickableMessage.setHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, new Text("§aОткрыть ссылку §7" + message)));
+        clickableMessage.setClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/ul fpslink " + message));
+
+        Bukkit.getScheduler().runTask(this, () -> {
+            if (p.isOnline()) p.spigot().sendMessage(clickableMessage);
+        });
     }
 
     // update action bar zone name only when player crosses block boundary
@@ -486,10 +577,16 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     @EventHandler
     public void onPlayerChat(AsyncPlayerChatEvent event) {
         Player player = event.getPlayer();
-        if (awaitingCorrectCommand.contains(player)) {
-            player.sendMessage(ChatColor.RED + "Ты не можешь отправлять сообщения, пока не укажешь границы магазина. Используй: /ul shop addcorner");
-            event.setCancelled(true);
-        }
+        if (!awaitingCorrectCommand.contains(player.getUniqueId())) return;
+
+        event.setCancelled(true);
+
+        Bukkit.getScheduler().runTask(this, () -> {
+            if (player.isOnline()) {
+                player.sendMessage(ChatColor.RED +
+                        "Ты не можешь отправлять сообщения, пока не укажешь границы магазина. Используй: /ul shop addcorner");
+            }
+        });
     }
 
     // register websocket session on join
@@ -507,7 +604,15 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     }
 
     public void addPlayerToWaitList(Player player) {
-        awaitingCorrectCommand.add(player);
+        if (player != null) awaitingCorrectCommand.add(player.getUniqueId());
+    }
+
+    public void removePlayerFromWaitList(Player player) {
+        if (player != null) awaitingCorrectCommand.remove(player.getUniqueId());
+    }
+
+    public boolean isPlayerInWaitList(Player player) {
+        return player != null && awaitingCorrectCommand.contains(player.getUniqueId());
     }
 
     public int getMaxBaseLength(Collection<String> values) {
@@ -556,6 +661,18 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
     public CountryRegistryJdbc getCountryRegistry() {
         return countryRegistryJdbc;
+    }
+
+    public com.frammy.unitylauncher.upgrades.StateUpgradesManager getStateUpgradesManager() {
+        return stateUpgradesManager;
+    }
+
+    public com.frammy.unitylauncher.upgrades.BankUpgradesManager getBankUpgradesManager() {
+        return bankUpgradesManager;
+    }
+
+    public com.frammy.unitylauncher.upgrades.LibraryUpgradesManager getLibraryUpgradesManager() {
+        return libraryUpgradesManager;
     }
     /* ===================== DATABASE ===================== */
 
@@ -696,6 +813,24 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         var props = new Properties();
         try (var in = new java.io.FileInputStream(f)) { props.load(in); }
         return props;
+    }
+
+    private void createIfMissing(String fileName) {
+        File f = new File(getDataFolder(), fileName);
+        if (f.exists()) return;
+
+        if (!getDataFolder().exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            getDataFolder().mkdirs();
+        }
+
+        try {
+            //noinspection ResultOfMethodCallIgnored
+            f.createNewFile();
+            getLogger().info("[UL] Created " + fileName);
+        } catch (IOException e) {
+            getLogger().warning("[UL] Failed to create " + fileName + ": " + e.getMessage());
+        }
     }
 
     /* ===================== User-facing error helper ===================== */

@@ -70,6 +70,17 @@ public class ZoneManager {
 
     private static final double Y_MIN = -64, Y_MAX = 255;
 
+    // Optional hook: hospital sanitary index rebuild
+    private com.frammy.unitylauncher.upgrades.HospitalUpgradesManager hospitalUpgradesManager;
+    public void setHospitalUpgradesManager(com.frammy.unitylauncher.upgrades.HospitalUpgradesManager mgr) {
+        this.hospitalUpgradesManager = mgr;
+    }
+    private void notifyZonesChanged() {
+        if (hospitalUpgradesManager != null) {
+            hospitalUpgradesManager.rebuildSanitaryIndex();
+        }
+    }
+
     /** Иммутабельная копия всех зон для безопасного чтения. */
     public List<ZoneInfo> getAllZonesSnapshot() {
         // zoneList — это Map<String, ZoneInfo> со всеми зонами по markerID
@@ -144,7 +155,7 @@ public class ZoneManager {
     }
 
     public final Map<ZoneType, ZoneTypeData> zoneLimits = new HashMap<>() {{
-        // displayName, areaLimit, index(приоритет), baseCost, allowOverlap, areaMultiplier, minSize, perm
+        // displayName, areaLimit, index(приоритет), minSize, allowOverlap, costMultiplier, quota, requiredPermission
         // Чем БОЛЬШЕ index, тем ВЫШЕ по иерархии (отображение / update / т.п.)
 
         put(ZoneType.COUNTRY,    new ZoneTypeData("Государство",      30000.0, 1, 100.0,  false, 0.70,  0, "unityLauncher.createZone.country"));
@@ -153,7 +164,7 @@ public class ZoneManager {
         put(ZoneType.BANK,       new ZoneTypeData("Банк",               300.0, 4,  20.0,  false, 1.0, 150, "unityLauncher.createZone.bank"));
         put(ZoneType.HOSPITAL,   new ZoneTypeData("Госпиталь",          700.0, 4,  15.0,  false, 1.0, 200, "unityLauncher.createZone.hospital"));
         put(ZoneType.INDUSTRIAL, new ZoneTypeData("Промышленная зона", 1000.0, 4,  20.0,  false, 1.15, 50, "unityLauncher.createZone.industrial"));
-        put(ZoneType.PARK,       new ZoneTypeData("Парк",              1000.0, 4,  30.0,  false, 0.85,  0, "unityLauncher.createZone.region"));
+        put(ZoneType.PARK,       new ZoneTypeData("Парк",              1000.0, 4,  30.0,  false, 0.85,  0, "unityLauncher.createZone.park"));
         put(ZoneType.CHURCH,     new ZoneTypeData("Церковь",            500.0, 4,  10.0,  false, 1.0,  20, "unityLauncher.createZone.church"));
         put(ZoneType.LIBRARY,    new ZoneTypeData("Библиотека",         500.0, 4,  10.0,  false, 1.0,  20, "unityLauncher.createZone.library"));
         put(ZoneType.GREENHOUSE, new ZoneTypeData("Теплица",            900.0, 4,   5.0,  false, 1.0,  20, "unityLauncher.createZone.greenhouse"));
@@ -251,8 +262,8 @@ public class ZoneManager {
                 }
             }
         }
-
         if (needsSave) saveZonesToConfig();
+        notifyZonesChanged();
     }
 
 // ========= ПЛАВНЫЙ ПЕРЕСЧЁТ ВЛАДЕЛЬЦЕВ ТАБЛИЧЕК ПОСЛЕ СТАРТА =========
@@ -602,6 +613,7 @@ public class ZoneManager {
 
         zonePoints.remove(p.getUniqueId());
         saveZonesToConfig();
+        notifyZonesChanged();
     }
 
     /** Создание обычных зон: принадлежат игроку, страна НЕ проставляется при создании. */
@@ -634,6 +646,11 @@ public class ZoneManager {
         if (area > ztdBuild.areaLimit()) {
             p.sendMessage(ChatColor.RED + "Площадь превышает максимум для " + type + ": "
                     + (int) area + " > " + (int) ztdBuild.areaLimit() + " блоков².");
+            return;
+        }
+
+        // Глобальный ограничитель: сколько зон этого типа может иметь владелец
+        if (!checkZoneQuota(p, type)) {
             return;
         }
 
@@ -799,6 +816,7 @@ public class ZoneManager {
         }
 
         saveZonesToConfig();
+        notifyZonesChanged();
     }
 
     // ==== Overlap helpers ====
@@ -982,6 +1000,7 @@ public class ZoneManager {
                 upsertBlueMapMarker(zi, zi.getFillColor());
                 lastCornersEditByMarker.put(zi.getMarkerID(), System.currentTimeMillis());
                 saveZonesToConfig();
+                notifyZonesChanged();
             }
             case "name" -> {
                 if (zi.getType() == ZoneType.COUNTRY) {
@@ -1130,6 +1149,7 @@ public class ZoneManager {
             // Сбрасываем lastZone игрока и сохраняем YAML
             playerLastZone.remove(p.getUniqueId());
             saveZonesToConfig();
+            notifyZonesChanged();
 
             // 3) Асинхронная очистка по БД — как у тебя было, только используем countryName
             String finalCountryName = countryName;
@@ -1190,6 +1210,7 @@ public class ZoneManager {
 
         // Фиксируем YAML
         saveZonesToConfig();
+        notifyZonesChanged();
     }
 
     public void cancelRemoveZone(Player p) {
@@ -1676,7 +1697,7 @@ public class ZoneManager {
 
         Polygon pa = toJtsPolygon(a);
         Polygon pb = toJtsPolygon(b);
-        if (pa == null || pb == null) return false;
+        if (pa == null || pb == null) return true;
 
         try {
             // touches/overlaps/intersects — всё считаем пересечением границ
@@ -1778,5 +1799,107 @@ public class ZoneManager {
         String la = shopLabelAt(a), lb = shopLabelAt(b);
         return la != null && la.equals(lb);
     }
+
+    // ==== Country helpers for upgrades ====
+
+    /**
+     * Чья страна/колония в этой точке.
+     * Возвращает "живое" имя страны (как в БД/зоне), БЕЗ нормализации.
+     * Может вернуть null, если точка вне стран/колоний.
+     */
+    public String getCountryAt(Location loc) {
+        if (loc == null || loc.getWorld() == null) return null;
+
+        ZoneInfo here = getZoneAt(loc);
+        if (here == null) return null;
+
+        // 1) Если зона сама страна или колония — берём её страну
+        String c = zoneCountry(here);
+        if (c != null && !c.isBlank()) {
+            return c;
+        }
+
+        // 2) Если это внутренняя зона без ownerCountry —
+        //    ищем родителя COUNTRY / COLONY, который её целиком содержит
+        try {
+            ZoneInfo parent = findSingleContainingZoneOfTypes(
+                    here.getCorners(),
+                    java.util.Set.of(ZoneType.COUNTRY, ZoneType.COLONY)
+            );
+            if (parent != null) {
+                String pc = zoneCountry(parent);
+                if (pc != null && !pc.isBlank()) return pc;
+            }
+        } catch (Throwable ignored) {
+            // в худшем случае вернём null
+        }
+
+        // 3) fallback: если у самой зоны был ownerCountry, но zoneCountry не вернул — на всякий
+        String own = here.getCountryName();
+        return (own != null && !own.isBlank()) ? own : null;
+    }
+
+    /**
+     * Та же страна, но уже нормализованная (как normCountry в этом классе).
+     * Удобно для сравнения и вызовов countryMaxLevel(...).
+     */
+    public String getCountryCanonicalAt(Location loc) {
+        String c = getCountryAt(loc);
+        return c != null ? normCountry(c) : null;
+    }
+
+    /**
+     * Нормализованное имя страны для конкретной зоны (COUNTRY/COLONY/внутренняя).
+     * Использует те же правила, что и zoneCountry(...) + normCountry(...).
+     */
+    public String getCountryCanonicalOfZone(ZoneInfo z) {
+        String c = zoneCountry(z);
+        return c != null ? normCountry(c) : null;
+    }
+
+    /** Считает, сколько зон данного типа уже принадлежит игроку (по имени владельца). */
+    private int countOwnedZones(Player p, ZoneType type) {
+        String name = p.getName();
+        int count = 0;
+        for (ZoneInfo z : zoneList.values()) {
+            if (z.getType() != type) continue;
+            if (!NameUtil.eqCi(z.getOwner(), name)) continue;
+            count++;
+        }
+        return count;
+    }
+
+    /** Базовый лимит зон типа type, если у игрока нет спец-пермишенов. 0 = без лимита. */
+    private int getDefaultZoneQuota(ZoneType type) {
+        ZoneTypeData ztd = zoneLimits.get(type);
+        return (ztd != null ? ztd.quota() : 0);
+    }
+
+    /**
+     * Максимальное количество зон этого типа для игрока с учётом пермишенов.
+     * Схема пермишена: <base>.<type>.<N>, например unity.zone.quota.bank.3
+     * Берём максимальный N, на который у игрока есть право.
+     */
+    /** Максимальное количество зон этого типа для игрока (только дефолт из zoneLimits). */
+    private int getZoneQuotaFor(Player p, ZoneType type) {
+        // quota=0 -> без лимита
+        return getDefaultZoneQuota(type);
+    }
+
+    /** Проверка лимита зон перед созданием. true, если можно создавать дальше. */
+    private boolean checkZoneQuota(Player p, ZoneType type) {
+        int quota = getZoneQuotaFor(p, type);
+        if (quota <= 0) return true;
+
+        int owned = countOwnedZones(p, type);
+        if (owned >= quota) {
+            p.sendMessage(ChatColor.RED + "Лимит зон типа " + ChatColor.GOLD + type +
+                    ChatColor.RED + " достигнут: " + ChatColor.YELLOW + quota +
+                    ChatColor.RED + ". У вас уже " + ChatColor.YELLOW + owned + ChatColor.RED + ".");
+            return false;
+        }
+        return true;
+    }
+
 
 }

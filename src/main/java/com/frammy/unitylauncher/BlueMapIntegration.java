@@ -171,7 +171,8 @@ public class BlueMapIntegration {
 
                     if (p != null) p.sendMessage(ChatColor.GREEN + "Торговая точка успешно создана!");
                     markerPoints.clear();
-                    plugin.getAwaitingCorrectCommand().remove(p);
+                    assert p != null;
+                    plugin.getAwaitingCorrectCommand().remove(p.getUniqueId());
                 }
 
                 case "point_atm" -> {

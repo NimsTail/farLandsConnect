@@ -57,7 +57,7 @@ public class UnityCommands {
                                    JsonObject general,
                                    JsonObject stats,
                                    long loadedAt) {
-        boolean isExpired(long nowMs) { return nowMs - loadedAt > PLAYER_CACHE_TTL_MS; }
+        boolean isFresh(long nowMs) { return nowMs - loadedAt <= PLAYER_CACHE_TTL_MS; }
     }
 
     private static JsonObject safeParseObject(String json) {
@@ -94,7 +94,7 @@ public class UnityCommands {
     private CachedPlayerRow getOrLoadCachedPlayer(String playerName) {
         long now = System.currentTimeMillis();
         CachedPlayerRow row = playerCache.get(playerName);
-        if (row != null && !row.isExpired(now)) return row;
+        if (row != null && row.isFresh(now)) return row;
         try {
             CachedPlayerRow fresh = loadPlayerRowFromDB(playerName);
             if (fresh != null) {
@@ -153,7 +153,7 @@ public class UnityCommands {
             // 1) Берём текущий JSON: сначала из кэша (если не просрочен), иначе из БД
             JsonObject current;
             CachedPlayerRow cached = playerCache.get(playerName);
-            if (cached != null && !cached.isExpired(System.currentTimeMillis())) {
+            if (cached != null && cached.isFresh(System.currentTimeMillis())) {
                 current = switch (column) {
                     case "CustomizationData" -> cached.customization.deepCopy();
                     case "SocialData"        -> cached.social.deepCopy();

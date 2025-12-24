@@ -20,13 +20,22 @@ import java.util.stream.Stream;
 
 public class BrandCommand implements TabExecutor {
 
-    // Ключи для PDC
-    private static final NamespacedKey KEY_BRAND =
-            new NamespacedKey(UnityLauncher.getInstance(), "brand.made_by");   // текст: ник или custom-текст
-    private static final NamespacedKey KEY_TIME =
-            new NamespacedKey(UnityLauncher.getInstance(), "brand.time");
-    private static final NamespacedKey KEY_OWNER =
-            new NamespacedKey(UnityLauncher.getInstance(), "brand.owner");     // владелец бренда (ник)
+    private final UpgradesConfig C;
+
+    // СДЕЛАТЬ static
+    private static NamespacedKey KEY_BRAND;
+    private static NamespacedKey KEY_TIME;
+    private static NamespacedKey KEY_OWNER;
+
+    public BrandCommand(UnityLauncher plugin, UpgradesConfig config) {
+        this.C = config;
+
+        if (KEY_BRAND == null) {
+            KEY_BRAND = new NamespacedKey(plugin, "brand.made_by");
+            KEY_TIME  = new NamespacedKey(plugin, "brand.time");
+            KEY_OWNER = new NamespacedKey(plugin, "brand.owner");
+        }
+    }
 
     // Формат времени для второй строки
     private static final SimpleDateFormat FMT = new SimpleDateFormat("HH:mm dd.MM.yyyy");
@@ -56,8 +65,10 @@ public class BrandCommand implements TabExecutor {
             sender.sendMessage("Команда только для игроков.");
             return true;
         }
-        if (!p.hasPermission("unity.brand")) {
-            p.sendMessage(ChatColor.RED + "Нет прав: unity.brand");
+
+        assert C.brandPerm != null;
+        if (!p.hasPermission(C.brandPerm)) {
+            p.sendMessage(ChatColor.RED + "Нет прав: " + ChatColor.YELLOW + C.brandPerm);
             return true;
         }
 
@@ -176,7 +187,7 @@ public class BrandCommand implements TabExecutor {
         if (meta == null) return ClearResult.NO_BRAND;
 
         // Определяем владельца (PDC -> fallback из lore)
-        String owner = getBrandOwner(meta, s);
+        String owner = getBrandOwner(meta);
 
         // Нет владельца: обычному игроку запрещаем, админу — разрешаем
         if (owner == null && !adminBypass) {
@@ -224,7 +235,7 @@ public class BrandCommand implements TabExecutor {
     }
 
     /** Имя владельца из PDC или из lore; null — если определить нельзя. */
-    private static String getBrandOwner(ItemMeta meta, ItemStack stack) {
+    private static String getBrandOwner(ItemMeta meta) {
         if (meta == null) return null;
         PersistentDataContainer pdc = meta.getPersistentDataContainer();
 
@@ -251,7 +262,7 @@ public class BrandCommand implements TabExecutor {
     private static String getBrandOwnerName(ItemStack s) {
         ItemMeta meta = s.getItemMeta();
         if (meta == null) return null;
-        return getBrandOwner(meta, s);
+        return getBrandOwner(meta);
     }
 
     private static boolean containsMark(List<String> lore, String mark) {
@@ -302,7 +313,7 @@ public class BrandCommand implements TabExecutor {
         List<String> lore = meta.hasLore() ? meta.getLore() : null;
         List<String> parts = getStrings(lore);
 
-        String owner = getBrandOwner(meta, s);
+        String owner = getBrandOwner(meta);
         if (owner != null && !owner.isBlank()) {
             parts.addFirst(ChatColor.GRAY + "Владелец: " + ChatColor.GOLD + owner);
         }
