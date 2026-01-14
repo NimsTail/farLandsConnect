@@ -8,18 +8,38 @@ import net.luckperms.api.LuckPermsProvider;
 import net.luckperms.api.model.group.Group;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.entity.Player;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
 
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 public final class UpgradeCondition {
 
     private UpgradeCondition() {}
+    public enum GatingAction {
+        CRAFT,
+        USE
+    }
 
-    public static boolean DEBUG = false;
+    private static boolean debug() {
+        try {
+            var pl = UnityLauncher.getInstance();
+            if (pl == null) return false;
+            var um = pl.getUpgradesManager();
+            if (um == null) return false;
+            var c = um.config();
+            if (c == null) return false;
+            return c.core().debug();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     private static void d(String msg) {
-        DEBUG = UpgradesListener.DEBUG;
-        if (DEBUG) Bukkit.getLogger().info("[UL/UpgradeCondition] " + msg);
+        if (debug()) Bukkit.getLogger().info("[UL/UpgradeCondition] " + msg);
     }
 
     /* =====================
@@ -51,14 +71,11 @@ public final class UpgradeCondition {
         return normalizeCountry(cn);
     }
 
-    // кто владеет локацией (COUNTRY или COLONY), вернуть канон. имя страны
-    public static String locationCountryOwner(Location loc) {
-        ZoneInfo z = zoneAt(loc);
-        if (z == null) return null;
-        ZoneType t = z.getType();
-        if (t != ZoneType.COUNTRY && t != ZoneType.COLONY) return null;
-
-        return zoneCountryCanonical(z);
+    public static String countryCanonicalAt(org.bukkit.Location loc) {
+        if (loc == null) return null;
+        var ul = com.frammy.unitylauncher.UnityLauncher.getInstance();
+        if (ul == null || ul.getZoneManager() == null) return null;
+        return ul.getZoneManager().getCountryCanonicalAt(loc);
     }
 
     /* =====================
@@ -111,7 +128,11 @@ public final class UpgradeCondition {
             LuckPerms lp = LuckPermsProvider.get();
             var opts = lp.getContextManager().getStaticQueryOptions();
             boolean ok = g.getCachedData().getPermissionData(opts).checkPermission(node).asBoolean();
-            if (ok) NODE_TRUE_CACHE.put(nk(canonicalCountry, node), now);
+            if (ok) {
+                if (NODE_TRUE_CACHE.size() > 50_000) NODE_TRUE_CACHE.clear();
+                NODE_TRUE_CACHE.put(nk(canonicalCountry, node), now);
+            }
+
             return ok;
         } catch (Throwable t) {
             d("countryHasNode EX " + t);
@@ -175,6 +196,28 @@ public final class UpgradeCondition {
         }
     }
 
+    // кто владеет локацией (COUNTRY или COLONY), вернуть канон. имя страны
+    // ВАЖНО: работает "сквозь" дочерние зоны (industrial/shop/church/...)
+    public static String locationCountryOwner(Location loc) {
+        if (loc == null) return null;
+
+        try {
+            var zm = UnityLauncher.getInstance().getZoneManager();
+            if (zm == null) {
+                d("locationCountryOwner(" + p(loc) + ") -> zoneManager == null");
+                return null;
+            }
+
+            // ZoneManager уже умеет "глубоко" резолвить страну через родителя
+            String canon = zm.getCountryCanonicalAt(loc);
+            if (canon == null || canon.isBlank()) return null;
+            return canon;
+        } catch (Throwable t) {
+            d("locationCountryOwner EX " + t);
+            return null;
+        }
+    }
+
     /**
      * Грубая проверка: есть ли ХОТЬ ОДНА зона нужного типа,
      * внутри которой находится эта локация, игнорируя приоритет.
@@ -210,16 +253,26 @@ public final class UpgradeCondition {
         return false;
     }
 
-    public static boolean notInsideCountryOrColony(Location loc) {
-        ZoneInfo z = zoneAt(loc);
-        return z == null || (z.getType() != ZoneType.COUNTRY && z.getType() != ZoneType.COLONY);
-    }
+    public static String locationCountryOwnerDeep(Location loc) {
+        if (loc == null) return null;
 
-    public static boolean hasRedstoneUnlocked(Player p) {
-        if (p == null) return false;
-        boolean ok = p.isOp() || p.hasPermission("unity.upgrade.redstone.1") || p.hasPermission("unity.upgrade.redstone.2");
-        d("hasRedstoneUnlocked(" + p.getName() + ") -> " + ok);
-        return ok;
+        var zm = UnityLauncher.getInstance().getZoneManager();
+        if (zm == null) return null;
+
+        // 1) COUNTRY
+        for (ZoneInfo z : zm.getAllZonesSnapshot()) {
+            if (z.getType() != ZoneType.COUNTRY) continue;
+            if (z.contains2D(loc)) return z.getCountryName();
+        }
+
+        // 2) COLONY
+        for (ZoneInfo z : zm.getAllZonesSnapshot()) {
+            if (z.getType() != ZoneType.COLONY) continue;
+            if (z.contains2D(loc)) return z.getCountryName();
+        }
+
+        return null;
+
     }
 
     private static String p(Location l) {
@@ -230,4 +283,132 @@ public final class UpgradeCondition {
                 l.getBlockX(), l.getBlockY(), l.getBlockZ()
         );
     }
+
+    /* =====================
+   GATING HELPERS
+   ===================== */
+
+    public static Set<Material> parseMaterialSet(java.util.List<String> list) {
+        if (list == null || list.isEmpty()) return java.util.Set.of();
+
+        java.util.HashSet<Material> out = new java.util.HashSet<>();
+        for (String s : list) {
+            if (s == null || s.isBlank()) continue;
+            try {
+                out.add(Material.valueOf(s.trim().toUpperCase(java.util.Locale.ROOT)));
+            } catch (IllegalArgumentException ignored) {}
+        }
+        return java.util.Set.copyOf(out);
+    }
+
+    /**
+     * Универсальная проверка: можно ли игроку выполнять действие (CRAFT/USE) с данным материалом,
+     * если материал находится в blocked-списке. Разрешение выдаётся по стране игрока через пермишен basePermBase.<lvl>.
+     *
+     * Возвращает true если:
+     *  - материал не заблокирован для этого действия
+     *  - или у игрока есть unlock по стране (countryMaxLevel >= requiredLevel)
+     */
+    public static boolean gatingAllowedByCountry(
+            Player p,
+            Material mat,
+            GatingAction action,
+            Set<Material> blockedCraft,
+            Set<Material> blockedUse,
+            String unlockPermBase,
+            int requiredLevel
+    ) {
+        if (p == null || mat == null || action == null) return true;
+
+        boolean blocked = switch (action) {
+            case CRAFT -> blockedCraft != null && blockedCraft.contains(mat);
+            case USE -> blockedUse != null && blockedUse.contains(mat);
+        };
+
+        if (!blocked) return true;
+
+        String pc = playerCountryCanonical(p.getName());
+        if (pc == null || pc.isBlank()) return false;
+
+        return countryMaxLevel(pc, unlockPermBase, requiredLevel) >= requiredLevel;
+    }
+
+        /* =====================
+       POTION HELPERS
+       ===================== */
+
+    /**
+     * Умно применяет эффект:
+     * - если уже есть эффект этого типа с amplifier выше -> ничего не делаем
+     * - если amplifier такой же и длительность текущего >= новой -> ничего не делаем
+     * - иначе применяем (перезаписываем)
+     *
+     * @return true если эффект был применён/перезаписан, false если пропущен
+     */
+    public static boolean applyPotionSmart(
+            Player p,
+            PotionEffectType type,
+            int durationTicks,
+            int amplifier,
+            boolean ambient,
+            boolean particles,
+            boolean icon
+    ) {
+        if (p == null || type == null) return false;
+
+        if (durationTicks <= 0) {
+            // duration<=0: считаем что "нечего вешать"
+            return false;
+        }
+
+        if (amplifier < 0) {
+            // amplifier<0: считаем что "нечего вешать"
+            return false;
+        }
+
+        PotionEffect current = p.getPotionEffect(type);
+        if (current != null) {
+            int curAmp = current.getAmplifier();
+            int curDur = current.getDuration();
+
+            // есть более сильный эффект -> не трогаем
+            if (curAmp > amplifier) return false;
+
+            // тот же уровень и текущий дольше/равен -> не трогаем
+            if (curAmp == amplifier && curDur >= durationTicks) return false;
+        }
+
+        PotionEffect eff = new PotionEffect(type, durationTicks, amplifier, ambient, particles, icon);
+        // force=true: чтобы гарантированно перезаписать, когда мы решили что надо
+        p.addPotionEffect(eff, true);
+        return true;
+    }
+
+    /**
+     * Удобная обёртка: если amplifier>=0 -> applyPotionSmart, иначе remove.
+     *
+     * @return true если было применено/удалено, false если пропущено
+     */
+    public static boolean applyOrRemovePotionSmart(
+            Player p,
+            PotionEffectType type,
+            int amplifier,
+            int durationTicks,
+            boolean ambient,
+            boolean particles,
+            boolean icon
+    ) {
+        if (p == null || type == null) return false;
+
+        if (amplifier >= 0) {
+            return applyPotionSmart(p, type, durationTicks, amplifier, ambient, particles, icon);
+        }
+
+        if (p.hasPotionEffect(type)) {
+            p.removePotionEffect(type);
+            return true;
+        }
+        return false;
+    }
+
 }

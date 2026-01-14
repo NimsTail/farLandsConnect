@@ -33,6 +33,172 @@ public class AuthService {
     private static int ITER() { return UnityLauncher.getAuthIter(); }
     private static int KEY_LEN() { return UnityLauncher.getAuthKeyLen(); }
 
+    // --- defaults for new Users row ---
+    private static final String[] DEFAULT_AVATARS = new String[]{
+            "https://cdn.discordapp.com/attachments/447062336042303488/1158414689588490250/5f5d92d771d25e03b63198ea22bbd686.jpg",
+            "https://cdn.discordapp.com/attachments/447062336042303488/1158414689911447724/6c88c0b4f7c40b1eeb90d4d83e66752f.jpg",
+            "https://cdn.discordapp.com/attachments/447062336042303488/1158414690167308420/9d7daf7436190f91a911709a748be1d0.jpg",
+            "https://cdn.discordapp.com/attachments/447062336042303488/1158414690452516924/44c2757a1fccff9d6535d75030113930.jpg",
+            "https://cdn.discordapp.com/attachments/447062336042303488/1158414690712559806/506b170dd98aaf7cb72a34f443c371b9.jpg",
+            "https://cdn.discordapp.com/attachments/447062336042303488/1158414690993582190/b72dd83f24e172804ab7029f014e60b4.jpg",
+            "https://cdn.discordapp.com/attachments/447062336042303488/1158414691362676897/ccb14ab5b74116a50a020c3d03835402.jpg",
+            "https://cdn.discordapp.com/attachments/447062336042303488/1158414691656286208/d0599d30a02f44c8c5fe5d663d88e4c7.jpg",
+            "https://cdn.discordapp.com/attachments/447062336042303488/1158414691975045170/e410361349e7f0ad35ea873439075d8b.jpg",
+            "https://cdn.discordapp.com/attachments/447062336042303488/1158414692285419681/e916110647965958dc45006ec2398cec.jpg"
+    };
+
+    private static String jsonEscape(String s) {
+        if (s == null) return "";
+        StringBuilder sb = new StringBuilder(s.length() + 16);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '\\' -> sb.append("\\\\");
+                case '"'  -> sb.append("\\\"");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                default   -> sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
+    private static String pickDefaultAvatar() {
+        int idx = RNG.nextInt(DEFAULT_AVATARS.length);
+        return DEFAULT_AVATARS[idx];
+    }
+
+    /**
+     * Регистрация "как в PHP":
+     *  - проверяет уникальность (по Name)
+     *  - INSERT в Users со всеми дефолтными JSON полями
+     *  - Password кладём как pbkdf2$... (НЕ plaintext)
+     *
+     * @param regCode может быть null/"".
+     * @return true если создали новую запись, false если уже существует или ошибка.
+     */
+    public boolean registerNewUser(String player, char[] password, String regCode) {
+        if (player == null || player.isBlank() || password == null) return false;
+
+        try (Connection con = DBConnect()) {
+            if (con == null) return false;
+
+            // 1) uniqueness (как в PHP)
+            try (PreparedStatement ps = con.prepareStatement("SELECT 1 FROM Users WHERE Name=? LIMIT 1")) {
+                ps.setString(1, player);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) return false; // уже есть
+                }
+            }
+
+            // 2) Password PBKDF2 (то, что ты уже используешь)
+            byte[] userSalt = new byte[16];
+            RNG.nextBytes(userSalt);
+            String enc = encode(password, userSalt, ITER(), KEY_LEN());
+
+            // 3) JSON payloads (как в PHP)
+            String avatar = pickDefaultAvatar();
+            String nameEsc = jsonEscape(player);
+            String regEsc  = jsonEscape(regCode == null ? "" : regCode);
+            String avatarEsc = jsonEscape(avatar);
+
+            String customizationJson = "{"
+                    + "\"Name\":\"" + nameEsc + "\","
+                    + "\"bgURL\":\"\","
+                    + "\"frameID\":\"0\","
+                    + "\"avatarURL\":\"" + avatarEsc + "\""
+                    + "}";
+
+            String socialJson = "{"
+                    + "\"Name\":\"" + nameEsc + "\","
+                    + "\"vkURL\":\"\","
+                    + "\"otherURL\":\"\","
+                    + "\"discordID\":\"\","
+                    + "\"telegramID\":\"\","
+                    + "\"telegramURL\":\"\""
+                    + "}";
+
+            String generalJson = "{"
+                    + "\"Name\":\"" + nameEsc + "\","
+                    + "\"money\":0.0,"
+                    + "\"regCode\":\"" + regEsc + "\","
+                    + "\"shopSpots\":1,"
+                    + "\"countryName\":\"\","
+                    + "\"dayDealCode\":\"0\","
+                    + "\"notificationToggle\":true"
+                    + "}";
+
+            String statsJson = "{"
+                    + "\"Name\":\"" + nameEsc + "\","
+                    + "\"rating\":\"0;0;0\","
+                    + "\"playtime\":0,"
+                    + "\"eventsWon\":0,"
+                    + "\"totalPlaytime\":0"
+                    + "}";
+
+            // 4) INSERT
+            String sql = """
+    INSERT INTO Users
+    (Name, Password, `Last seen`, CustomizationData, SocialData, GeneralData, StatsData, AuthToken)
+    VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+""";
+
+            String lastSeen = "REGISTER"; // или "" если хочешь пусто
+
+            try (PreparedStatement ps = con.prepareStatement(sql)) {
+                ps.setString(1, player);            // Name
+                ps.setString(2, enc);               // Password (pbkdf2$...)
+                ps.setString(3, lastSeen);          // `Last seen`
+                ps.setString(4, customizationJson); // CustomizationData
+                ps.setString(5, socialJson);        // SocialData
+                ps.setString(6, generalJson);       // GeneralData
+                ps.setString(7, statsJson);         // StatsData
+
+                int rows = ps.executeUpdate();
+                if (rows <= 0) return false;
+            }
+
+            // 5) прогреем кэш (чтобы isRegisteredFast начал работать сразу)
+            updateCacheAfterPasswordSet(player, enc);
+            // сессия дальше выставится через AuthListener.completeRegister() -> auth.markSession()
+
+            return true;
+        } catch (Exception e) {
+            Bukkit.getLogger().warning("[Auth] registerNewUser: " + e.getMessage());
+            return false;
+        }
+    }
+
+    /** Есть ли вообще строка в Users по Name (как в PHP uniqueness check). */
+    public boolean userExists(String player) {
+        if (player == null || player.isBlank()) return false;
+        try (Connection con = DBConnect()) {
+            if (con == null) return false;
+            try (PreparedStatement ps = con.prepareStatement("SELECT 1 FROM Users WHERE Name=? LIMIT 1")) {
+                ps.setString(1, player);
+                try (ResultSet rs = ps.executeQuery()) {
+                    return rs.next();
+                }
+            }
+        } catch (Exception e) {
+            Bukkit.getLogger().warning("[Auth] userExists: " + e.getMessage());
+            return false;
+        }
+    }
+
+    public void updateLastSeen(String name, String value) {
+        try (Connection con = DBConnect();
+             PreparedStatement ps = con.prepareStatement(
+                     "UPDATE Users SET `Last seen`=? WHERE Name=?")) {
+            ps.setString(1, value);
+            ps.setString(2, name);
+            ps.executeUpdate();
+        } catch (Exception e) {
+            Bukkit.getLogger().warning("[Auth] updateLastSeen: " + e.getMessage());
+        }
+    }
+
     /**
      * @param phcHash          $argon2id$...  (или null, если не зарегистрирован)
      * @param lastAuthAtMs     until, если есть активная сессия

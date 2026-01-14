@@ -4,14 +4,13 @@ import com.frammy.unitylauncher.auth.AuthBossbarManager;
 import com.frammy.unitylauncher.auth.AuthListener;
 import com.frammy.unitylauncher.auth.AuthService;
 import com.frammy.unitylauncher.auth.LoginRateLimiter;
+import com.frammy.unitylauncher.bluemapheat.BlueMapHeatService;
 import com.frammy.unitylauncher.chunkactivity.*;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.tab.LuckPermsPrefixService;
 import com.frammy.unitylauncher.tab.TabPrefixService;
-import com.frammy.unitylauncher.upgrades.BrandCommand;
-import com.frammy.unitylauncher.upgrades.HospitalUpgradesManager;
-import com.frammy.unitylauncher.upgrades.UpgradesConfig;
-import com.frammy.unitylauncher.upgrades.UpgradesListener;
+import com.frammy.unitylauncher.upgrades.core.UpgradesManager;
+import com.frammy.unitylauncher.upgrades.impl.*;
 import com.frammy.unitylauncher.zones.ZoneActivityCalculations;
 import com.frammy.unitylauncher.zones.ZoneManager;
 import com.frammy.unitylauncher.zones.countryrelations.CountryRegistryJdbc;
@@ -62,6 +61,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     private WebSocketManager webSocketManager;
     private BlueMapIntegration blueMapIntegration;
     private LoginRateLimiter loginLimiter;
+    public BlueMapHeatService blueMapHeatService;
 
     public DiplomacyService diplomacy;
     public CountryRegistryJdbc countryRegistryJdbc;
@@ -70,14 +70,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     public AuthService authService;
     public AuthListener authListener;
     public AuthBossbarManager authBossbars;
-    private UpgradesConfig upgradesConfig;
     private ZonesEconomyConfig zonesEconomyConfig;
     private DailyEconomyTask dailyEconomyTask;
-    private com.frammy.unitylauncher.upgrades.BankUpgradesManager bankUpgradesManager;
-    private com.frammy.unitylauncher.upgrades.ParkUpgradesManager parkUpgradesManager;
-    private com.frammy.unitylauncher.upgrades.HospitalUpgradesManager hospitalUpgradesManager;
-    private com.frammy.unitylauncher.upgrades.LibraryUpgradesManager libraryUpgradesManager;
-    private com.frammy.unitylauncher.upgrades.StateUpgradesManager stateUpgradesManager;
+    private UpgradesManager upgradesManager;
 
     // server messages (join/quit/advancement)
     private ServerMessagesListener serverMessagesListener;
@@ -100,6 +95,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     public AuthListener getAuthListener() { return authListener; }
     public AuthService getAuthService() { return authService; }
     public LoginRateLimiter getLoginLimiter() { return loginLimiter; }
+    public UpgradesManager getUpgradesManager() { return upgradesManager; }
+    public ActivityTracker getActivityTracker() { return tracker; }
+    public MoneyManager getMoneyManager() { return moneyManager; }
 
     // cached db.properties + driver status
     private static volatile Properties DB_PROPS;
@@ -123,7 +121,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         Bukkit.getPluginManager().registerEvents(this, this);
 
         // --- money / balance accounting ---
-        moneyManager = new MoneyManager(getDataFolder(), "unity_launcher");
+        moneyManager = new MoneyManager(this);
         getServer().getPluginManager().registerEvents(moneyManager, this);
 
         // --- activity tracker (chunk activity sampling) ---
@@ -146,21 +144,11 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                 this,
                 getDataFolder(),
                 zoneManager,
-                blueMapIntegration,
-                UnityCommands.getInstance()
+                blueMapIntegration
         );
         zoneManager.setSignManager(signManager);
         getServer().getPluginManager().registerEvents(signManager, this);
-
-        // === ВАЖНО: грузим таблички ВСЕГДА, без привязки к BlueMap ===
-        try {
-            signManager.loadSignData();
-            getLogger().info("[UnityLauncher] signData.yml загружен ("
-                    + signManager.genericSignList.size() + " табличек)");
-        } catch (Throwable t) {
-            getLogger().warning("[UnityLauncher] signManager.loadSignData() failed on enable: " + t.getMessage());
-            t.printStackTrace();
-        }
+        signManager.enable();
 
         // --- activity-based billing & overlap multipliers for zones ---
         zoneActivityCalculations = new ZoneActivityCalculations(zoneManager);
@@ -246,21 +234,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
         // --- lazy BlueMap load (restore saved markers etc. after world is ready) ---
         new LazyBlueMapLoader(this).scheduleLazyLoad();
-
-        // --- export heatmap layer for BlueMap after startup ---
-        Bukkit.getScheduler().runTaskLater(this, () ->
-                Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
-                    try {
-                        var stats   = tracker.getChunkStatsMap();
-                        ActivityWeights weights = new ActivityWeights();
-                        Bukkit.getScheduler().runTask(this, () ->
-                                ChunkActivityHeatmapExporter.exportHeatmapToBlueMapLayer(stats, "world", weights)
-                        );
-                    } catch (Throwable t) {
-                        getLogger().severe("Ошибка экспорта тепловой карты: " + t.getMessage());
-                        t.printStackTrace();
-                    }
-                }), 40L);
+        // --- BlueMap viewport heat overlay (regions json + client-side markers) ---
+        this.blueMapHeatService = new com.frammy.unitylauncher.bluemapheat.BlueMapHeatService(this);
+        this.blueMapHeatService.start();
 
         // --- tab prefix sync for LuckPerms/scoreboard ---
         TabPrefixService tabPrefixService = getTabPrefixService();
@@ -292,35 +268,8 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             getLogger().info("[UL] ZoneManager OK");
         }
 
-        // --- main config + upgrades + zones ---
-        saveDefaultConfig();
-        // Создаём конфиг платных дорог из resources, если его нет
-        saveResource("toll_roads.yml", false);
-        saveResource("state_upgrades.yml", false);
-
-        // Создаём файл данных StateUpgrades, если его нет (пустой)
-        createIfMissing("state_upgrades_data.yml");
-
-        this.upgradesConfig = UpgradesConfig.load(this);
-        zoneManager.loadZonesFromConfig();
-        getLogger().info("[UL] Zones loaded: " + zoneManager.getZones().size());
-
-        UpgradesListener.registerAll(this);
-
-        this.hospitalUpgradesManager = new HospitalUpgradesManager(this, zoneManager, upgradesConfig);
-        getServer().getPluginManager().registerEvents(this.hospitalUpgradesManager, this);
-
-        zoneManager.setHospitalUpgradesManager(this.hospitalUpgradesManager);
-        this.hospitalUpgradesManager.rebuildSanitaryIndex();
-
-        this.hospitalUpgradesManager.start();
-
-        // --- /brand команда ---
-        BrandCommand brandCmd = new BrandCommand(this, upgradesConfig);
-        Objects.requireNonNull(getCommand("brand"), "command 'brand' not found in plugin.yml")
-                .setExecutor(brandCmd);
-        Objects.requireNonNull(getCommand("brand"), "command 'brand' not found in plugin.yml")
-                .setTabCompleter(brandCmd);
+        // === upgrades (single entrypoint) ===
+        upgradesManager = new UpgradesManager(this);
 
         // --- zone billing scheduler (daily cost calc + auto-billing async logic) ---
         zoneActivityCalculations.startZoneBillingScheduler();
@@ -349,36 +298,6 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         this.dailyEconomyTask = new DailyEconomyTask(this, countryRegistryJdbc, userActivityJdbc, zonesEconomyConfig);
         this.dailyEconomyTask.start();
 
-        new com.frammy.unitylauncher.upgrades.ColonyFoodRationTask(this, upgradesConfig).start();
-
-        // --- Bank upgrades manager ---
-        this.bankUpgradesManager = new com.frammy.unitylauncher.upgrades.BankUpgradesManager(this, zoneManager, upgradesConfig);
-        getServer().getPluginManager().registerEvents(this.bankUpgradesManager, this);
-        this.bankUpgradesManager.start();
-
-        // --- Park upgrades manager ---
-        this.parkUpgradesManager = new com.frammy.unitylauncher.upgrades.ParkUpgradesManager(this, zoneManager, upgradesConfig);
-        getServer().getPluginManager().registerEvents(this.parkUpgradesManager, this);
-        this.parkUpgradesManager.start();
-
-        // --- Library upgrades manager ---
-        this.libraryUpgradesManager = new com.frammy.unitylauncher.upgrades.LibraryUpgradesManager(this, zoneManager, upgradesConfig);
-        getServer().getPluginManager().registerEvents(this.libraryUpgradesManager, this);
-        this.libraryUpgradesManager.start();
-
-        // --- State upgrades manager ---
-        this.stateUpgradesManager = new com.frammy.unitylauncher.upgrades.StateUpgradesManager(this, zoneManager, upgradesConfig, moneyManager, countryRelationshipDao);
-        getServer().getPluginManager().registerEvents(this.stateUpgradesManager, this);
-        this.stateUpgradesManager.start();
-
-        // --- State upgrades commands ---
-        com.frammy.unitylauncher.upgrades.StateUpgradesCommands stateCmd =
-                new com.frammy.unitylauncher.upgrades.StateUpgradesCommands(this.stateUpgradesManager);
-        Objects.requireNonNull(getCommand("state"), "command 'state' not found in plugin.yml")
-                .setExecutor(stateCmd);
-        Objects.requireNonNull(getCommand("state"), "command 'state' not found in plugin.yml")
-                .setTabCompleter(stateCmd);
-
         // --- AUTH ---
         this.authService  = new AuthService();
         this.authBossbars = new AuthBossbarManager(this);
@@ -394,6 +313,67 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         AdvancementsManager advancementsManager = new AdvancementsManager(this);
         advancementsManager.init();
 
+        // --- daily deal reset on day change ---
+        DailyDealService dailyDealService = new DailyDealService(this);
+        dailyDealService.runOnStartup();
+
+        // регистрируем ВСЕ апгрейды ТОЛЬКО здесь, подряд:
+        var brandCmd = new com.frammy.unitylauncher.upgrades.impl.BrandCommand(this);
+
+        var b = getCommand("brand");
+        if (b != null) {
+            b.setExecutor(brandCmd);
+            b.setTabCompleter(brandCmd);
+        } else {
+            getLogger().severe("Command 'brand' is missing in plugin.yml");
+        }
+
+        upgradesManager.register(new AntiPhantomUpgrade());
+        upgradesManager.register(new BrewSpeedUpgrade());
+        upgradesManager.register(new ChurchUpgrade());
+        upgradesManager.register(new CountryEffectsUpgrade());
+
+        upgradesManager.register(new EcoFuelUpgrade());
+        upgradesManager.register(new FarmlandProtectionUpgrade());
+        upgradesManager.register(new FoodRationUpgrade());
+        upgradesManager.register(new FurnaceHeatBoostUpgrade());
+
+        upgradesManager.register(new FurnaceOreBonusUpgrade());
+        upgradesManager.register(new GoldenFoodUpgrade());
+        upgradesManager.register(new HopperSmartUpgrade());
+        upgradesManager.register(new LivestockUpgrade());
+        upgradesManager.register(new LoaderUpgrade());
+
+        upgradesManager.register(new NetheriteAndBeaconUpgrade());
+        upgradesManager.register(new RedstoneGatingUpgrade());
+
+        upgradesManager.register(new OutpostUpgrade());
+        upgradesManager.register(new RecyclerUpgrade());
+        upgradesManager.register(new TntQuarryUpgrade());
+
+        upgradesManager.register(new BloodGiftUpgrade());
+        upgradesManager.register(new DietUpgrade());
+        upgradesManager.register(new PsychSupportUpgrade());
+        upgradesManager.register(new RegenPulseUpgrade());
+        upgradesManager.register(new SafeZoneUpgrade());
+        upgradesManager.register(new SanitaryZoneUpgrade());
+        upgradesManager.register(new TriageUpgrade());
+
+        upgradesManager.register(new CalmUpgrade());
+        upgradesManager.register(new EducationUpgrade());
+        upgradesManager.register(new ScrollsUpgrade());
+
+        upgradesManager.register(new GardenerUpgrade());
+        upgradesManager.register(new QuietGuardUpgrade());
+        upgradesManager.register(new PondBedsUpgrade());
+        upgradesManager.register(new QuietHourUpgrade());
+        upgradesManager.register(new BenchesUpgrade());
+
+        upgradesManager.register(new DepositInterestUpgrade());
+        upgradesManager.register(new AtmFeesUpgrade());
+        upgradesManager.register(new SafeDepositUpgrade());
+
+        upgradesManager.start();
         getLogger().info("UnityLauncher enabled!");
     }
 
@@ -410,12 +390,19 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     @Override
     public void onDisable() {
 
+        try {
+            if (blueMapHeatService != null) blueMapHeatService.stop();
+        } catch (Throwable t) {
+            getLogger().warning("[UnityLauncher] blueMapHeatService.stop() failed: " + t.getMessage());
+        }
+
         // --- save sign data (shops etc.) ---
         try {
             if (signManager != null) {
                 signManager.saveSignData();
-                getLogger().info("[UnityLauncher] signData.yml сохранён (" +
-                        signManager.genericSignList.size() + " табличек)");
+                getLogger().info("[UnityLauncher] signData.yml сохранён ("
+                        + signManager.store().signs().size()
+                        + " табличек)");
             } else {
                 getLogger().warning("[UnityLauncher] signManager is null on disable — skipping saveSignData()");
             }
@@ -470,10 +457,10 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         // --- persist BlueMap markers ---
         try {
             if (blueMapIntegration != null) {
-                blueMapIntegration.saveBlueMapMarkers("zones_shop");
+                blueMapIntegration.saveAllBlueMapMarkersByPrefix("zones_");
+                blueMapIntegration.saveBlueMapMarkers("zones_signs");
                 blueMapIntegration.saveBlueMapMarkers("services");
                 blueMapIntegration.saveBlueMapMarkers("shops");
-                blueMapIntegration.saveBlueMapMarkers("chunk-activity");
             }
         } catch (Throwable t) {
             getLogger().warning("[UnityLauncher] blueMapIntegration save failed: " + t.getMessage());
@@ -488,76 +475,64 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             e.printStackTrace();
         }
 
-        // --- stop bank upgrades manager ---
-        try {
-            if (bankUpgradesManager != null) bankUpgradesManager.stop();
-        } catch (Exception e) {
-            getLogger().warning("[UnityLauncher] bankUpgradesManager.stop() failed: " + e.getMessage());
-            e.printStackTrace();
-        }
-
-        // --- stop park upgrades manager ---
-        try {
-            if (parkUpgradesManager != null) parkUpgradesManager.stop();
-        } catch (Exception e) {
-            getLogger().warning("[UnityLauncher] parkUpgradesManager.stop() failed: " + e.getMessage());
-            e.printStackTrace();
-        }
-
-        // --- stop hospital upgrades manager ---
-        try {
-            if (hospitalUpgradesManager != null) hospitalUpgradesManager.stop();
-        } catch (Exception e) {
-            getLogger().warning("[UnityLauncher] hospitalUpgradesManager.stop() failed: " + e.getMessage());
-            e.printStackTrace();
-        }
-
-        // --- stop library upgrades manager ---
-        try {
-            if (libraryUpgradesManager != null) libraryUpgradesManager.stop();
-        } catch (Exception e) {
-            getLogger().warning("[UnityLauncher] libraryUpgradesManager.stop() failed: " + e.getMessage());
-            e.printStackTrace();
-        }
-
-        // --- stop state upgrades manager ---
-        try {
-            if (stateUpgradesManager != null) stateUpgradesManager.stop();
-        } catch (Exception e) {
-            getLogger().warning("[UnityLauncher] stateUpgradesManager.stop() failed: " + e.getMessage());
-            e.printStackTrace();
-        }
-
         // --- shutdown DB pool ---
         if (hikari != null) {
             try { hikari.close(); } catch (Throwable ignore) {}
             hikari = null;
         }
 
+        try {
+            if (upgradesManager != null) upgradesManager.stop();
+        } catch (Throwable t) {
+            getLogger().warning("[UnityLauncher] upgradesManager.stop() failed: " + t.getMessage());
+            t.printStackTrace();
+        }
+
         instance = null;
         getLogger().info("UnityLauncher disabled.");
 
-        UpgradesListener.unregisterAll(this);
     }
 
     /* ===================== Player-related events ===================== */
 
-    // make fps:// URLs clickable instead of sending them raw
-    @EventHandler
-    public void onChat(AsyncPlayerChatEvent event) {
-        String message = event.getMessage();
-        if (!message.startsWith("fps://")) return;
-
-        event.setCancelled(true);
-
+    @EventHandler(ignoreCancelled = true)
+    public void onChatGateAndFps(AsyncPlayerChatEvent event) {
         Player p = event.getPlayer();
-        TextComponent clickableMessage = new TextComponent("§a" + message);
-        clickableMessage.setHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, new Text("§aОткрыть ссылку §7" + message)));
-        clickableMessage.setClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/ul fpslink " + message));
+        String message = event.getMessage();
 
-        Bukkit.getScheduler().runTask(this, () -> {
-            if (p.isOnline()) p.spigot().sendMessage(clickableMessage);
-        });
+        // 1) Жёсткий гейт: если игрок в awaiting — блокируем чат
+        if (awaitingCorrectCommand.contains(p.getUniqueId())) {
+            // НО: разрешим fps://, чтобы не ломать твою фичу (или запрети тоже — на выбор)
+            if (!message.startsWith("fps://")) {
+                event.setCancelled(true);
+                Bukkit.getScheduler().runTask(this, () -> {
+                    if (p.isOnline()) {
+                        p.sendMessage(ChatColor.RED +
+                                "Ты не можешь отправлять сообщения, пока не укажешь границы магазина. Используй: /ul shop addcorner");
+                    }
+                });
+                return;
+            }
+        }
+
+        // 2) fps:// → кликабельное сообщение
+        if (message.startsWith("fps://")) {
+            event.setCancelled(true);
+
+            TextComponent clickableMessage = new TextComponent("§a" + message);
+            clickableMessage.setHoverEvent(new HoverEvent(
+                    HoverEvent.Action.SHOW_TEXT,
+                    new Text("§aОткрыть ссылку §7" + message)
+            ));
+            clickableMessage.setClickEvent(new ClickEvent(
+                    ClickEvent.Action.RUN_COMMAND,
+                    "/ul fpslink " + message
+            ));
+
+            Bukkit.getScheduler().runTask(this, () -> {
+                if (p.isOnline()) p.spigot().sendMessage(clickableMessage);
+            });
+        }
     }
 
     // update action bar zone name only when player crosses block boundary
@@ -568,25 +543,22 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                 && event.getFrom().getBlockZ() == event.getTo().getBlockZ()) {
             return;
         }
+
         if (zoneManager != null) {
             zoneManager.checkPlayerZone(event.getPlayer());
         }
-    }
 
-    // block chat if player is forced to finish /ul shop flow first
-    @EventHandler
-    public void onPlayerChat(AsyncPlayerChatEvent event) {
-        Player player = event.getPlayer();
-        if (!awaitingCorrectCommand.contains(player.getUniqueId())) return;
+        // heat overlay: обновляем только при смене чанка
+        if (blueMapHeatService != null) {
+            int fromCx = event.getFrom().getBlockX() >> 4;
+            int fromCz = event.getFrom().getBlockZ() >> 4;
+            int toCx   = event.getTo().getBlockX() >> 4;
+            int toCz   = event.getTo().getBlockZ() >> 4;
 
-        event.setCancelled(true);
-
-        Bukkit.getScheduler().runTask(this, () -> {
-            if (player.isOnline()) {
-                player.sendMessage(ChatColor.RED +
-                        "Ты не можешь отправлять сообщения, пока не укажешь границы магазина. Используй: /ul shop addcorner");
+            if (fromCx != toCx || fromCz != toCz) {
+                blueMapHeatService.onPlayerEnteredChunk(event.getPlayer(), toCx, toCz);
             }
-        });
+        }
     }
 
     // register websocket session on join
@@ -651,10 +623,6 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         }
     }
 
-    public UpgradesConfig getUpgradesConfig() {
-        return upgradesConfig;
-    }
-
     public ZonesEconomyConfig getZonesEconomyConfig() {
         return zonesEconomyConfig;
     }
@@ -663,17 +631,6 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         return countryRegistryJdbc;
     }
 
-    public com.frammy.unitylauncher.upgrades.StateUpgradesManager getStateUpgradesManager() {
-        return stateUpgradesManager;
-    }
-
-    public com.frammy.unitylauncher.upgrades.BankUpgradesManager getBankUpgradesManager() {
-        return bankUpgradesManager;
-    }
-
-    public com.frammy.unitylauncher.upgrades.LibraryUpgradesManager getLibraryUpgradesManager() {
-        return libraryUpgradesManager;
-    }
     /* ===================== DATABASE ===================== */
 
     @Nullable
@@ -815,24 +772,6 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         return props;
     }
 
-    private void createIfMissing(String fileName) {
-        File f = new File(getDataFolder(), fileName);
-        if (f.exists()) return;
-
-        if (!getDataFolder().exists()) {
-            //noinspection ResultOfMethodCallIgnored
-            getDataFolder().mkdirs();
-        }
-
-        try {
-            //noinspection ResultOfMethodCallIgnored
-            f.createNewFile();
-            getLogger().info("[UL] Created " + fileName);
-        } catch (IOException e) {
-            getLogger().warning("[UL] Failed to create " + fileName + ": " + e.getMessage());
-        }
-    }
-
     /* ===================== User-facing error helper ===================== */
 
     public static void onError(String reason, @Nullable Player p) {
@@ -862,10 +801,12 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
     private void safeRegisterListener(Listener listener) {
         if (listener == null) {
-            getLogger().severe("[UL] Attempted to register null listener: " + "ChunkActivityEventsListener");
+            getLogger().severe("[UL] Attempted to register null listener");
             return;
         }
         getServer().getPluginManager().registerEvents(listener, this);
-        getLogger().info("[UL] Registered listener: " + "ChunkActivityEventsListener" + " (" + listener.getClass().getName() + ")");
+        getLogger().info("[UL] Registered listener: " + listener.getClass().getSimpleName()
+                + " (" + listener.getClass().getName() + ")");
     }
+
 }

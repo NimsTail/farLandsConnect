@@ -63,13 +63,6 @@ public class AuthListener implements Listener {
             if (bossbars != null) bossbars.startTimer(p, false);
             promptIfDue(p); // <--- добавь
         }
-
-
-        // минимально обезопасим: вырубим полёт/креатив, если вдруг
-        if (p.getGameMode() == GameMode.CREATIVE || p.isFlying()) {
-            p.setFlying(false);
-            p.setGameMode(GameMode.SURVIVAL);
-        }
     }
 
     @EventHandler

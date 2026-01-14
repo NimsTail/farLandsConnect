@@ -35,7 +35,6 @@ public record UserActivityJdbc(JavaPlugin plugin) {
      * @param minLastAuthAtMs порог по lastAuthAt (например, "сейчас - 24ч")
      * @return map: countryNameLower -> (totalPlayers, activePlayers)
      */
-
     public Map<String, CountryActivityStats> countCountryActivity(long minLastAuthAtMs) {
         Map<String, CountryActivityStats> out = new HashMap<>();
 
@@ -104,19 +103,6 @@ public record UserActivityJdbc(JavaPlugin plugin) {
             Bukkit.getLogger().severe("[UserActivityJdbc] SQL/DB error: " + t);
         }
 
-        return out;
-    }
-
-    /**
-     * Старый метод: оставлен для совместимости.
-     * Возвращает только число активных игроков по стране.
-     */
-    public Map<String, Integer> countActivePlayersByCountry(long minLastAuthAtMs) {
-        Map<String, CountryActivityStats> full = countCountryActivity(minLastAuthAtMs);
-        Map<String, Integer> out = new HashMap<>();
-        for (Map.Entry<String, CountryActivityStats> e : full.entrySet()) {
-            out.put(e.getKey(), e.getValue().activePlayers());
-        }
         return out;
     }
 

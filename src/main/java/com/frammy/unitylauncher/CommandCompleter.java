@@ -38,9 +38,10 @@ public class CommandCompleter implements TabCompleter {
             completions.add("zone");
             completions.add("relations");
 
-            // легаси/заглушки (пока команды существуют в UnityCommands)
-            completions.add("notifications");
-            completions.add("countrybalance");
+            // банк/сейф
+            completions.add("safe");
+
+            // дейлик
             completions.add("daydeal");
 
         } else if (args.length == 2) {
@@ -52,11 +53,6 @@ public class CommandCompleter implements TabCompleter {
                     completions.add("update");
                     completions.add("remove");
                     completions.add("price");
-                }
-                case "top" -> {
-                    completions.add("Playtime");
-                    completions.add("Balance");
-                    completions.add("Events");
                 }
                 case "notifications" -> {
                     completions.add("on");
@@ -71,7 +67,13 @@ public class CommandCompleter implements TabCompleter {
                     completions.add("add");
                     completions.add("withdraw");
                 }
-                // login/reg/change — сюда подсказки не нужны, там идёт пароль/аргумент
+                case "safe" -> {
+                    completions.add("create");
+                }
+                case "daydeal" -> {
+                    completions.add("info");
+                    completions.add("complete");
+                }
             }
 
         } else if (args.length == 3) {

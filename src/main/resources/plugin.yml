@@ -7,27 +7,27 @@ description: Connects with our Unity launcher
 prefix: Unity Launcher
 website: farlands.in
 depend: [LuckPerms, UltimateAdvancementAPI]
-softdepend: [BlueMap, TAB, PlaceholderAPI]
+softdepend: [BlueMap, TAB, PlaceholderAPI, ProtocolLib]
 commands:
   brand:
-    usage: "/brand [set <текст> | clear | info]"
-    description: "Брендинг своих вещей"
-    permission: "unity.brand"
+    usage: /brand [set <текст> | clear | info]
+    description: Брендинг своих вещей
+    permission: unity.brand
     permission-message: "&cНет прав: unity.brand"
   unityLauncher:
-    aliases: ul
+    aliases: [ul]
     description: Для связи с нашим лаунчером
     usage: /<command> [subcommand]
     permission: unitylauncher.use
   register:
+    aliases: [reg]
     description: Register password
     usage: /register <password>
-    aliases: [reg]
     permission: unitylauncher.auth.register
   login:
+    aliases: [l]
     description: Login with password
     usage: /login <password>
-    aliases: [l]
     permission: unitylauncher.auth.login
   state:
     description: Государственные апгрейды

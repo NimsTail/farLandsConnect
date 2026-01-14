@@ -1,6 +1,5 @@
 package com.frammy.unitylauncher;
 
-import com.frammy.unitylauncher.signs.SignCategory;
 import com.frammy.unitylauncher.signs.SignVariables;
 import com.frammy.unitylauncher.zones.ZoneInfo;
 import de.bluecolored.bluemap.api.BlueMapAPI;
@@ -48,6 +47,7 @@ public record LazyBlueMapLoader(UnityLauncher plugin) {
         try {
             plugin.getSignManager().loadSignData();
             plugin.getZoneManager().loadZonesFromConfig();
+            plugin.getLogger().info("[UL] Zones loaded (lazy): " + plugin.getZoneManager().getZones().size());
         } catch (Throwable t) {
             plugin.getLogger().severe("[LazyLoad] Ошибка загрузки данных: " + t.getMessage());
             t.printStackTrace();
@@ -56,8 +56,9 @@ public record LazyBlueMapLoader(UnityLauncher plugin) {
 
         // 2) Делаем снимки коллекций, чтобы не шарить «живые» мапы в раннер
         Map<Location, SignVariables> signsSnapshot = new HashMap<>();
-        if (plugin.getSignManager().genericSignList != null) {
-            signsSnapshot.putAll(plugin.getSignManager().genericSignList);
+        var sm = plugin.getSignManager();
+        if (sm != null && sm.store() != null && sm.store().signs() != null) {
+            signsSnapshot.putAll(sm.store().signs()); // Map<Location, SignVariables>
         }
         List<ZoneInfo> zonesSnapshot = plugin.getZoneManager().getAllZonesSnapshot();
 
@@ -103,13 +104,7 @@ public record LazyBlueMapLoader(UnityLauncher plugin) {
                             // 2) Обновление SHOP_LIST ещё позже — когда владельцы уже проставятся
                             Bukkit.getScheduler().runTaskLater(plugin, () -> {
                                 try {
-                                    int updated = 0;
-                                    for (Map.Entry<Location, SignVariables> e : signsSnapshot.entrySet()) {
-                                        if (e.getValue() != null && e.getValue().getSignCategory() == SignCategory.SHOP_LIST) {
-                                            plugin.getSignManager().updateAllRelatedShopListSigns(e.getKey());
-                                            updated++;
-                                        }
-                                    }
+                                    plugin.getSignManager().rebuildAllShopListsLater();
                                 } catch (Throwable t) {
                                     plugin.getLogger().severe("[LazyLoad] Ошибка обновления SHOP_LIST: " + t.getMessage());
                                 }

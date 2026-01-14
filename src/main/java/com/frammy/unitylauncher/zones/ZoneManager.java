@@ -3,7 +3,7 @@ package com.frammy.unitylauncher.zones;
 import com.frammy.unitylauncher.UnityLauncher;
 import com.frammy.unitylauncher.BlueMapIntegration;
 import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
-import com.frammy.unitylauncher.signs.ItemData;
+import com.frammy.unitylauncher.signs.features.shop.ItemData;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.signs.SignVariables;
 import com.flowpowered.math.vector.Vector2d;
@@ -22,7 +22,6 @@ import org.bukkit.*;
 import org.bukkit.Location;
 import org.bukkit.block.Block;
 import org.bukkit.block.Container;
-import org.bukkit.block.Sign;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
@@ -40,6 +39,11 @@ import java.util.stream.Collectors;
 import org.bukkit.World;
 import org.locationtech.jts.geom.*;
 import org.locationtech.jts.geom.impl.CoordinateArraySequence;
+
+import net.luckperms.api.LuckPerms;
+import net.luckperms.api.model.group.Group;
+import net.luckperms.api.node.Node;
+import net.luckperms.api.node.types.PermissionNode;
 
 import static com.frammy.unitylauncher.UnityCommands.calculateSurfaceArea;
 
@@ -70,17 +74,6 @@ public class ZoneManager {
 
     private static final double Y_MIN = -64, Y_MAX = 255;
 
-    // Optional hook: hospital sanitary index rebuild
-    private com.frammy.unitylauncher.upgrades.HospitalUpgradesManager hospitalUpgradesManager;
-    public void setHospitalUpgradesManager(com.frammy.unitylauncher.upgrades.HospitalUpgradesManager mgr) {
-        this.hospitalUpgradesManager = mgr;
-    }
-    private void notifyZonesChanged() {
-        if (hospitalUpgradesManager != null) {
-            hospitalUpgradesManager.rebuildSanitaryIndex();
-        }
-    }
-
     /** Иммутабельная копия всех зон для безопасного чтения. */
     public List<ZoneInfo> getAllZonesSnapshot() {
         // zoneList — это Map<String, ZoneInfo> со всеми зонами по markerID
@@ -99,8 +92,21 @@ public class ZoneManager {
         }
         switch (args[0].toLowerCase()) {
             case "addcorner" -> {
-                if (args.length != 2) { p.sendMessage(ChatColor.RED + "Использование: /ul zone addcorner <zoneType>"); return; }
-                addCorner(p, ZoneType.valueOf(args[1].toUpperCase()));
+                if (args.length != 2) {
+                    p.sendMessage(ChatColor.RED + "Использование: /ul zone addcorner <zoneType>");
+                    return;
+                }
+
+                ZoneType requested;
+                try {
+                    requested = ZoneType.valueOf(args[1].toUpperCase(Locale.ROOT));
+                } catch (IllegalArgumentException ex) {
+                    p.sendMessage(ChatColor.RED + "Неизвестный тип зоны: " + ChatColor.YELLOW + args[1]);
+                    p.sendMessage(ChatColor.GRAY + "Доступные типы: " + ChatColor.WHITE + Arrays.toString(ZoneType.values()));
+                    return;
+                }
+
+                addCorner(p, requested);
             }
             case "removecorner" -> removeCorner(p);
             case "build" -> {
@@ -128,19 +134,23 @@ public class ZoneManager {
 
                 ZoneType t = (pending != null) ? pending : requested;
 
+                boolean builtOk;
                 if (t == ZoneType.COUNTRY) {
-                    buildZoneCountry(p);
+                    builtOk = buildZoneCountry(p);
                 } else {
                     if (args.length < 3) {
                         p.sendMessage(ChatColor.RED + "Использование: /ul zone build <zoneType> <zoneName>");
                         return;
                     }
-                    buildZone(p, t, args[2]);
+                    builtOk = buildZone(p, t, args[2]);
                 }
 
-                // после успешного билда очищаем состояние
-                zonePoints.remove(id);
-                pendingZoneType.remove(id);
+                // очищаем ТОЛЬКО если реально построили
+                if (builtOk) {
+                    zonePoints.remove(id);
+                    pendingZoneType.remove(id);
+                }
+
             }
             case "update" -> {
                 if (args.length < 2) { p.sendMessage(ChatColor.RED + "Использование: /ul zone update <corners|name|color> <значение>"); return; }
@@ -218,9 +228,16 @@ public class ZoneManager {
                     // marker_ID с автогенерацией + записью в YAML при отсутствии
                     String markerID = z.getString("marker_ID", null);
                     if (markerID == null || markerID.isBlank()) {
-                        markerID = "marker_" + UUID.randomUUID();
+                        markerID = UUID.randomUUID().toString(); // без marker_
                         z.set("marker_ID", markerID);
                         needsSave = true;
+                    } else {
+                        // миграция старых id: marker_<uuid> -> <uuid>
+                        if (markerID.startsWith("marker_") && markerID.length() > "marker_".length()) {
+                            markerID = markerID.substring("marker_".length());
+                            z.set("marker_ID", markerID);
+                            needsSave = true;
+                        }
                     }
 
                     String worldOverride = z.getString("world", null);
@@ -263,20 +280,23 @@ public class ZoneManager {
             }
         }
         if (needsSave) saveZonesToConfig();
-        notifyZonesChanged();
     }
 
 // ========= ПЛАВНЫЙ ПЕРЕСЧЁТ ВЛАДЕЛЬЦЕВ ТАБЛИЧЕК ПОСЛЕ СТАРТА =========
 
     /** Плавно пересчитать ownerName у всех табличек по полигонам зон, не душа главный поток. */
     public void scheduleSignOwnershipRecalc(SignManager signManager, int signsPerTick) {
-        if (signManager == null || signManager.genericSignList == null || signManager.genericSignList.isEmpty()) return;
+        if (signManager == null || signManager.store() == null || signManager.store().signs().isEmpty()) return;
 
         // Группируем таблички по миру
-        Map<String, List<Location>> signsByWorld = new HashMap<>();
-        for (Location loc : signManager.genericSignList.keySet()) {
-            if (loc.getWorld() == null) continue;
-            signsByWorld.computeIfAbsent(loc.getWorld().getName(), k -> new ArrayList<>()).add(loc);
+        var signsMap = signManager.store().signs(); // Map<Location, SignVariables>
+        List<Location> allSigns = new ArrayList<>();
+
+        for (Location loc : signsMap.keySet()) {
+            if (loc != null && loc.getWorld() != null) {
+                // Важно: используем block location как стабильный ключ (без pitch/yaw)
+                allSigns.add(loc.getBlock().getLocation());
+            }
         }
 
         // Ключ: owner + '|' + type  → Отображаемое имя (страна если есть, иначе ник)
@@ -302,7 +322,6 @@ public class ZoneManager {
         }
 
         // Плоский список табличек для итерации
-        List<Location> allSigns = new ArrayList<>(signManager.genericSignList.keySet());
         final int total = allSigns.size();
         final int batch = Math.max(10, signsPerTick);
 
@@ -324,7 +343,9 @@ public class ZoneManager {
                     Vector2d p = new Vector2d(signLoc.getX(), signLoc.getZ());
                     for (ZonePoly zpp : zp) {
                         if (pointInPolygon(p, zpp.poly())) {
-                            SignVariables sv = signManager.genericSignList.get(signLoc);
+                            Location sk = signLoc.getBlock().getLocation();
+                            SignVariables sv = signsMap.get(sk);
+
                             if (sv != null) {
                                 String key = (zpp.owner()) + "|" + zpp.type().name();
                                 String ownerDisplay = ownerTypeDisplay.getOrDefault(
@@ -489,26 +510,24 @@ public class ZoneManager {
         List<Location> tmp = new ArrayList<>(pts);
         tmp.add(p.getLocation().clone());
 
+        boolean mustBeInsideCountryOrColony =
+                (type != ZoneType.SHOP && type != ZoneType.COUNTRY && type != ZoneType.COLONY);
+
+        // Когда уже можно образовать полигон (3+ точки), даём правильную ошибку именно про "вне страны/колонии"
+        if (mustBeInsideCountryOrColony && tmp.size() >= 3) {
+            ZoneInfo parent = findSingleContainingZoneOfTypes(tmp, Set.of(ZoneType.COUNTRY, ZoneType.COLONY));
+            if (parent == null) {
+                p.sendMessage(ChatColor.RED + "Зона " + type + " должна полностью находиться внутри Государства или Колонии.");
+                return;
+            }
+        }
+
         // Площадь/самопересечение ещё до пересечений — чтобы не гонять лишние полигоны
         if (!areaOkDraft(tmp, ztd)) {
             p.sendMessage(ChatColor.GRAY + "Площадь превышает максимум " + (int) ztd.areaLimit() + " блоков².");
             return;
         }
         if (hasSelfIntersections(poly2D(tmp))) { p.sendMessage(ChatColor.RED + "Фигура самопересекается."); return; }
-
-        // Полигональная проверка пересечений с существующими зонами того же мира
-        ZoneInfo candidate = new ZoneInfo(type, "tmp", "tmp", "tmp", tmp, p.getName(), org.bukkit.Color.WHITE);
-        for (ZoneInfo other : zoneList.values()) {
-            if (other == null || other == candidate) continue;
-            if (other.getWorld() == null || candidate.getWorld() == null) continue;
-            if (!other.getWorld().equals(candidate.getWorld())) continue;
-
-            // Либо не пересекаются, либо пересечение разрешено правилами
-            if (!canZonesCoexist(candidate, other)) {
-                p.sendMessage(ChatColor.RED + "Пересечение с " + other.getType() + " \"" + other.getName() + "\" запрещено.");
-                return;
-            }
-        }
 
         pts.add(p.getLocation().clone());
         p.sendMessage(ChatColor.GOLD + "[" + pts.size() + "] " + ChatColor.YELLOW + "Точка добавлена. Площадь: " + ChatColor.GOLD + String.format(Locale.US,"%.2f", calculateSurfaceArea(tmp)));
@@ -522,40 +541,40 @@ public class ZoneManager {
     }
 
     /** Создание территории страны: имя — из КЭША CountryRegistryJdbc; если пусто — запрет. */
-    private void buildZoneCountry(Player p) {
-        // 1) только лидер своей страны
+    private boolean buildZoneCountry(Player p) {
         String playerCountry = ul.countryRegistryJdbc.getCountryOfPlayer(p.getName());
         if (playerCountry == null || playerCountry.isBlank()) {
             p.sendMessage(ChatColor.RED + "Нельзя создать Государство: вы не состоите ни в одной стране.");
-            return;
+            return false;
         }
         if (!ul.countryRegistryJdbc.isCountryLeaderCached(p.getName())) {
             String leader = ul.countryRegistryJdbc.getLeaderOfCountry(playerCountry);
             p.sendMessage(ChatColor.RED + "Недостаточно прав: только лидер страны может создавать Государство."
                     + (leader != null ? ChatColor.GRAY + " Лидер: " + leader : ""));
-            return;
+            return false;
         }
 
-        // 2) запрет второй страны
         if (playerHasCountryZone(p.getName())) {
             p.sendMessage(ChatColor.RED + "У вас уже есть территория Государства. Сначала удалите существующую.");
-            return;
+            return false;
         }
 
-        // 3) точки
         List<Location> pts = zonePoints.get(p.getUniqueId());
         if (pts == null || pts.size() < 3) {
-            p.sendMessage(ChatColor.RED + "Нужно минимум 3 точки!"); return;
-        }
-        World w0 = pts.getFirst().getWorld();
-        if (!pts.stream().allMatch(l -> l.getWorld().equals(w0))) {
-            p.sendMessage(ChatColor.RED + "Все точки должны быть в одном мире."); return;
-        }
-        if (w0.getEnvironment() != World.Environment.NORMAL) {
-            p.sendMessage(ChatColor.RED + "Государство можно создавать только в Overworld."); return;
+            p.sendMessage(ChatColor.RED + "Нужно минимум 3 точки!");
+            return false;
         }
 
-        // 4) проверяем пересечения по общим правилам (разрешаем вложенные дочерние зоны)
+        World w0 = pts.getFirst().getWorld();
+        if (!pts.stream().allMatch(l -> l.getWorld().equals(w0))) {
+            p.sendMessage(ChatColor.RED + "Все точки должны быть в одном мире.");
+            return false;
+        }
+        if (w0.getEnvironment() != World.Environment.NORMAL) {
+            p.sendMessage(ChatColor.RED + "Государство можно создавать только в Overworld.");
+            return false;
+        }
+
         ZoneInfo candidate = new ZoneInfo(
                 ZoneType.COUNTRY,
                 "tmp_id",
@@ -565,42 +584,33 @@ public class ZoneManager {
                 p.getName(),
                 org.bukkit.Color.WHITE
         );
+
         for (ZoneInfo existing : zoneList.values()) {
             if (!canZonesCoexist(candidate, existing)) {
                 p.sendMessage(ChatColor.RED + "Нельзя создать Государство: конфликт с зоной "
                         + ChatColor.GOLD + existing.getName()
                         + ChatColor.RED + " (" + existing.getType() + ").");
-                return;
+                return false;
             }
         }
 
-        // 5) создаём
-        String rnd = UUID.randomUUID().toString();
-        String zoneID = "zone_" + rnd;
-        String markerID = "marker_" + rnd;
+        String markerID = java.util.UUID.randomUUID().toString();
+        String zoneID = "zone_" + markerID;
 
         org.bukkit.Color defaultColor = org.bukkit.Color.fromRGB(255, 0, 0);
         ZoneInfo created = new ZoneInfo(
                 ZoneType.COUNTRY,
                 zoneID,
-                playerCountry, // имя страны как имя зоны по умолчанию
+                playerCountry,
                 markerID,
                 pts,
-                p.getName(),   // технический владелец
+                p.getName(),
                 defaultColor
         );
         created.setOwnerCountry(playerCountry);
 
-        // === CountryInfo: площадь страны и стартовые деньги ===
         double areaCountry = calculateSurfaceArea(pts);
         ul.countryRegistryJdbc.setCountryAreaPreserveMoney(playerCountry, areaCountry);
-
-        // сохраним в YAML
-        zonesConfig.set("COUNTRY." + p.getName() + "." + zoneID + ".name", playerCountry);
-        zonesConfig.set("COUNTRY." + p.getName() + "." + zoneID + ".ownerCountry", playerCountry);
-        zonesConfig.set("COUNTRY." + p.getName() + "." + zoneID + ".marker_ID", markerID);
-        zonesConfig.set("COUNTRY." + p.getName() + "." + zoneID + ".corners",
-                pts.stream().map(Location::serialize).toList());
 
         zoneList.put(markerID, created);
         lastCornersEditByMarker.put(markerID, System.currentTimeMillis());
@@ -608,50 +618,65 @@ public class ZoneManager {
         upsertBlueMapMarker(created, defaultColor);
         p.sendMessage(ChatColor.GREEN + "Территория страны \"" + playerCountry + "\" создана! ");
 
-        // стартовый лимит банкоматов — теперь идёт через новую ensureInitialAtmAllowance
         ul.countryRegistryJdbc.ensureInitialAtmAllowance(playerCountry, 5);
 
-        zonePoints.remove(p.getUniqueId());
         saveZonesToConfig();
-        notifyZonesChanged();
+        return true;
     }
 
     /** Создание обычных зон: принадлежат игроку, страна НЕ проставляется при создании. */
-    private void buildZone(Player p, ZoneType type, String zoneName) {
+    private boolean buildZone(Player p, ZoneType type, String zoneName) {
         List<Location> pts = zonePoints.get(p.getUniqueId());
         if (pts == null || pts.size() < 3) {
             p.sendMessage(ChatColor.RED + "Нужно минимум 3 точки!");
-            return;
+            return false;
         }
 
-        // все точки в одном мире
         World w0 = pts.getFirst().getWorld();
         if (!pts.stream().allMatch(l -> l.getWorld().equals(w0))) {
             p.sendMessage(ChatColor.RED + "Все точки должны быть в одном мире.");
-            return;
+            return false;
         }
 
-        // общие проверки формы
         if (hasSelfIntersections(poly2D(pts))) {
             p.sendMessage(ChatColor.RED + "Фигура самопересекается.");
-            return;
+            return false;
         }
+
         ZoneTypeData ztdBuild = zoneLimits.get(type);
         double area = calculateSurfaceArea(pts);
+
         if (pts.size() >= 3 && area < ztdBuild.minSize()) {
             p.sendMessage(ChatColor.RED + "Площадь меньше минимума для " + type + ": "
                     + (int) area + " < " + (int) ztdBuild.minSize() + " блоков².");
-            return;
+            return false;
         }
         if (area > ztdBuild.areaLimit()) {
             p.sendMessage(ChatColor.RED + "Площадь превышает максимум для " + type + ": "
                     + (int) area + " > " + (int) ztdBuild.areaLimit() + " блоков².");
-            return;
+            return false;
         }
 
-        // Глобальный ограничитель: сколько зон этого типа может иметь владелец
-        if (!checkZoneQuota(p, type)) {
-            return;
+        // SHOP — безлимит у всех
+        if (type != ZoneType.SHOP) {
+            // страна игрока (может быть null)
+            String playerCountry = ul.countryRegistryJdbc.getCountryOfPlayer(p.getName());
+
+            // Для зон, которые требуют страну/колонию, playerCountry уже должен быть валиден дальше по логике,
+            // но мы страхуемся:
+            if (playerCountry != null && !playerCountry.isBlank()) {
+                // лимит считаем ПО СТРАНЕ, а не по игроку
+                if (!checkCountryZoneQuota(p, playerCountry, type)) {
+                    return false;
+                }
+            } else {
+                // Если нет страны — он всё равно не сможет создать внутренние зоны (ниже это отфильтруется),
+                // но колонию тоже нельзя без страны.
+                if (type == ZoneType.COLONY) {
+                    p.sendMessage(ChatColor.RED + "Нельзя создать Колонию: вы не состоите ни в одной стране.");
+                    return false;
+                }
+            }
         }
 
         // страна игрока (может быть null)
@@ -661,15 +686,15 @@ public class ZoneManager {
         if (type == ZoneType.COLONY) {
             if (playerCountry == null || playerCountry.isBlank()) {
                 p.sendMessage(ChatColor.RED + "Нельзя создать Колонию: вы не состоите ни в одной стране.");
-                return;
+                return false;
             }
             if (!ul.countryRegistryJdbc.isCountryLeaderCached(p.getName())) {
                 p.sendMessage(ChatColor.RED + "Недостаточно прав: только лидер страны может создавать Колонию.");
-                return;
+                return false;
             }
             if (areaHasAnyZonesInsideOrIntersecting(pts, null)) {
                 p.sendMessage(ChatColor.RED + "Нельзя создать Колонию: внутри/по границе уже есть другие зоны.");
-                return;
+                return false;
             }
         }
 
@@ -682,14 +707,14 @@ public class ZoneManager {
             ZoneInfo parent = findSingleContainingZoneOfTypes(pts, Set.of(ZoneType.COUNTRY, ZoneType.COLONY));
             if (parent == null) {
                 p.sendMessage(ChatColor.RED + "Зона " + type + " должна полностью находиться внутри Государства или Колонии.");
-                return;
+                return false;
             }
             // страна игрока должна совпадать со страной родителя
             String parentCountry = zoneCountry(parent);
             if (playerCountry == null || playerCountry.isBlank() ||
                     !Objects.equals(normCountry(playerCountry), normCountry(parentCountry))) {
                 p.sendMessage(ChatColor.RED + "Эта зона может быть создана только в пределах вашей страны/колонии.");
-                return;
+                return false;
             }
         }
 
@@ -702,13 +727,13 @@ public class ZoneManager {
                 if (playerCountry == null || playerCountry.isBlank() ||
                         !Objects.equals(normCountry(playerCountry), normCountry(parentCountry))) {
                     p.sendMessage(ChatColor.RED + "Магазин нельзя строить в чужой стране/колонии.");
-                    return;
+                    return false;
                 }
             } else {
                 // не внутри никакой — тогда ещё запретим пересечение по границе с любыми странами/колониями
                 if (areaIntersectsAnyOfTypes(pts, Set.of(ZoneType.COUNTRY, ZoneType.COLONY))) {
                     p.sendMessage(ChatColor.RED + "Магазин не должен пересекать границы стран/колоний.");
-                    return;
+                    return false;
                 }
             }
         }
@@ -720,22 +745,22 @@ public class ZoneManager {
 
             if (parentZoneForChildren == null) {
                 p.sendMessage(ChatColor.RED + "Зона " + type + " должна полностью находиться внутри Государства или Колонии.");
-                return;
+                return false;
             }
 
             // определяем страну родителя
             String parentCountry;
             // колония тоже получает ownerCountry страны
-            parentCountry = parentZoneForChildren.getCountryName(); // должен быть setOwnerCountry на стране
+            parentCountry = zoneCountry(parentZoneForChildren);
 
             if (playerCountry.isBlank()) {
                 p.sendMessage(ChatColor.RED + "Нельзя создать зону: вы не состоите ни в одной стране.");
-                return;
+                return false;
             }
 
             if (!Objects.equals(normCountry(playerCountry), normCountry(parentCountry))) {
                 p.sendMessage(ChatColor.RED + "Другие зоны можно создавать только на территории своей страны или своей колонии.");
-                return;
+                return false;
             }
 
             // теперь убедимся, что ни одна точка не пересекается с чужими зонами, кроме нашего родителя
@@ -753,16 +778,15 @@ public class ZoneManager {
 
                 p.sendMessage(ChatColor.RED + "Нельзя создать зону: точка " + loc.toVector()
                         + " пересекается с другой зоной \"" + overlap.getName() + "\".");
-                return;
+                return false;
             }
         }
 
         // SHOP — свободный случай, ничего особого не требуем. Может жить где угодно.
 
         // Всё ок — создаём сам объект ZoneInfo
-        String rnd = UUID.randomUUID().toString();
-        String zoneID = "zone_" + rnd;
-        String markerID = "marker_" + rnd;
+        String markerID = java.util.UUID.randomUUID().toString();
+        String zoneID = "zone_" + markerID;
 
         org.bukkit.Color defaultColor = org.bukkit.Color.fromRGB(255, 0, 0);
         ZoneInfo created = new ZoneInfo(type, zoneID, zoneName, markerID, pts, p.getName(), defaultColor);
@@ -790,33 +814,20 @@ public class ZoneManager {
             }
         }
 
-        // Сохраняем в YAML
-        String path = type + "." + p.getName() + "." + zoneID;
-        zonesConfig.set(path + ".name", zoneName);
-        zonesConfig.set(path + ".ownerCountry", created.getCountryName());
-        zonesConfig.set(path + ".color", bukkitToHex(defaultColor));
-        zonesConfig.set(path + ".marker_ID", markerID);
-        zonesConfig.set(path + ".world", w0.getName());
-        zonesConfig.set(path + ".corners",
-                pts.stream().map(Location::serialize).collect(Collectors.toList()));
-
         zoneList.put(markerID, created);
         lastCornersEditByMarker.put(markerID, System.currentTimeMillis());
 
         upsertBlueMapMarker(created, defaultColor);
         p.sendMessage(ChatColor.GREEN + "Зона \"" + zoneName + "\" создана!");
 
-        zonePoints.remove(p.getUniqueId());
-
-        // === Если это колония — добавляем её площадь в CountryInfo.Area родительской страны ===
+        // === Если это колония — добавляем её площадь ===
         if (type == ZoneType.COLONY) {
             double colonyArea = calculateSurfaceArea(pts);
-            // playerCountry у нас проверен выше и совпадает со страной родителя
             ul.countryRegistryJdbc.addCountryArea(playerCountry, colonyArea);
         }
 
         saveZonesToConfig();
-        notifyZonesChanged();
+        return true;
     }
 
     // ==== Overlap helpers ====
@@ -889,6 +900,18 @@ public class ZoneManager {
 
                 if ("+".equals(value)) {
                     List<Location> tmp = new ArrayList<>(zi.getCorners()); tmp.add(p.getLocation().clone());
+
+                    boolean mustBeInsideCountryOrColony =
+                            (zi.getType() != ZoneType.SHOP && zi.getType() != ZoneType.COUNTRY && zi.getType() != ZoneType.COLONY);
+
+                    // Когда уже можно образовать полигон (3+ точки), даём правильную ошибку именно про "вне страны/колонии"
+                    if (mustBeInsideCountryOrColony && tmp.size() >= 3) {
+                        ZoneInfo parent = findSingleContainingZoneOfTypes(tmp, Set.of(ZoneType.COUNTRY, ZoneType.COLONY));
+                        if (parent == null) {
+                            p.sendMessage(ChatColor.RED + "Зона " + zi.getType() + " должна полностью находиться внутри Государства или Колонии.");
+                            return;
+                        }
+                    }
 
                     // Самопересечения/площадь
                     if (hasSelfIntersections(poly2D(tmp))) { p.sendMessage(ChatColor.GRAY + "Фигура самопересекается."); return; }
@@ -983,14 +1006,15 @@ public class ZoneManager {
                         }
                     }
 
-                    zi.getCorners().removeLast();
-                    p.sendMessage(ChatColor.GRAY + "Удалена последняя точка.");
-
                     // Общая проверка: новая форма зоны не должна пересекаться/включать другие зоны
                     if (areaHasAnyZonesInsideOrIntersecting(tmp, zi.getMarkerID())) {
                         p.sendMessage(ChatColor.RED + "Нельзя менять границы: новая форма зоны пересекается с другой зоной.");
                         return;
                     }
+
+                    zi.getCorners().removeLast();
+                    p.sendMessage(ChatColor.GRAY + "Удалена последняя точка.");
+
 
                 } else {
                     p.sendMessage(ChatColor.GRAY + "Используйте: /ul zone update corners +  или  -"); return;
@@ -1000,7 +1024,6 @@ public class ZoneManager {
                 upsertBlueMapMarker(zi, zi.getFillColor());
                 lastCornersEditByMarker.put(zi.getMarkerID(), System.currentTimeMillis());
                 saveZonesToConfig();
-                notifyZonesChanged();
             }
             case "name" -> {
                 if (zi.getType() == ZoneType.COUNTRY) {
@@ -1016,27 +1039,11 @@ public class ZoneManager {
                 upsertBlueMapMarker(zi, zi.getFillColor());
                 p.sendMessage(ChatColor.GREEN + "Название обновлено!");
 
-                // обновление табличек внутри зоны
-                if (signManager != null && signManager.genericSignList != null && !zi.getCorners().isEmpty()) {
-                    List<Vector2d> poly2D = poly2D(zi.getCorners());
-                    World w = zi.getCorners().getFirst().getWorld();
-                    for (Location loc : signManager.genericSignList.keySet()) {
-                        if (!Objects.equals(loc.getWorld(), w)) continue;
-                        if (pointInPolygon(new Vector2d(loc.getX(), loc.getZ()), poly2D)) {
-                            String newLine0 = "Торговая точка [ " + value + " ]";
-                            List<String> initial = signManager.genericSignList.get(loc).getSignText();
-                            signManager.genericSignList.get(loc).setSignText(Arrays.asList(newLine0, initial.get(1), initial.get(2), initial.get(3)));
-
-                            Sign sign = (Sign) loc.getBlock().getState();
-                            signManager.stopScrollingTask(loc);
-                            HashMap<Integer, String> scroll = new HashMap<>();
-                            scroll.put(0, newLine0);
-                            signManager.makeSignScrollingLines(loc, scroll, 6, 13);
-                            sign.setLine(0, newLine0);
-                            sign.update();
-                        }
-                    }
+                // если это SHOP — уведомим SignManager, он обновит листы/таблички сам
+                if (zi.getType() == ZoneType.SHOP && signManager != null) {
+                    signManager.onShopZoneRenamed();
                 }
+
             }
             case "color" -> {
                 String[] rgb = value.split(",");
@@ -1054,8 +1061,11 @@ public class ZoneManager {
 
     // ==== Remove ====
     private void removeZone(Player p) {
-        ZoneInfo zi = resolvePlayerOwnZoneHere(p);
-        if (zi == null) { p.sendMessage(ChatColor.RED + "Вы не находитесь в своей зоне!"); return; }
+        ZoneInfo zi = getZoneAt(p.getLocation());
+        if (zi == null || !NameUtil.eqCi(zi.getOwner(), p.getName())) {
+            p.sendMessage(ChatColor.RED + "Вы не находитесь в своей зоне!");
+            return;
+        }
 
         TextComponent confirm = new TextComponent(ChatColor.GREEN + "[Подтвердить удаление]");
         confirm.setClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/ul zone confirmremove " + zi.getID()));
@@ -1079,14 +1089,17 @@ public class ZoneManager {
             BlueMapAPI.getInstance()
                     .flatMap(api -> api.getMap(zi.getCorners().getFirst().getWorld().getName()))
                     .ifPresent(map -> {
-                        String setId = "zones_" + zi.getType().name().toLowerCase();
+                        String setId = blueMapSetId(zi.getType());
                         MarkerSet set = map.getMarkerSets().get(setId);
                         if (set != null) {
                             set.getMarkers().remove(zi.getMarkerID());
+                            // если пусто — можно убрать set целиком
+                            if (set.getMarkers().isEmpty()) {
+                                map.getMarkerSets().remove(setId);
+                            }
                         }
-                        if (blueMapIntegration != null) {
-                            blueMapIntegration.saveBlueMapMarkers(setId);
-                        }
+                        if (blueMapIntegration != null) blueMapIntegration.saveBlueMapMarkers(setId);
+
                     });
         }
     }
@@ -1095,6 +1108,13 @@ public class ZoneManager {
         ZoneInfo zi = playerLastZone.get(p.getUniqueId());
         if (zi == null) {
             p.sendMessage(ChatColor.RED + "Нет зоны для удаления!");
+            return;
+        }
+
+        // ЖЁСТКАЯ ПРОВЕРКА ВЛАДЕЛЬЦА
+        if (!NameUtil.eqCi(zi.getOwner(), p.getName())) {
+            p.sendMessage(ChatColor.RED + "Вы не владелец этой зоны.");
+            playerLastZone.remove(p.getUniqueId());
             return;
         }
 
@@ -1149,7 +1169,6 @@ public class ZoneManager {
             // Сбрасываем lastZone игрока и сохраняем YAML
             playerLastZone.remove(p.getUniqueId());
             saveZonesToConfig();
-            notifyZonesChanged();
 
             // 3) Асинхронная очистка по БД — как у тебя было, только используем countryName
             String finalCountryName = countryName;
@@ -1210,7 +1229,6 @@ public class ZoneManager {
 
         // Фиксируем YAML
         saveZonesToConfig();
-        notifyZonesChanged();
     }
 
     public void cancelRemoveZone(Player p) {
@@ -1355,46 +1373,63 @@ public class ZoneManager {
     // ==== BlueMap upsert ====
     private void upsertBlueMapMarker(ZoneInfo z, org.bukkit.Color bukkitColor) {
         if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
-        if (z.getCorners().isEmpty()) return;
+        if (z == null || z.getCorners() == null || z.getCorners().isEmpty()) return;
+        if (z.getCorners().getFirst().getWorld() == null) return;
 
-        BlueMapAPI.getInstance().flatMap(api -> api.getMap(z.getCorners().getFirst().getWorld().getName())).ifPresent(map -> {
-            String setId = "zones_" + z.getType().name().toLowerCase();
-            MarkerSet set = map.getMarkerSets().computeIfAbsent(setId, MarkerSet::new);
-            set.setLabel(zoneLimits.get(z.getType()).displayName());
+        BlueMapAPI.getInstance()
+                .flatMap(api -> api.getMap(z.getCorners().getFirst().getWorld().getName()))
+                .ifPresent(map -> {
 
-            List<Vector2d> base = poly2D(z.getCorners());
-            Marker m = set.getMarkers().get(z.getMarkerID());
+                    String setId = blueMapSetId(z.getType());
+                    MarkerSet set = map.getMarkerSets().computeIfAbsent(setId, MarkerSet::new);
+                    set.setLabel("Zones: " + blueMapSetLabel(z.getType())); // или просто blueMapSetLabel(...)
 
-            Color fill = toBlueMapColor(bukkitColor != null ? bukkitColor : org.bukkit.Color.fromRGB(255, 0, 0), 0.35f);
-            Color line = toBlueMapColor(bukkitColor != null ? bukkitColor : org.bukkit.Color.fromRGB(255, 0, 0), 1f);
+                    Shape shape = blueMapShape(z.getCorners());
+                    if (shape == null) return;
 
-            if (m instanceof ExtrudeMarker em) {
-                em.setLabel(z.getName());
-                em.setShape(new Shape(base), -64, 255);
-                em.setFillColor(fill);
-                em.setLineColor(line);
-                em.setDetail(detailHtml(z));
-            } else {
-                ExtrudeMarker.Builder b = ExtrudeMarker.builder()
-                        .label(z.getName())
-                        .shape(new Shape(base), -64, 255)
-                        .detail(detailHtml(z));
-                ExtrudeMarker built = b.build();
-                built.setFillColor(fill);
-                built.setLineColor(line);
-                set.getMarkers().put(z.getMarkerID(), built);
-            }
-            blueMapIntegration.saveBlueMapMarkers(setId);
-        });
+                    Marker existing = set.getMarkers().get(z.getMarkerID());
+
+                    boolean parent = (z.getType() == ZoneType.COUNTRY || z.getType() == ZoneType.COLONY);
+
+                    org.bukkit.Color base = (bukkitColor != null ? bukkitColor : org.bukkit.Color.fromRGB(255, 0, 0));
+
+                    Color fill = toBlueMapColor(base, parent ? 0.0f : 0.35f);
+                    Color line = toBlueMapColor(base, 1.0f);
+
+                    float minY = -64f;
+                    float maxY = 255f;
+
+                    if (existing instanceof ExtrudeMarker em) {
+                        em.setLabel(z.getName());
+                        em.setShape(shape, minY, maxY);
+                        em.setFillColor(fill);
+                        em.setLineColor(line);
+                        em.setDetail(detailHtml(z));
+                    } else {
+                        ExtrudeMarker built = ExtrudeMarker.builder()
+                                .label(z.getName())
+                                .shape(shape, minY, maxY)
+                                .detail(detailHtml(z))
+                                .build();
+                        built.setFillColor(fill);
+                        built.setLineColor(line);
+                        set.getMarkers().put(z.getMarkerID(), built);
+                    }
+
+                    if (blueMapIntegration != null) blueMapIntegration.saveBlueMapMarkers(setId);
+                });
     }
 
     private String detailHtml(ZoneInfo z) {
         String owner = z.getOwner() != null ? z.getOwner() : "—";
         String country = z.getCountryName() != null ? z.getCountryName() : "—";
-        return "<b>" + zoneLimits.get(z.getType()).displayName() + " \"" + z.getName() + "\"</b>"
-                + "<br><br><i>Владелец:</i> " + owner
-                + "<br><i>Страна:</i> " + country
-                + "<br><i>Площадь:</i> " + String.format(Locale.US,"%.2f", calculateSurfaceArea(z.getCorners()));
+        String typeName = zoneLimits.get(z.getType()).displayName();
+        double area = calculateSurfaceArea(z.getCorners());
+
+        return "<b>" + typeName + " «" + z.getName() + "»</b>"
+                + "<br><br><b>Владелец:</b> " + owner
+                + "<br><b>Страна:</b> " + country
+                + "<br><b>Площадь:</b> " + String.format(Locale.US, "%.2f", area) + " блоков²";
     }
 
 
@@ -1453,6 +1488,24 @@ public class ZoneManager {
     private static boolean areaOkDraft(List<Location> pts, ZoneTypeData ztd) {
         double area = calculateSurfaceArea(pts);
         return area <= ztd.areaLimit();
+    }
+
+    private static Shape blueMapShape(List<Location> corners) {
+        if (corners == null || corners.size() < 3) return null;
+
+        try {
+            ArrayList<Vector2d> pts = new ArrayList<>(corners.size());
+            for (Location l : corners) {
+                if (l == null) continue;
+                pts.add(new Vector2d(l.getX(), l.getZ()));
+            }
+            if (pts.size() < 3) return null;
+
+            return new Shape(pts);
+        } catch (Throwable t) {
+            Bukkit.getLogger().warning("[Zones] Failed to build BlueMap Shape: " + t);
+            return null;
+        }
     }
 
     // ==== Public adapters for SignManager ====
@@ -1544,8 +1597,14 @@ public class ZoneManager {
 
     // ==== Resolve player's current own zone ====
     private ZoneInfo resolvePlayerOwnZoneHere(Player p) {
+        // 1) lastZone можно использовать ТОЛЬКО если это реально его зона
         ZoneInfo zi = playerLastZone.get(p.getUniqueId());
-        if (zi != null) return zi;
+        if (zi != null && NameUtil.eqCi(zi.getOwner(), p.getName())) {
+            // плюс убедимся, что зона ещё существует
+            if (zoneList.containsKey(zi.getMarkerID())) return zi;
+        }
+
+        // 2) иначе ищем зону под ногами среди его зон
         for (ZoneInfo z : zoneList.values()) {
             if (!NameUtil.eqCi(z.getOwner(), p.getName())) continue;
             if (pointInZone(p.getLocation(), z.getCorners())) return z;
@@ -1554,31 +1613,66 @@ public class ZoneManager {
     }
 
     // ==== Signs / Containers summary ====
-    public Map<Location, List<ItemData>> getItemSummaryFromContainers(List<Block> containers, List<Location> signLocations) {
+    public Map<Location, List<ItemData>> getItemSummaryFromContainers(List<Location> sourceSignLocations) {
         Map<Location, List<ItemData>> out = new HashMap<>();
-        for (int i = 0; i < containers.size(); i++) {
-            Block b = containers.get(i);
+        if (sourceSignLocations == null || sourceSignLocations.isEmpty()) return out;
+        if (signManager == null) return out;
+
+        var store = signManager.store();
+        if (store == null) return out;
+
+        for (Location rawSignLoc : sourceSignLocations) {
+            if (rawSignLoc == null || rawSignLoc.getWorld() == null) continue;
+
+            Location signLoc = rawSignLoc.getBlock().getLocation();
+            SignVariables vars = store.signs().get(signLoc);
+            if (vars == null || vars.getSignText() == null || vars.getSignText().size() < 4) continue;
+
+            // 1) координаты контейнера из строки таблички
+            Location containerLoc = store.parseContainerLocation(vars, signLoc.getWorld());
+            if (containerLoc == null || containerLoc.getWorld() == null) continue;
+
+            Block b = containerLoc.getBlock();
             if (!(b.getState() instanceof Container c)) continue;
 
-            Location signLoc = signLocations.get(i);
-            SignVariables vars = signManager != null ? signManager.genericSignList.get(signLoc) : null;
-            if (vars == null || vars.getSignText().size() < 4) continue;
-
-            String qtyStr = ChatColor.stripColor(vars.getSignText().get(2).replace("Кол-во: ", ""));
-            String priceStr = ChatColor.stripColor(vars.getSignText().get(3).replace("Цена: ", ""));
-            int qty = Integer.parseInt(qtyStr);
-            double price = Double.parseDouble(priceStr);
-
-            Map<Material, ItemData> combined = new HashMap<>();
-            for (ItemStack it : c.getInventory().getContents()) {
-                if (it == null || it.getType() == Material.AIR) continue;
-                combined.compute(it.getType(), (m, old) -> {
-                    if (old == null) return new ItemData(c.getLocation(), m.toString(), qty, it.getAmount(), price);
-                    old.overallQuantity += it.getAmount(); return old;
-                });
+            // 2) qty / price из таблички
+            int dealQty;
+            double dealPrice;
+            try {
+                String qtyStr = ChatColor.stripColor(vars.getSignText().get(2)).replace("Кол-во:", "").trim();
+                String priceStr = ChatColor.stripColor(vars.getSignText().get(3)).replace("Цена:", "").trim();
+                dealQty = Integer.parseInt(qtyStr);
+                dealPrice = Double.parseDouble(priceStr);
+            } catch (Throwable ignore) {
+                continue;
             }
-            out.put(signLoc, new ArrayList<>(combined.values()));
+
+            // 3) агрегируем количество по материалам
+            Map<Material, Integer> totals = new HashMap<>();
+            for (ItemStack it : c.getInventory().getContents()) {
+                if (it == null) continue;
+                Material m = it.getType();
+                if (m == Material.AIR) continue;
+                totals.merge(m, it.getAmount(), Integer::sum);
+            }
+
+            // 4) собираем ItemData (record, immutable)
+            List<ItemData> items = new ArrayList<>(totals.size());
+            for (var e : totals.entrySet()) {
+                Material m = e.getKey();
+                int totalQty = e.getValue();
+                items.add(new ItemData(
+                        c.getLocation(),
+                        m.name(),
+                        dealQty,
+                        totalQty,
+                        dealPrice
+                ));
+            }
+
+            out.put(signLoc, items);
         }
+
         return out;
     }
 
@@ -1686,6 +1780,18 @@ public class ZoneManager {
         return false;
     }
 
+    private static String blueMapSetId(ZoneType type) {
+        return "zones_" + type.name().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private String blueMapSetLabel(ZoneType type) {
+        ZoneTypeData ztd = zoneLimits.get(type);
+        // label можно держать “красивым”, но ключ всегда стабильный
+        return (ztd != null && ztd.displayName() != null && !ztd.displayName().isBlank())
+                ? ztd.displayName()
+                : type.name();
+    }
+
     /**
      * Геометрически пересекаются ли полигоны зон по XZ в рамках одного мира.
      * Использует JTS-Polygon. Высота игнорируется.
@@ -1772,7 +1878,7 @@ public class ZoneManager {
         try {
             return BlueMapAPI.getInstance()
                     .flatMap(api -> api.getMap(loc.getWorld().getName()))
-                    .map(map -> map.getMarkerSets().get("zones_shop"))
+                    .map(map -> map.getMarkerSets().get(blueMapSetId(ZoneType.SHOP)))
                     .map(set -> {
                         Vector2d p = new Vector2d(loc.getX(), loc.getZ());
                         for (Marker m : set.getMarkers().values()) {
@@ -1880,7 +1986,6 @@ public class ZoneManager {
      * Схема пермишена: <base>.<type>.<N>, например unity.zone.quota.bank.3
      * Берём максимальный N, на который у игрока есть право.
      */
-    /** Максимальное количество зон этого типа для игрока (только дефолт из zoneLimits). */
     private int getZoneQuotaFor(Player p, ZoneType type) {
         // quota=0 -> без лимита
         return getDefaultZoneQuota(type);
@@ -1901,5 +2006,135 @@ public class ZoneManager {
         return true;
     }
 
+    //
+
+    // ==== Country quota via LuckPerms ====
+
+    // Ключ типа зоны для permission-нод: industrial, bank, hospital...
+    private static String lpTypeKey(ZoneType type) {
+        return switch (type) {
+            case INDUSTRIAL -> "industrial";
+            case BANK -> "bank";
+            case HOSPITAL -> "hospital";
+            case PARK -> "park";
+            case CHURCH -> "church";
+            case LIBRARY -> "library";
+            case GREENHOUSE -> "greenhouse";
+            case COLONY -> "colony";
+            case COUNTRY -> "country";
+            case SHOP -> "shop";
+        };
+    }
+
+    private LuckPerms getLuckPerms() {
+        try {
+            var reg = Bukkit.getServicesManager().getRegistration(LuckPerms.class);
+            return reg != null ? reg.getProvider() : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * Пытаемся найти LP-группу страны.
+     * Я делаю максимально “терпимо”:
+     * - пробуем normCountry(country)
+     * - пробуем "country_" + normCountry(country)
+     */
+    private Group resolveCountryGroup(LuckPerms lp, String countryName) {
+        if (lp == null || countryName == null || countryName.isBlank()) return null;
+
+        String canon = normCountry(countryName);
+        if (canon == null || canon.isBlank()) return null;
+
+        Group g = lp.getGroupManager().getGroup(canon);
+        if (g != null) return g;
+
+        g = lp.getGroupManager().getGroup("country_" + canon);
+        return g;
+    }
+
+    /**
+     * Читаем лимит из пермишенов страны: unity.zone.<type>.<N>
+     * Возвращает:
+     * - N (если найдено)
+     * - 0 (если не найдено) => трактуем как "бери дефолт из конфига"
+     */
+    private int getCountryQuotaFromLuckPerms(String countryName, ZoneType type) {
+        if (type == ZoneType.SHOP) return Integer.MAX_VALUE; // безлимит
+        LuckPerms lp = getLuckPerms();
+        Group g = resolveCountryGroup(lp, countryName);
+        if (g == null) return 0;
+
+        String prefix = "unity.zone." + lpTypeKey(type) + ".";
+        int max = 0;
+
+        for (Node n : g.getNodes()) {
+            if (!(n instanceof PermissionNode pn)) continue;
+            if (!pn.getValue()) continue;
+
+            String key = pn.getKey(); // например unity.zone.industrial.3
+            if (!key.startsWith(prefix)) continue;
+
+            String tail = key.substring(prefix.length());
+            try {
+                int val = Integer.parseInt(tail);
+                if (val > max) max = val;
+            } catch (NumberFormatException ignore) {}
+        }
+        return max;
+    }
+
+    /** Считаем, сколько зон данного типа уже есть у страны (по ownerCountry; для COUNTRY name тоже подходит через zoneCountry()) */
+    private int countCountryZones(String countryName, ZoneType type) {
+        if (countryName == null || countryName.isBlank()) return 0;
+        String target = normCountry(countryName);
+
+        int count = 0;
+        for (ZoneInfo z : zoneList.values()) {
+            if (z.getType() != type) continue;
+
+            String zc = zoneCountry(z);
+            if (zc == null || zc.isBlank()) continue;
+
+            if (Objects.equals(normCountry(zc), target)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * Итоговый лимит страны:
+     * 1) если в LP есть unity.zone.<type>.<N> → берём максимальный N
+     * 2) иначе fallback на дефолт quota из zoneLimits
+     */
+    private int getEffectiveCountryQuota(String countryName, ZoneType type) {
+        if (type == ZoneType.SHOP) return Integer.MAX_VALUE;
+
+        // ТОЛЬКО LuckPerms
+        return getCountryQuotaFromLuckPerms(countryName, type);
+    }
+
+    private boolean checkCountryZoneQuota(Player p, String countryName, ZoneType type) {
+        if (type == ZoneType.SHOP) return true;
+
+        int quota = getEffectiveCountryQuota(countryName, type);
+        if (quota <= 0) {
+            p.sendMessage(ChatColor.RED + "У вашей страны нет разрешения на создание зон типа "
+                    + ChatColor.GOLD + type
+                    + ChatColor.RED + ". Обратитесь к правительству страны.");
+            return false;
+        }
+
+        int owned = countCountryZones(countryName, type);
+        if (owned >= quota) {
+            p.sendMessage(ChatColor.RED + "Лимит страны на зоны типа " + ChatColor.GOLD + type +
+                    ChatColor.RED + " достигнут: " + ChatColor.YELLOW + quota +
+                    ChatColor.RED + ". Уже создано: " + ChatColor.YELLOW + owned + ChatColor.RED + ".");
+            return false;
+        }
+        return true;
+    }
 
 }

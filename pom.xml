@@ -10,7 +10,7 @@
 
     <name>UnityLauncher</name>
     <description>Connects with our Unity launcher</description>
-    <url>farlands.me</url>
+    <url>farlands.in</url>
 
     <properties>
         <maven.compiler.release>21</maven.compiler.release>
@@ -149,6 +149,12 @@
             <artifactId>HikariCP</artifactId>
             <version>7.0.2</version>
         </dependency>
+        <dependency>
+            <groupId>net.dmulloy2</groupId>
+            <artifactId>ProtocolLib</artifactId>
+            <version>5.4.0</version>
+            <scope>provided</scope>
+        </dependency>
 
         <!-- Явно пинним bStats на современную версию, чтобы не тянулся старый 1.8 -->
         <dependency>
@@ -205,7 +211,6 @@
                                     <!-- не включаем в жирный jar то, что предоставляет сервер -->
                                     <exclude>io.papermc.paper:paper-api</exclude>
                                     <exclude>de.bluecolored.bluemap:BlueMapAPI</exclude>
-                                    <exclude>com.flowpowered:flow-math</exclude>
                                     <exclude>com.github.MilkBowl:VaultAPI</exclude>
                                     <exclude>net.luckperms:api</exclude>
                                     <exclude>me.clip:placeholderapi</exclude>
@@ -225,6 +230,12 @@
                                         <exclude>META-INF/*.SF</exclude>
                                         <exclude>META-INF/*.DSA</exclude>
                                         <exclude>META-INF/*.RSA</exclude>
+                                    </excludes>
+                                </filter>
+                                <filter>
+                                    <artifact>com.flowpowered:flow-math</artifact>
+                                    <excludes>
+                                        <exclude>**</exclude>
                                     </excludes>
                                 </filter>
                             </filters>
