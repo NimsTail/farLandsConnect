@@ -1,10 +1,16 @@
 package com.frammy.unitylauncher;
 
+import com.frammy.unitylauncher.upgrades.core.UpgradesManager;
+import com.frammy.unitylauncher.upgrades.impl.EducationUpgrade;
 import com.frammy.unitylauncher.zones.countryrelations.CountryRegistryJdbc;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.Gson;
+import net.md_5.bungee.api.chat.ClickEvent;
+import net.md_5.bungee.api.chat.ComponentBuilder;
+import net.md_5.bungee.api.chat.HoverEvent;
+import net.md_5.bungee.api.chat.TextComponent;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.command.CommandSender;
@@ -57,7 +63,7 @@ public class UnityCommands {
                                    JsonObject general,
                                    JsonObject stats,
                                    long loadedAt) {
-        boolean isExpired(long nowMs) { return nowMs - loadedAt > PLAYER_CACHE_TTL_MS; }
+        boolean isFresh(long nowMs) { return nowMs - loadedAt <= PLAYER_CACHE_TTL_MS; }
     }
 
     private static JsonObject safeParseObject(String json) {
@@ -94,7 +100,7 @@ public class UnityCommands {
     private CachedPlayerRow getOrLoadCachedPlayer(String playerName) {
         long now = System.currentTimeMillis();
         CachedPlayerRow row = playerCache.get(playerName);
-        if (row != null && !row.isExpired(now)) return row;
+        if (row != null && row.isFresh(now)) return row;
         try {
             CachedPlayerRow fresh = loadPlayerRowFromDB(playerName);
             if (fresh != null) {
@@ -134,6 +140,31 @@ public class UnityCommands {
         playerCache.put(playerName, new CachedPlayerRow(cust, soc, gen, st, now));
     }
 
+    /** Сбросить кэш конкретного игрока (следующий getOrLoadCachedPlayer полезет в БД). */
+    public void invalidatePlayerCache(String playerName) {
+        if (playerName == null || playerName.isBlank()) return;
+        playerCache.remove(playerName);
+    }
+
+    /** Сбросить кэш и подгрузить свежие данные асинхронно (best-effort). */
+    public void refreshPlayerCacheAsync(String playerName) {
+        if (playerName == null || playerName.isBlank()) return;
+
+        invalidatePlayerCache(playerName);
+
+        UnityLauncher ul = UnityLauncher.getInstance();
+        if (ul == null) return;
+
+        Bukkit.getScheduler().runTaskAsynchronously(ul, () -> {
+            try {
+                CachedPlayerRow fresh = loadPlayerRowFromDB(playerName);
+                if (fresh != null) playerCache.put(playerName, fresh);
+            } catch (Exception e) {
+                Bukkit.getLogger().warning("[UnityCommands] refreshPlayerCacheAsync failed: " + e);
+            }
+        });
+    }
+
     /* ===================== Публичные утилиты JSON Users ===================== */
 
     public void mergeAndUpdatePlayerData(String playerName, String column, Map<String, Object> updates) {
@@ -153,7 +184,7 @@ public class UnityCommands {
             // 1) Берём текущий JSON: сначала из кэша (если не просрочен), иначе из БД
             JsonObject current;
             CachedPlayerRow cached = playerCache.get(playerName);
-            if (cached != null && !cached.isExpired(System.currentTimeMillis())) {
+            if (cached != null && cached.isFresh(System.currentTimeMillis())) {
                 current = switch (column) {
                     case "CustomizationData" -> cached.customization.deepCopy();
                     case "SocialData"        -> cached.social.deepCopy();
@@ -304,17 +335,286 @@ public class UnityCommands {
         sender.sendMessage("Казна: " + ChatColor.GREEN + String.format("%.2f", (money != null ? money : 0.0)) + ChatColor.RESET + "Ⓕ");
     }
 
-    // ==== AUTH: /ul login <pass>  и  /ul reg <pass> ====
+    // ===================== DAYDEAL =====================
 
-    // Анти-брутфорс по UUID+IP
-    private static final int MAX_LOGIN_FAILS = 5;
-    private static final long LOGIN_BLOCK_MS = 30_000L; // 30 секунд
-    private static final ConcurrentHashMap<String, LoginFailState> LOGIN_FAILS = new ConcurrentHashMap<>();
+    private record DayDealParsed(
+            String raw,
+            boolean generated,
+            boolean completed,
+            String code,
+            String itemName,
+            int amount,
+            double pricePerOne
+    ) {}
 
-    private static final class LoginFailState {
-        int attempts;
-        long blockedUntilMs;
+    private DayDealParsed parseDayDeal(String raw) {
+        if (raw == null) raw = "0";
+        raw = raw.trim();
+
+        // "0" - не сгенерировался
+        if (raw.equals("0") || raw.isEmpty()) {
+            return new DayDealParsed("0", false, false, "0", null, 0, 0.0);
+        }
+
+        // Форматы:
+        // "96900;Brown Banner;15;2,14;0" - сгенерирован, не выполнен
+        // "0;Brown Banner;15;2,14;0" - выполнен
+        String[] parts = raw.split(";", -1);
+        if (parts.length < 4) {
+            // мусор/неожиданный формат
+            return new DayDealParsed(raw, false, false, "0", null, 0, 0.0);
+        }
+
+        String code = parts[0].trim();
+        boolean completed = code.equals("0");
+
+        String itemName = parts[1].trim();
+        int amount = 0;
+        try { amount = Integer.parseInt(parts[2].trim()); } catch (Exception ignored) {}
+
+        double pricePerOne = 0.0;
+        String priceStr = parts[3].trim().replace(",", "."); // у тебя десятичная запятая
+        try { pricePerOne = Double.parseDouble(priceStr); } catch (Exception ignored) {}
+
+        boolean generated = true;
+
+        return new DayDealParsed(raw, generated, completed, code, itemName, amount, pricePerOne);
     }
+
+    private String getDayDealRawFromCacheOrDB(String playerName) {
+        CachedPlayerRow row = getOrLoadCachedPlayer(playerName);
+        if (row == null) return "0";
+        if (!row.general.has("dayDealCode")) return "0";
+        try {
+            return safeGetString(row.general.get("dayDealCode"));
+        } catch (Exception ignored) {
+            return "0";
+        }
+    }
+
+    public void dayDealInfo(@NotNull CommandSender sender) {
+        if (!(sender instanceof Player p)) {
+            sender.sendMessage(ChatColor.RED + "Только для игроков.");
+            return;
+        }
+
+        String raw = getDayDealRawFromCacheOrDB(p.getName());
+        DayDealParsed dd = parseDayDeal(raw);
+
+        if (!dd.generated) {
+            p.sendMessage(ChatColor.YELLOW + "Дейлик ещё не сгенерирован. Найди его в лаунчере!");
+            return;
+        }
+
+        if (dd.completed) {
+            double baseTotal = dd.amount * dd.pricePerOne;
+            double total = applyEducationBonusMaybe(p, baseTotal);
+            p.sendMessage(ChatColor.GREEN + "Дейлик уже выполнен.");
+            p.sendMessage(ChatColor.GRAY + "Задание было: " + ChatColor.WHITE + dd.itemName +
+                    ChatColor.GRAY + " x" + ChatColor.WHITE + dd.amount);
+            p.sendMessage(ChatColor.GRAY + "Награда была: " + ChatColor.GOLD +
+                    String.format(java.util.Locale.US, "%.2f", total) + ChatColor.GRAY + " Ⓕ");
+            return;
+        }
+
+        double baseTotal = dd.amount * dd.pricePerOne;
+        double total = applyEducationBonusMaybe(p, baseTotal);
+
+        p.sendMessage(ChatColor.DARK_AQUA + "=== DayDeal ===");
+        p.sendMessage(ChatColor.GRAY + "Собери: " + ChatColor.WHITE + dd.itemName +
+                ChatColor.GRAY + " x" + ChatColor.WHITE + dd.amount);
+        p.sendMessage(ChatColor.GRAY + "Награда: " + ChatColor.GOLD +
+                String.format(java.util.Locale.US, "%.2f", total) + ChatColor.GRAY + " Ⓕ");
+        TextComponent text = new TextComponent(
+                ChatColor.GRAY + "Чтобы сдать, держи предмет в руке и нажми: "
+        );
+
+        TextComponent cmd = new TextComponent(ChatColor.YELLOW + "/ul daydeal complete");
+        cmd.setClickEvent(new ClickEvent(
+                ClickEvent.Action.RUN_COMMAND,
+                "/ul daydeal complete"
+        ));
+        cmd.setHoverEvent(new HoverEvent(
+                HoverEvent.Action.SHOW_TEXT,
+                new ComponentBuilder("Нажать, чтобы выполнить команду").create()
+        ));
+
+        text.addExtra(cmd);
+
+        p.spigot().sendMessage(text);
+
+    }
+
+    public void dayDealComplete(@NotNull CommandSender sender) {
+        if (!(sender instanceof Player p)) {
+            sender.sendMessage(ChatColor.RED + "Только для игроков.");
+            return;
+        }
+
+        String raw = getDayDealRawFromCacheOrDB(p.getName());
+        DayDealParsed dd = parseDayDeal(raw);
+
+        if (!dd.generated) {
+            p.sendMessage(ChatColor.RED + "Дейлик ещё не сгенерирован.");
+            return;
+        }
+        if (dd.completed) {
+            p.sendMessage(ChatColor.YELLOW + "Дейлик уже выполнен.");
+            return;
+        }
+        if (dd.amount <= 0 || dd.itemName == null || dd.itemName.isBlank()) {
+            p.sendMessage(ChatColor.RED + "Дейлик повреждён (неверные данные).");
+            return;
+        }
+
+        org.bukkit.inventory.ItemStack hand = p.getInventory().getItemInMainHand();
+        if (hand.getType().isAir()) {
+            p.sendMessage(ChatColor.RED + "Возьми нужный предмет в ведущую руку.");
+            return;
+        }
+
+        // Не пытаемся угадывать Material по "Brown Banner" — это ненадёжно.
+        // Но можем сделать минимальную проверку по displayName, если он задан:
+        // Если displayName совпадает — хорошо; если не задан — не мешаем.
+        boolean nameOk = true;
+        try {
+            var meta = hand.getItemMeta();
+            if (meta != null && meta.hasDisplayName()) {
+                String dn = org.bukkit.ChatColor.stripColor(meta.getDisplayName());
+                if (!dn.isBlank()) {
+                    nameOk = dn.equalsIgnoreCase(dd.itemName);
+                }
+            }
+        } catch (Exception ignored) {}
+
+        if (!nameOk) {
+            p.sendMessage(ChatColor.RED + "В руке должен быть предмет: " + ChatColor.WHITE + dd.itemName);
+            return;
+        }
+
+        int have = hand.getAmount();
+        if (have < dd.amount) {
+            p.sendMessage(ChatColor.RED + "Недостаточно предметов в руке. Нужно: " +
+                    ChatColor.WHITE + dd.amount + ChatColor.RED + ", у тебя: " + ChatColor.WHITE + have);
+            return;
+        }
+
+        // Списываем из ведущей руки ровно нужное количество
+        if (have == dd.amount) {
+            p.getInventory().setItemInMainHand(null);
+        } else {
+            hand.setAmount(have - dd.amount);
+            p.getInventory().setItemInMainHand(hand);
+        }
+
+        // Помечаем как выполненный: "0;item;amount;price;rerolls"
+        // Рероллы не трогаем — просто сохраняем хвост, если он есть
+        String[] parts = dd.raw.split(";", -1);
+        String rerollsPart = (parts.length >= 5) ? parts[4] : ""; // не показываем, но сохраняем
+        String newRaw = "0;" + dd.itemName + ";" + dd.amount + ";" +
+                // сохраняем price как было, но нормально: с запятой можно оставить
+                parts[3] + (parts.length >= 5 ? (";" + rerollsPart) : "");
+
+        // Запись в GeneralData.dayDealCode + обновление кэша через mergeAndUpdatePlayerData
+        mergeAndUpdatePlayerData(p.getName(), "GeneralData", java.util.Map.of("dayDealCode", newRaw));
+
+        double baseTotal = dd.amount * dd.pricePerOne;
+        double total = applyEducationBonusMaybe(p, baseTotal);
+
+        boolean paid = addMoneyToPlayer(p.getName(), total);
+
+        if (!paid) {
+            p.sendMessage(ChatColor.RED + "Не удалось начислить деньги (БД недоступна).");
+            p.sendMessage(ChatColor.GRAY + "DayDeal (для компенсации):");
+            p.sendMessage(ChatColor.GRAY + "Предмет: " + ChatColor.WHITE + dd.itemName);
+            p.sendMessage(ChatColor.GRAY + "Количество: " + ChatColor.WHITE + dd.amount);
+            p.sendMessage(ChatColor.GRAY + "Цена за штуку: " + ChatColor.WHITE +
+                    String.format(java.util.Locale.US, "%.2f", dd.pricePerOne));
+            p.sendMessage(ChatColor.GRAY + "Итого: " + ChatColor.GOLD +
+                    String.format(java.util.Locale.US, "%.2f", total) + ChatColor.GRAY + " Ⓕ");
+            p.sendMessage(ChatColor.DARK_GRAY + "Скриншотни это сообщение и отправь администратору.");
+
+        } else {
+            p.sendMessage(ChatColor.GREEN + "Дейлик выполнен!");
+            p.sendMessage(ChatColor.GRAY + "Получено: " + ChatColor.GOLD +
+                    String.format(java.util.Locale.US, "%.2f", total) + ChatColor.GRAY + " Ⓕ");
+        }
+    }
+
+    private double applyEducationBonusMaybe(Player p, double baseAmount) {
+        if (p == null) return baseAmount;
+        if (!(baseAmount > 0.0)) return baseAmount;
+
+        UnityLauncher ul = UnityLauncher.getInstance();
+        if (ul == null) return baseAmount;
+
+        UpgradesManager um = ul.getUpgradesManager();
+        if (um == null) return baseAmount;
+
+        // core.enabled=false -> ctx будет null, enabled список пустой, метод вернёт null
+        EducationUpgrade edu = um.getEnabled(EducationUpgrade.class);
+        if (edu == null) return baseAmount;
+
+        return edu.applyEducationBonus(p, baseAmount);
+    }
+
+    public boolean applyMoneyDelta(@NotNull String playerName, double delta) {
+        if (playerName.isBlank()) return false;
+        if (Math.abs(delta) < 0.0000001) return true;
+
+        try (Connection con = DBConnect()) {
+            if (con == null) return false;
+
+            con.setAutoCommit(false);
+            try {
+                UserJsonRow row = lockAndReadUserMoney(con, playerName);
+                if (row == null) {
+                    con.rollback();
+                    return false;
+                }
+
+                double cur = (row.money != null) ? row.money : 0.0;
+                double next = cur + delta;
+
+                // не даём уйти в минус
+                if (next < -1e-9) {
+                    con.rollback();
+                    return false;
+                }
+                if (next < 0) next = 0;
+
+                writeUserMoney(con, playerName, next);
+                con.commit();
+
+                // sync cache
+                CachedPlayerRow cached = getOrLoadCachedPlayer(playerName);
+                if (cached != null && cached.general != null) {
+                    JsonObject newGen = cached.general.deepCopy();
+                    newGen.addProperty("money", next);
+                    upsertCacheAfterUpdate(playerName, "GeneralData", newGen);
+                }
+
+                return true;
+
+            } catch (Exception e) {
+                try { con.rollback(); } catch (Exception ignored) {}
+                Bukkit.getLogger().warning("[UnityCommands] applyMoneyDelta failed: " + e);
+                return false;
+            } finally {
+                try { con.setAutoCommit(true); } catch (Exception ignored) {}
+            }
+        } catch (Exception e) {
+            Bukkit.getLogger().warning("[UnityCommands] applyMoneyDelta outer failed: " + e);
+            return false;
+        }
+    }
+
+    public boolean addMoneyToPlayer(@NotNull String playerName, double delta) {
+        if (!(delta > 0.0)) return false;
+        return applyMoneyDelta(playerName, delta);
+    }
+
+    // ==== AUTH ====
 
     /** Общая проверка качества пароля по нашим правилам. */
     private static boolean validatePasswordPolicy(String pass, CommandSender sender) {
@@ -346,121 +646,6 @@ public class UnityCommands {
         return true;
     }
 
-    public void login(@NotNull CommandSender sender, String pass) {
-        if (!(sender instanceof org.bukkit.entity.Player p)) {
-            sender.sendMessage(ChatColor.RED + "Эта команда доступна только игрокам.");
-            return;
-        }
-        if (pass == null || pass.isBlank()) {
-            sender.sendMessage(ChatColor.YELLOW + "Использование: /ul login <пароль>");
-            return;
-        }
-
-        var auth = UnityLauncher.getInstance().getAuthService();
-        var listener = UnityLauncher.getInstance().getAuthListener();
-        if (auth == null) {
-            sender.sendMessage(ChatColor.RED + "Auth-сервис недоступен.");
-            return;
-        }
-
-        // уже авторизован?
-        if (listener != null && listener.isAuthenticated(p)) {
-            sender.sendMessage(ChatColor.GREEN + "Ты уже вошёл.");
-            return;
-        }
-
-        // rate-limit по UUID+IP
-        String ip = (p.getAddress() != null) ? p.getAddress().getAddress().getHostAddress() : "unknown";
-        String key = p.getUniqueId() + "|" + ip;
-        long now = System.currentTimeMillis();
-        LoginFailState state = LOGIN_FAILS.get(key);
-        if (state != null && now < state.blockedUntilMs) {
-            long leftSec = (state.blockedUntilMs - now + 999) / 1000;
-            sender.sendMessage(ChatColor.RED + "Слишком много неудачных попыток. Попробуй через " +
-                    ChatColor.YELLOW + leftSec + ChatColor.RED + " сек.");
-            return;
-        }
-
-        // зарегистрирован ли игрок?
-        boolean hasPass = auth.isRegisteredFast(p.getName());
-        if (!hasPass) {
-            sender.sendMessage(ChatColor.RED + "Ты не зарегистрирован. Используй /ul reg <пароль>.");
-            return;
-        }
-
-        // проверяем пароль
-        boolean ok = auth.checkPassword(p.getName(), pass.toCharArray());
-        if (!ok) {
-            // учёт ошибки + блокировки
-            LoginFailState s = (state != null) ? state : new LoginFailState();
-            s.attempts++;
-            if (s.attempts >= MAX_LOGIN_FAILS) {
-                s.blockedUntilMs = now + LOGIN_BLOCK_MS;
-                s.attempts = 0;
-                sender.sendMessage(ChatColor.RED + "Неверный пароль. Логин временно заблокирован на " +
-                        (LOGIN_BLOCK_MS / 1000) + " секунд.");
-            } else {
-                sender.sendMessage(ChatColor.RED + "Неверный пароль. Осталось попыток: " +
-                        ChatColor.YELLOW + (MAX_LOGIN_FAILS - s.attempts));
-            }
-            LOGIN_FAILS.put(key, s);
-            return;
-        }
-
-        // успех — снимаем блокировки
-        LOGIN_FAILS.remove(key);
-
-        // отметим сессию
-        auth.markSession(p.getName(), ip);
-        auth.updateCacheAfterSession(p.getName(), System.currentTimeMillis(), ip);
-
-        // снимем все блокировки/боссбар
-        if (listener != null) listener.completeLogin(p);
-    }
-
-    public void register(@NotNull CommandSender sender, String pass) {
-        if (!(sender instanceof org.bukkit.entity.Player p)) {
-            sender.sendMessage(ChatColor.RED + "Эта команда доступна только игрокам.");
-            return;
-        }
-        if (!validatePasswordPolicy(pass, sender)) {
-            sender.sendMessage(ChatColor.GRAY + "Использование: /ul reg <пароль>");
-            return;
-        }
-
-        var auth = UnityLauncher.getInstance().getAuthService();
-        var listener = UnityLauncher.getInstance().getAuthListener();
-        if (auth == null) {
-            sender.sendMessage(ChatColor.RED + "Auth-сервис недоступен.");
-            return;
-        }
-
-        // уже есть пароль?
-        if (auth.isRegisteredFast(p.getName())) {
-            sender.sendMessage(ChatColor.RED + "Ты уже зарегистрирован. Используй /ul login <пароль>.");
-            return;
-        }
-
-        // пишем пароль в БД
-        boolean saved = auth.setNewPassword(p.getName(), pass.toCharArray());
-        if (!saved) {
-            sender.sendMessage(ChatColor.RED + "Ошибка при сохранении пароля.");
-            return;
-        }
-        // обновим кэш после записи пароля
-        var rec = auth.getCached(p.getName().toLowerCase(java.util.Locale.ROOT));
-        if (rec == null || rec.phcHash() == null) {
-            auth.updateCacheAfterPasswordSet(p.getName(), "<set>");
-        }
-
-        // сразу активируем сессию
-        String ip = (p.getAddress() != null) ? p.getAddress().getAddress().getHostAddress() : "unknown";
-        auth.markSession(p.getName(), ip);
-        auth.updateCacheAfterSession(p.getName(), System.currentTimeMillis(), ip);
-
-        if (listener != null) listener.completeRegister(p);
-    }
-
     /* ===================== Заглушки (временно отключено / легаси) ===================== */
 
     public void getNotifications(@NotNull CommandSender sender) {
@@ -475,10 +660,6 @@ public class UnityCommands {
                             Double price, Integer quantity, org.bukkit.Location location,
                             Map<org.bukkit.enchantments.Enchantment, Integer> enchantments) {
         Bukkit.getLogger().info("[UnityCommands] Orders временно отключены.");
-    }
-
-    public void dayDeal(@NotNull CommandSender sender, String code) {
-        sender.sendMessage(ChatColor.YELLOW + "Ежедневные задания временно отключены.");
     }
 
     public void getGroups(@NotNull CommandSender sender) {
@@ -693,7 +874,7 @@ public class UnityCommands {
                 try (java.sql.ResultSet rs = ps.executeQuery()) {
                     if (rs.next()) {
                         String json = rs.getString(1);
-                        var obj = safeParseObject(new com.google.gson.JsonParser(), json);
+                        var obj = safeParseObject(json);
                         for (String k : keys) {
                             if (obj.has(k)) resultMap.put(k, jsonElementToJava(obj.get(k)));
                         }
@@ -781,18 +962,6 @@ public class UnityCommands {
             return list;
         }
         return el.toString();
-    }
-
-    /** Безопасно парсит JSON-строку в JsonObject, возвращает пустой при ошибке. */
-    private static com.google.gson.JsonObject safeParseObject(com.google.gson.JsonParser parser, String json) {
-        if (json == null || json.isBlank()) return new com.google.gson.JsonObject();
-        try {
-            com.google.gson.JsonElement root = parser.parse(json);
-            if (root != null && root.isJsonObject()) {
-                return root.getAsJsonObject();
-            }
-        } catch (Exception ignored) {}
-        return new com.google.gson.JsonObject();
     }
 
 }

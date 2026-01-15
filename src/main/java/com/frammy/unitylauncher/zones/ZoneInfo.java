@@ -66,18 +66,17 @@ public class ZoneInfo {
     // ===== Country / LuckPerms =====
     public void setOwnerCountry(String country) { this.ownerCountry = country; }
 
-    /** Нормализованное имя страны; если пусто — запасной вариант owner. */
+    /** Имя страны-владельца (как записано в зоне). Ник владельца НЕ является страной. */
     public String getCountryName() {
-        return notBlank(ownerCountry) ? ownerCountry : (notBlank(owner) ? owner : null);
+        return notBlank(ownerCountry) ? ownerCountry : null;
     }
 
-    public boolean hasCountry() { return notBlank(getCountryName()); }
+    public boolean hasCountry() { return notBlank(ownerCountry); }
 
     /** Имя LP-группы страны: "group.<normalized>". */
     public String getLuckPermsGroupName() {
-        String c = getCountryName();
-        if (!notBlank(c)) return null;
-        String norm = c.trim().toLowerCase(Locale.ROOT)
+        if (!notBlank(ownerCountry)) return null;
+        String norm = ownerCountry.trim().toLowerCase(Locale.ROOT)
                 .replace(' ', '_')
                 .replaceAll("[^a-z0-9_\\-.]", "");
         return "group." + norm;
@@ -88,7 +87,11 @@ public class ZoneInfo {
 
     /** Мир зоны по первому углу (или null). */
     public World getWorld() {
-        return corners.isEmpty() ? null : corners.getFirst().getWorld();
+        if (corners.isEmpty()) return null;
+        for (Location l : corners) {
+            if (l != null && l.getWorld() != null) return l.getWorld();
+        }
+        return null;
     }
 
     /** Проверка попадания точки внутрь полигона зоны (XZ), с проверкой мира. */
@@ -210,6 +213,29 @@ public class ZoneInfo {
         int z = rnd.nextInt(minZ, maxZ + 1);
         int y = w.getHighestBlockYAt(x, z);
         return new Location(w, x, y, z);
+    }
+
+    /** Центр зоны (примерно): центр AABB по XZ + y по highestBlock. */
+    public Location getCenter() {
+        World w = getWorld();
+        if (w == null) return null;
+
+        BoundingBox bb = getBoundingBoxXZ();
+        double cx = (bb.getMinX() + bb.getMaxX()) / 2.0;
+        double cz = (bb.getMinZ() + bb.getMaxZ()) / 2.0;
+
+        int y = w.getHighestBlockYAt((int) Math.floor(cx), (int) Math.floor(cz));
+        return new Location(w, cx, y, cz);
+    }
+
+    /** Быстрый центр XZ (если кому-то нужен только 2D). */
+    public org.bukkit.util.Vector getCenterXZ() {
+        BoundingBox bb = getBoundingBoxXZ();
+        return new org.bukkit.util.Vector(
+                (bb.getMinX() + bb.getMaxX()) / 2.0,
+                0,
+                (bb.getMinZ() + bb.getMaxZ()) / 2.0
+        );
     }
 
 }

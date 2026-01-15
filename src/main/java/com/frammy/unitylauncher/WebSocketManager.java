@@ -143,12 +143,12 @@ public class WebSocketManager {
             }
 
             @Override public void onClose(int code, String reason, boolean remote) {
-                log.warning("WS: [" + k + "] закрыт (" + code + "): " + reason);
+//                log.warning("WS: [" + k + "] закрыт (" + code + "): " + reason);
                 scheduleReconnect(k, h); // планируем переподключение
             }
 
             @Override public void onError(Exception ex) {
-                log.warning("WS: [" + k + "] ошибка: " + ex.getMessage());
+//                log.warning("WS: [" + k + "] ошибка: " + ex.getMessage());
                 // тут же будет onClose в большинстве стеков, но на всякий случай:
                 if (h.state != State.OPEN) {
                     scheduleReconnect(k, h);
@@ -181,7 +181,7 @@ public class WebSocketManager {
         long delayTicks = Duration.ofSeconds(delaySec).toMillis() / 50L;
         h.nextAllowedConnectMs = System.currentTimeMillis() + delaySec * 1000L;
 
-        log.info("WS: [" + k + "] повторная попытка через " + delaySec + " сек (attempt=" + attempt + ").");
+//        log.info("WS: [" + k + "] повторная попытка через " + delaySec + " сек (attempt=" + attempt + ").");
 
         // Планируем ленивую попытку
         Bukkit.getScheduler().runTaskLater(plugin, () -> connectPlayer(k, false), Math.max(1L, delayTicks));

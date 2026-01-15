@@ -32,6 +32,7 @@ import static com.frammy.unitylauncher.UnityLauncher.DBConnect;
  */
 public class CountryRegistryJdbc {
 
+    private final java.util.concurrent.atomic.AtomicBoolean refreshInFlight = new java.util.concurrent.atomic.AtomicBoolean(false);
     private final Map<String, String> playerToCountry = new ConcurrentHashMap<>();
     private final Map<String, String> countryToLeader = new ConcurrentHashMap<>();
     private final Map<String, Double> countryToTransferFeePct = new ConcurrentHashMap<>();
@@ -61,8 +62,7 @@ public class CountryRegistryJdbc {
     /**
      * @param prefix как "§o§d❉Президент" или "&f"
      */ // простая структура одной роли
-        public record RoleInfo(int id, String name, String prefix) {
-    }
+        public record RoleInfo(int id, String name, String prefix, int index) {}
 
     /** Комиссия страны (проценты, напр. 1.25 = 1.25%). Если нет — вернёт fallbackPct. */
     public double getCountryTransferFeePctOr(String countryName, double fallbackPct) {
@@ -116,12 +116,7 @@ public class CountryRegistryJdbc {
                 return;
             }
 
-            Bukkit.getScheduler().runTask(plugin, () -> {
-                String key = countryName.toLowerCase(Locale.ROOT);
-                double oldVal = countryWeeklyTaxDue.getOrDefault(key, 0.0);
-                countryWeeklyTaxDue.put(key, oldVal + delta);
-                touchCacheNow();
-            });
+            Bukkit.getScheduler().runTask(plugin, this::touchCacheNow);
         });
     }
 
@@ -150,11 +145,7 @@ public class CountryRegistryJdbc {
                 return;
             }
 
-            Bukkit.getScheduler().runTask(plugin, () -> {
-                String key = countryName.toLowerCase(Locale.ROOT);
-                countryWeeklyTaxDue.put(key, 0.0);
-                touchCacheNow();
-            });
+            Bukkit.getScheduler().runTask(plugin, this::touchCacheNow);
         });
     }
 
@@ -200,13 +191,42 @@ public class CountryRegistryJdbc {
             }
 
             // мягко обновим кэш в main-потоке, чтобы не ждать TTL
-            Bukkit.getScheduler().runTask(plugin, () -> {
-                String key = countryName.toLowerCase(Locale.ROOT);
-                double oldVal = countryMoney.getOrDefault(key, 0.0);
-                countryMoney.put(key, oldVal + delta);
-                touchCacheNow();
-            });
+            Bukkit.getScheduler().runTask(plugin, this::touchCacheNow);
         });
+    }
+
+    public boolean addCountryMoneySync(String countryName, double delta) {
+        if (countryName == null || countryName.isBlank()) return false;
+        if (delta == 0.0) return true;
+
+        final String sql = """
+        UPDATE Countries
+        SET CountryInfo = JSON_SET(
+            COALESCE(CountryInfo, JSON_OBJECT()),
+            '$.Money',
+            CAST(
+                (COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(CountryInfo,'$.Money')) AS DECIMAL(20,3)), 0) + ?) AS JSON
+            )
+        )
+        WHERE Name = ?
+        """;
+
+        try (Connection con = DBConnect()) {
+            if (con == null) { logDb("addCountryMoneySync"); return false; }
+            try (PreparedStatement ps = con.prepareStatement(sql)) {
+                ps.setDouble(1, delta);
+                ps.setString(2, countryName);
+                int updated = ps.executeUpdate();
+                if (updated <= 0) return false;
+            }
+        } catch (Throwable t) {
+            logDb("addCountryMoneySync", t);
+            return false;
+        }
+
+        // кэш обновляем аккуратно: пометим “грязным”, чтобы подхватилось TTL-рефрешем
+        Bukkit.getScheduler().runTask(plugin, this::touchCacheNow);
+        return true;
     }
 
     /** Получить страну игрока или null. */
@@ -363,6 +383,25 @@ public class CountryRegistryJdbc {
             return;
         }
 
+        // не блокируем main-thread
+        if (Bukkit.isPrimaryThread()) {
+            if (refreshInFlight.compareAndSet(false, true)) {
+                Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+                    try {
+                        refreshCacheNowBlocking_();
+                    } finally {
+                        refreshInFlight.set(false);
+                    }
+                });
+            }
+            return; // отдаем старые значения, обновление придёт чуть позже
+        }
+
+        // если мы уже в async — можно обновить прямо сейчас
+        refreshCacheNowBlocking_();
+    }
+
+    private void refreshCacheNowBlocking_() {
         // временные мапы, которые мы соберём заново
         Map<String, String> newPlayerToCountry = new HashMap<>();
         Map<String, Integer> newPlayerToRoleId = new HashMap<>();
@@ -652,13 +691,46 @@ public class CountryRegistryJdbc {
         }
     }
 
+
+
+
     private static RoleInfo roleFromJson(JsonObject o) {
         if (o == null) return null;
         Integer id = getInt(o);
         String name = getString(o, "Name");
         String prefix = getString(o, "Prefix");
+
+        int idx = 0;
+        try {
+            if (o.has("Index") && !o.get("Index").isJsonNull()) {
+                JsonElement el = o.get("Index");
+                if (el.isJsonPrimitive()) {
+                    if (el.getAsJsonPrimitive().isNumber()) idx = el.getAsInt();
+                    else if (el.getAsJsonPrimitive().isString()) idx = Integer.parseInt(el.getAsString().trim());
+                }
+            }
+        } catch (Exception ignored) {}
+
         if (id == null) return null;
-        return new RoleInfo(id, name, prefix);
+        return new RoleInfo(id, name, prefix, idx);
+    }
+
+    public int getPlayerRoleIndex(String playerName) {
+        if (playerName == null || playerName.isBlank()) return 0;
+        refreshCacheIfExpired();
+
+        String pLower = playerName.toLowerCase(Locale.ROOT);
+        String country = playerToCountry.get(pLower);
+        if (country == null) return 0;
+
+        Integer rid = playerToRoleId.get(pLower);
+        if (rid == null) return 0;
+
+        Map<Integer, RoleInfo> roles = countryRoleMeta.get(country.toLowerCase(Locale.ROOT));
+        if (roles == null) return 0;
+
+        RoleInfo ri = roles.get(rid);
+        return (ri == null) ? 0 : ri.index();
     }
 
     private static Integer findLeaderRoleIdFromRoles(Map<Integer, RoleInfo> rolesMap) {
@@ -839,6 +911,14 @@ public class CountryRegistryJdbc {
         }
 
         ATM_SCHEMA_CHECKED.set(true);
+    }
+
+    public boolean countryExistsCached(String countryName) {
+        if (countryName == null || countryName.isBlank()) return false;
+        refreshCacheIfExpired();
+        String key = countryName.toLowerCase(Locale.ROOT);
+        // достаточно проверять по любому кэшу страны
+        return countryMoney.containsKey(key) || countryToLeader.containsKey(key);
     }
 
     /* ===================== LOG ===================== */

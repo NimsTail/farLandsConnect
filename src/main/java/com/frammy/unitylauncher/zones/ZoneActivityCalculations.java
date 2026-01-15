@@ -14,8 +14,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class ZoneActivityCalculations {
 
     /* ===== Кэш дневной цены ===== */
-        private record CostCacheEntry(double cost, long ts, String sig) {
-    }
+    private record CostCacheEntry(double cost, long ts, String sig) {}
 
     private final ZoneManager zm;
     private static final long COST_TTL_MS = 5 * 60_000L; // 5 минут
@@ -465,4 +464,21 @@ public class ZoneActivityCalculations {
         }
         return inside;
     }
+
+    /**
+     * Публичный доступ к долям покрытия чанков полигоном зоны.
+     * Ключ: "world:cx,cz" -> fraction (0..1)
+     *
+     * Важно: безопасно вызывать async, если corners уже не трогаются из другого потока.
+     * Рекомендация: вызывать на главном потоке или передавать snapshot (копию списка).
+     */
+    public Map<String, Double> getChunkFractionsForCorners(String worldName, List<Location> corners) {
+        Map<String, Double> res = new HashMap<>();
+        if (worldName == null || corners == null || corners.size() < 3) return res;
+
+        List<Point2> poly = new ArrayList<>(corners.size());
+        for (Location L : corners) poly.add(new Point2(L.getX(), L.getZ()));
+        return getChunkFractionsKeys(worldName, poly);
+    }
+
 }

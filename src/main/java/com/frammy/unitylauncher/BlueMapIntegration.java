@@ -1,6 +1,5 @@
 package com.frammy.unitylauncher;
 
-import com.flowpowered.math.vector.Vector2d;
 import com.flowpowered.math.vector.Vector3d;
 import com.frammy.unitylauncher.signs.SignVariables;
 import com.frammy.unitylauncher.zones.ZoneInfo;
@@ -11,6 +10,7 @@ import de.bluecolored.bluemap.api.markers.ExtrudeMarker;
 import de.bluecolored.bluemap.api.markers.Marker;
 import de.bluecolored.bluemap.api.markers.MarkerSet;
 import de.bluecolored.bluemap.api.markers.POIMarker;
+import de.bluecolored.bluemap.api.math.Color;
 import de.bluecolored.bluemap.api.math.Shape;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
@@ -25,13 +25,12 @@ import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.logging.Logger;
-import java.util.stream.Collectors;
 
 public class BlueMapIntegration {
     private final UnityLauncher plugin;
     private final Logger logger;
     private final File dataFolder;
-    public Map<Player, List<Location>> markerPoints = new HashMap<>();
+    public final Map<UUID, List<Location>> markerPoints = new HashMap<>();
 
     public File getDataFolder() { return dataFolder; }
 
@@ -76,12 +75,33 @@ public class BlueMapIntegration {
         }
         if (extrude.size() < 3) return;
 
-        String cleanName = ChatColor.stripColor(z.getName() == null ? "" : z.getName()).trim();
-        if (cleanName.isEmpty()) cleanName = z.getID();
-        String setIdByType = "zones_" + z.getType().name().toLowerCase(Locale.ROOT);
+        String name = ChatColor.stripColor(safe(z.getName())).trim();
+        String typeName = (z.getType() != null ? z.getType().name() : "ZONE");
+        String setIdByType = "zones_" + typeName.toLowerCase(Locale.ROOT);
 
-        addBlueMapMarker(z.getMarkerID(), base, setIdByType, cleanName, "extrude", extrude, null);
+        // красивый заголовок маркера
+        String title = !name.isEmpty()
+                ? name
+                : (typeName + " #" + shortId(z.getID()));
 
+        // описание при клике (BlueMap показывает detail)
+        String detail =
+                "<b>" + escapeHtml(title) + "</b><br>" +
+                        "<b>Type:</b> " + escapeHtml(typeName) + "<br>" +
+                        "<b>ID:</b> " + escapeHtml(z.getID()) + "<br>" +
+                        "<b>World:</b> " + escapeHtml(base.getWorld().getName()) + "<br>" +
+                        "<b>Points:</b> " + extrude.size();
+
+        addBlueMapMarker(z.getMarkerID(), base, setIdByType, title, "extrude", extrude, null);
+
+        BlueMapAPI.getInstance().flatMap(api -> api.getMap(base.getWorld().getName())).ifPresent(map -> {
+            MarkerSet set = map.getMarkerSets().get(setIdByType);
+            if (set == null) return;
+            Marker m = set.getMarkers().get(z.getMarkerID());
+            if (m instanceof ExtrudeMarker em) {
+                em.setDetail(detail);
+            }
+        });
     }
 
     /** Ставит простой POI-маркер для таблички в отдельном наборе. Совместим с текущей сигнатурой POIMarker. */
@@ -123,8 +143,8 @@ public class BlueMapIntegration {
             }
 
             MarkerSet markerSet = markerSets.computeIfAbsent(setID, k -> new MarkerSet("Markers"));
-            // человекочитаемый label набора
-            markerSet.setLabel((setLabel != null && !setLabel.isEmpty()) ? setLabel : setID);
+            // label набора должен быть стабильным, а не названием конкретной зоны
+            markerSet.setLabel(niceSetLabel(setID));
 
             if (markerSet.getMarkers() == null) {
                 Bukkit.getLogger().warning("Markers map is null for setID: " + setID);
@@ -138,11 +158,12 @@ public class BlueMapIntegration {
                         return;
                     }
 
-                    // Контур XZ
-                    List<Vector2d> basePoints = extrudePoints.stream()
-                            .map(v -> new Vector2d(v.getX(), v.getZ()))
-                            .collect(Collectors.toList());
-                    Shape newShape = new Shape(basePoints);
+                    // Контур XZ (ВАЖНО: Shape строим через BlueMap ClassLoader)
+                    Shape newShape = blueMapShapeFromExtrude(extrudePoints);
+                    if (newShape == null) {
+                        if (p != null) p.sendMessage(ChatColor.RED + "Не удалось построить форму полигона (BlueMap Shape).");
+                        return;
+                    }
 
                     // Высоты Y (умолчания как в зонах): -64..255
                     double minY = extrudePoints.stream().mapToDouble(Vector3d::getY).min().orElse(-64);
@@ -150,28 +171,37 @@ public class BlueMapIntegration {
 
                     if (minY > maxY) { double t = minY; minY = maxY; maxY = t; }
 
-                    // Проверяем пересечения со всеми существующими ExtrudeMarker в этом наборе
-                    for (Marker existingMarker : markerSet.getMarkers().values()) {
-                        if (existingMarker instanceof ExtrudeMarker em) {
-                            if (!yOverlap(minY, maxY, em.getShapeMinY(), em.getShapeMaxY())) continue;
-                            if (polygonsIntersectXZ(newShape, em.getShape())) {
-                                if (p != null) p.sendMessage(ChatColor.RED + "Маркер пересекается с существующим: " + em.getLabel());
-                                Bukkit.getLogger().warning("Маркер пересекается с существующим: " + em.getLabel());
-                                return;
-                            }
-                        }
-                    }
-
                     // Добавляем новый полигон
                     ExtrudeMarker extrudeMarker = new ExtrudeMarker(id, newShape, (float) minY, (float) maxY);
-                    String label = (setLabel != null && !setLabel.isEmpty()) ? setLabel : id;
+
+                    String label = (setLabel != null && !setLabel.isEmpty()) ? setLabel : ("Зона #" + shortId(id));
                     label = ChatColor.stripColor(label);
                     extrudeMarker.setLabel(label);
+
+                    // красивое описание при клике
+                    String setPretty = prettySetName(setID);
+
+                    String detail =
+                            "<b>" + escapeHtml(label) + "</b><br>" +
+                                    "<b>Тип:</b> " + escapeHtml(setPretty) + "<br>" +
+                                    "<b>Высота Y:</b> " + ((int) minY) + " .. " + ((int) maxY) + "<br>" +
+                                    "<b>Точек:</b> " + extrudePoints.size();
+
+                    extrudeMarker.setDetail(detail);
+
+                    // цвета по типу зоны (берём из setID вида zones_<type>)
+                    ZoneColors colors = colorsForZoneSetId(setID);
+                    extrudeMarker.setFillColor(colors.fill());
+                    extrudeMarker.setLineColor(colors.line());
+
                     markerSet.getMarkers().put(id, extrudeMarker);
 
-                    if (p != null) p.sendMessage(ChatColor.GREEN + "Торговая точка успешно создана!");
+                    if (p != null) {
+                        p.sendMessage(ChatColor.GREEN + "Торговая точка успешно создана!");
+                        plugin.getAwaitingCorrectCommand().remove(p.getUniqueId());
+                    }
                     markerPoints.clear();
-                    plugin.getAwaitingCorrectCommand().remove(p);
+
                 }
 
                 case "point_atm" -> {
@@ -196,12 +226,52 @@ public class BlueMapIntegration {
         });
     }
 
+    private static String prettySetName(String setID) {
+        if (setID == null || setID.isBlank()) return "—";
+
+        String key = setID.startsWith("zones_")
+                ? setID.substring("zones_".length())
+                : setID;
+
+        key = key.trim().toLowerCase(Locale.ROOT);
+
+        return switch (key) {
+            case "country"     -> "Государство";
+            case "colony"      -> "Колония";
+            case "bank"        -> "Банк";
+            case "hospital"    -> "Госпиталь";
+            case "industrial"  -> "Промышленная зона";
+            case "park"        -> "Парк";
+            case "church"      -> "Церковь";
+            case "library"     -> "Библиотека";
+            case "greenhouse"  -> "Теплица";
+            case "shop"        -> "Магазин";
+            default -> {
+                // fallback: просто красиво капитализируем
+                if (key.isEmpty()) yield "—";
+                yield key.substring(0, 1).toUpperCase(Locale.ROOT) + key.substring(1);
+            }
+        };
+    }
+
     public void removeBlueMapMarker(String id, String worldName, String markerSetKey) {
         if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
         BlueMapAPI.getInstance().flatMap(blueMapAPI -> blueMapAPI.getMap(worldName)).ifPresent(map -> {
             MarkerSet markerSet = map.getMarkerSets().get(markerSetKey);
             if (markerSet != null) markerSet.getMarkers().remove(id);
         });
+    }
+
+    public void saveAllBlueMapMarkersByPrefix(String prefix) {
+        if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
+
+        BlueMapAPI.getInstance().ifPresent(api -> api.getMaps().forEach(map -> {
+            for (String setId : new ArrayList<>(map.getMarkerSets().keySet())) {
+                if (setId != null && setId.startsWith(prefix)) {
+                    saveBlueMapMarkers(setId);
+                }
+            }
+        }));
     }
 
     public void saveBlueMapMarkers(String setID) {
@@ -265,6 +335,33 @@ public class BlueMapIntegration {
         }));
     }
 
+    private static Shape blueMapShapeFromExtrude(List<Vector3d> extrudePoints) {
+        if (extrudePoints == null || extrudePoints.size() < 3) return null;
+
+        try {
+            // Берём ClassLoader от Shape (т.е. от BlueMap), чтобы Vector2d был "того же мира"
+            ClassLoader cl = Shape.class.getClassLoader();
+
+            Class<?> vecCls = Class.forName("com.flowpowered.math.vector.Vector2d", true, cl);
+            var vecCtor = vecCls.getConstructor(double.class, double.class);
+
+            ArrayList<Object> pts = new ArrayList<>(extrudePoints.size());
+            for (Vector3d v : extrudePoints) {
+                if (v == null) continue;
+                // XZ -> (x, z). В Vector2d второй компонент называется Y, но это Z мира.
+                pts.add(vecCtor.newInstance(v.getX(), v.getZ()));
+            }
+            if (pts.size() < 3) return null;
+
+            var shapeCtor = Shape.class.getConstructor(Collection.class);
+            return shapeCtor.newInstance(pts);
+
+        } catch (Throwable t) {
+            Bukkit.getLogger().warning("[BlueMapIntegration] Failed to build BlueMap Shape: " + t);
+            return null;
+        }
+    }
+
     /* ===================== ПРОЧНЫЕ ХЕЛПЕРЫ ДЛЯ ПЕРЕСЕЧЕНИЙ ===================== */
 
     private static final GeometryFactory JTS = new GeometryFactory();
@@ -276,19 +373,26 @@ public class BlueMapIntegration {
 
     /** Преобразуем Shape (BlueMap) -> JTS Polygon (только XZ), с замыканием контура. */
     private static Polygon shapeToPolygon(Shape shape) {
-        List<Vector2d> pts = Arrays.asList(shape.getPoints());
-        if (pts.size() < 3) return null;
+        Object[] pts = shape.getPoints(); // Vector2d[] но "чужой" по ClassLoader
+        if (pts == null || pts.length < 3) return null;
 
-        Coordinate[] coords = new Coordinate[pts.size() + 1];
-        for (int i = 0; i < pts.size(); i++) {
-            coords[i] = new Coordinate(pts.get(i).getX(), pts.get(i).getY()); // XZ => (x, z) -> (x, y)
-        }
-        coords[pts.size()] = new Coordinate(coords[0]);
-
+        Coordinate[] coords = new Coordinate[pts.length + 1];
         try {
+            for (int i = 0; i < pts.length; i++) {
+                Object v = pts[i];
+                if (v == null) return null;
+
+                // у BlueMap Vector2d есть getX(), getY()
+                double x = (double) v.getClass().getMethod("getX").invoke(v);
+                double y = (double) v.getClass().getMethod("getY").invoke(v);
+
+                coords[i] = new Coordinate(x, y); // XZ -> (x, z) у нас лежит во втором компоненте
+            }
+            coords[pts.length] = new Coordinate(coords[0]);
+
             LinearRing shell = JTS.createLinearRing(coords);
             return JTS.createPolygon(shell);
-        } catch (Exception e) {
+        } catch (Throwable t) {
             return null;
         }
     }
@@ -301,4 +405,48 @@ public class BlueMapIntegration {
         var inter = p1.intersection(p2);
         return !inter.isEmpty() && inter.getArea() > EPS_AREA;
     }
+
+    private record ZoneColors(Color fill, Color line) {}
+
+    private static ZoneColors colorsForZoneSetId(String setID) {
+        // setID ожидается вида "zones_industrial", "zones_country", ...
+        String type = "";
+        if (setID != null && setID.startsWith("zones_")) type = setID.substring("zones_".length()).toLowerCase(Locale.ROOT);
+
+        // fill = полупрозрачный, line = плотный
+        return switch (type) {
+            case "industrial" -> new ZoneColors(new Color(0xF59E0B, 0.22f), new Color(0xF59E0B, 0.95f)); // amber
+            case "bank"       -> new ZoneColors(new Color(0x22C55E, 0.22f), new Color(0x22C55E, 0.95f)); // green
+            case "shop"       -> new ZoneColors(new Color(0x3B82F6, 0.22f), new Color(0x3B82F6, 0.95f)); // blue
+            case "country"    -> new ZoneColors(new Color(0xA855F7, 0.18f), new Color(0xA855F7, 0.95f)); // purple
+            case "colony"     -> new ZoneColors(new Color(0xEF4444, 0.18f), new Color(0xEF4444, 0.95f)); // red
+            default           -> new ZoneColors(new Color(0x9CA3AF, 0.15f), new Color(0x9CA3AF, 0.90f)); // gray
+        };
+    }
+
+    private static String niceSetLabel(String setID) {
+        if (setID == null) return "Zones";
+        if (!setID.startsWith("zones_")) return setID;
+
+        String t = setID.substring("zones_".length()).toLowerCase(Locale.ROOT);
+        String pretty = t.isEmpty() ? "Zones" : (t.substring(0, 1).toUpperCase(Locale.ROOT) + t.substring(1));
+        return "Zones: " + pretty;
+    }
+
+    private static String shortId(String id) {
+        if (id == null) return "null";
+        return id.length() <= 8 ? id : id.substring(0, 8);
+    }
+
+    private static String safe(String s) {
+        return s == null ? "" : s;
+    }
+
+    private static String escapeHtml(String s) {
+        if (s == null) return "";
+        return s.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;");
+    }
+
 }

@@ -1,5 +1,6 @@
 package com.frammy.unitylauncher;
 
+import com.mysql.cj.x.protobuf.MysqlxExpr;
 import io.papermc.paper.advancement.AdvancementDisplay;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
@@ -24,8 +25,6 @@ public final class ServerMessagesListener implements Listener {
 
     private static UnityLauncher plugin;
     private static final Random RNG = new Random();
-
-    private static boolean DEBUG = false;
 
     private static boolean JOIN_ENABLED;
     private static boolean QUIT_ENABLED;
@@ -119,7 +118,7 @@ public final class ServerMessagesListener implements Listener {
             plugin.saveConfig();
         }
 
-        DEBUG = c.getBoolean("serverMessages.debug", false);
+        boolean DEBUG = c.getBoolean("serverMessages.debug", false);
 
         JOIN_ENABLED       = getBooleanWithDefault(c, "serverMessages.join.enabled");
         QUIT_ENABLED       = getBooleanWithDefault(c, "serverMessages.quit.enabled");
@@ -271,35 +270,37 @@ public final class ServerMessagesListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onAdvancement(PlayerAdvancementDoneEvent event) {
         if (!ADV_ENABLED) return;
-
+        boolean debug = false;
         var adv = event.getAdvancement();
-        AdvancementDisplay display = adv.getDisplay(); // ВАЖНО: ИМПОРТ из io.papermc.paper.advancement.*
+        AdvancementDisplay display = adv.getDisplay();
 
         if (display == null) {
-            if (DEBUG) {
-                plugin.getLogger().info("ADV DEBUG: " + adv.getKey() + " has no display (hidden/recipes?)");
+            if (debug) {
+                plugin.getLogger().info("ADV DEBUG: " + adv.getKey() + " has no display (hidden/recipe)");
             }
             return;
         }
 
-        // Вырезаем скрытые/без-чата ачивки
         if (!display.doesAnnounceToChat() || display.isHidden()) {
-            if (DEBUG) {
-                plugin.getLogger().info("ADV DEBUG: " + adv.getKey() +
-                        " doesAnnounceToChat=" + display.doesAnnounceToChat() +
-                        " isHidden=" + display.isHidden() + " -> skip");
+            if (debug) {
+                plugin.getLogger().info(
+                        "ADV DEBUG: " + adv.getKey() +
+                                " announce=" + display.doesAnnounceToChat() +
+                                " hidden=" + display.isHidden()
+                );
             }
             return;
         }
 
-        String titlePlain = PlainTextComponentSerializer.plainText().serialize(display.title());
-        // описание пока не используем, но если захочешь — можно увести в %desc%
-        // String descPlain  = PlainTextComponentSerializer.plainText().serialize(display.description());
+        String titlePlain = PlainTextComponentSerializer.plainText()
+                .serialize(display.title());
 
         String tpl = pickRandom(ADV_TEMPLATES);
         if (tpl != null) {
             broadcastTemplate(tpl, event.getPlayer(), titlePlain);
         }
+
+
     }
 
     /* ===================== DEATH MESSAGES ===================== */

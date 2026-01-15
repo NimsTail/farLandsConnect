@@ -13,7 +13,6 @@ import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.scheduler.BukkitRunnable;
 
-import java.io.File;
 import java.util.*;
 
 public class MoneyManager implements Listener {
@@ -27,15 +26,17 @@ public class MoneyManager implements Listener {
     );
 
     // PDC-ключи
-    private final NamespacedKey KEY_VALUE  = new NamespacedKey(UnityLauncher.getInstance(), "money.value");
-    private final NamespacedKey KEY_SIG    = new NamespacedKey(UnityLauncher.getInstance(), "money.sig");
-    private final NamespacedKey KEY_VER    = new NamespacedKey(UnityLauncher.getInstance(), "money.ver");
+    private final NamespacedKey KEY_VALUE;
+    private final NamespacedKey KEY_SIG;
+    private final NamespacedKey KEY_VER;
 
     // Секрет для подписи
     private final String moneySecret;
 
-    public MoneyManager(File pluginDataFolder, String pluginName) {
-        var pl  = UnityLauncher.getInstance();
+    public MoneyManager(UnityLauncher pl) {
+        this.KEY_VALUE = new NamespacedKey(pl, "money.value");
+        this.KEY_SIG   = new NamespacedKey(pl, "money.sig");
+        this.KEY_VER   = new NamespacedKey(pl, "money.ver");
         var cfg = pl.getConfig();
         String path = "economy.money.secret";
         String s = cfg.getString(path);
@@ -56,54 +57,29 @@ public class MoneyManager implements Listener {
      */
     public void giveMoney(Player player, double amount) {
         long totalCents = toCents(amount);
-        if (totalCents <= 0) {
-            player.sendMessage(ChatColor.RED + "Сумма должна быть больше нуля.");
+        if (player == null || totalCents <= 0) {
+            if (player != null) player.sendMessage(ChatColor.RED + "Сумма должна быть больше нуля.");
             return;
         }
 
-        UnityCommands.getInstance().getPlayerInfo(player.getName(), data -> {
-            if (data == null) {
-                new BukkitRunnable() {
-                    @Override public void run() {
-                        player.sendMessage(ChatColor.RED + "Данные не найдены.");
-                    }
-                }.runTask(UnityLauncher.getInstance());
-                return;
-            }
+        // 1) списываем банк в async
+        Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
+            boolean ok = UnityCommands.getInstance()
+                    .applyMoneyDelta(player.getName(), -centsToDouble(totalCents));
 
-            long balanceCents = toCents(data.money);
-            if (balanceCents < totalCents) {
-                new BukkitRunnable() {
-                    @Override public void run() {
-                        player.sendMessage(ChatColor.RED + "Недостаточно средств. Баланс: " +
-                                ChatColor.YELLOW + round2(data.money) + ChatColor.RED + " Ⓕ.");
-                    }
-                }.runTask(UnityLauncher.getInstance());
-                return;
-            }
-
-            List<ItemStack> cashItems = buildCashItemsFromCents(totalCents);
-
-            new BukkitRunnable() {
-                @Override public void run() {
-                    addItemsOrDrop(player, cashItems);
-
-                    // 3) Списываем баланс АСИНХРОННО
-                    new BukkitRunnable() {
-                        @Override public void run() {
-                            double newBalance = centsToDouble(balanceCents - totalCents);
-                            Map<String, Object> updates = new HashMap<>();
-                            updates.put("money", newBalance);
-                            UnityCommands.getInstance().mergeAndUpdatePlayerData(
-                                    player.getName(), "GeneralData", updates
-                            );
-                        }
-                    }.runTaskAsynchronously(UnityLauncher.getInstance());
-
-                    player.sendMessage(ChatColor.GRAY + "С твоего счёта снято " +
-                            ChatColor.YELLOW + round2(amount) + ChatColor.GRAY + " Ⓕ наличными.");
+            // 2) выдаём наличку только при успехе (main)
+            Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
+                if (!ok) {
+                    player.sendMessage(ChatColor.RED + "Не удалось снять деньги со счёта (БД/баланс).");
+                    return;
                 }
-            }.runTask(UnityLauncher.getInstance());
+
+                List<ItemStack> cashItems = buildCashItemsFromCents(totalCents);
+                addItemsOrDrop(player, cashItems);
+
+                player.sendMessage(ChatColor.GRAY + "С твоего счёта снято " +
+                        ChatColor.YELLOW + round2(amount) + ChatColor.GRAY + " Ⓕ наличными.");
+            });
         });
     }
 
@@ -145,13 +121,19 @@ public class MoneyManager implements Listener {
                     }}.runTask(UnityLauncher.getInstance());
                     return;
                 }
-                new BukkitRunnable(){ @Override public void run(){
-                    double newBalance = round2(data.money + deposited);
-                    Map<String, Object> updates = new HashMap<>();
-                    updates.put("money", newBalance);
-                    UnityCommands.getInstance().mergeAndUpdatePlayerData(player.getName(), "GeneralData", updates);
-                    player.sendMessage(ChatColor.GRAY + "На твой счёт зачислено " + ChatColor.YELLOW + deposited + ChatColor.GRAY + " Ⓕ.");
-                }}.runTaskAsynchronously(UnityLauncher.getInstance());
+                Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
+                    boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), deposited);
+
+                    Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
+                        if (ok) {
+                            player.sendMessage(ChatColor.GRAY + "На твой счёт зачислено " +
+                                    ChatColor.YELLOW + round2(deposited) + ChatColor.GRAY + " Ⓕ.");
+                        } else {
+                            giveCash(player, deposited);
+                            player.sendMessage(ChatColor.RED + "Не удалось зачислить деньги (БД). Сумма возвращена наличными.");
+                        }
+                    });
+                });
             });
         } else {
             // ===== ВЗНОС В КАЗНУ СТРАНЫ =====
@@ -164,14 +146,27 @@ public class MoneyManager implements Listener {
                 }
                 String country = data.countryName;
 
-                // TODO: когда появится нормальный API баланса страны — заменить этот блок
-                new BukkitRunnable(){ @Override public void run(){
-                    Map<String, Object> updates = new HashMap<>();
-                    updates.put("money", round2(data.money + deposited));
-                    UnityCommands.getInstance().mergeAndUpdatePlayerData(player.getName(), "GeneralData", updates);
-                    player.sendMessage(ChatColor.RED + "Взнос в казну страны [" + country + "] пока не настроен.");
-                    player.sendMessage(ChatColor.GRAY + "Сумма " + ChatColor.YELLOW + deposited + ChatColor.GRAY + " Ⓕ возвращена на твой счёт.");
-                }}.runTaskAsynchronously(UnityLauncher.getInstance());
+                Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
+                    boolean ok = true;
+                    try {
+                        UnityLauncher.getInstance().getCountryRegistryJdbc().addCountryMoney(country, deposited);
+                    } catch (Exception e) {
+                        ok = false;
+                        Bukkit.getLogger().warning("[MoneyManager] addCountryMoney failed: " + e);
+                    }
+
+                    boolean finalOk = ok;
+                    Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
+                        if (finalOk) {
+                            player.sendMessage(ChatColor.GRAY + "В казну страны [" + ChatColor.YELLOW + country
+                                    + ChatColor.GRAY + "] внесено " + ChatColor.YELLOW + round2(deposited)
+                                    + ChatColor.GRAY + " Ⓕ.");
+                        } else {
+                            giveCash(player, deposited);
+                            player.sendMessage(ChatColor.RED + "Не удалось внести в казну (БД). Сумма возвращена наличными.");
+                        }
+                    });
+                });
             });
         }
     }
@@ -205,15 +200,32 @@ public class MoneyManager implements Listener {
             long newCents = curCents - amountCents;
 
             new BukkitRunnable() {
-                @Override
-                public void run() {
-                    Map<String, Object> upd = new HashMap<>();
-                    upd.put("money", centsToDouble(newCents));
-                    UnityCommands.getInstance()
-                            .mergeAndUpdatePlayerData(playerName, "GeneralData", upd);
+                @Override public void run() {
+                    boolean ok = UnityCommands.getInstance().applyMoneyDelta(playerName, -centsToDouble(amountCents));
+                    if (!ok) {
+                        Bukkit.getLogger().warning("[MoneyManager] withdraw failed for '" + playerName + "'");
+                    }
                 }
             }.runTaskAsynchronously(UnityLauncher.getInstance());
+
         });
+    }
+
+    /**
+     * Выдать игроку наличку БЕЗ списания его банковского баланса.
+     * Используется, например, когда деньги приходят из казны страны.
+     */
+    public void giveCash(Player player, double amount) {
+        long totalCents = toCents(amount);
+        if (player == null || totalCents <= 0) return;
+
+        List<ItemStack> cashItems = buildCashItemsFromCents(totalCents);
+
+        new BukkitRunnable() {
+            @Override public void run() {
+                addItemsOrDrop(player, cashItems);
+            }
+        }.runTask(UnityLauncher.getInstance());
     }
 
     /**
@@ -262,17 +274,21 @@ public class MoneyManager implements Listener {
         return ((double) cents) / 100.0;
     }
 
-    private long getMoneyCents(ItemStack item) {
-        double v = getMoneyValue(item);
-        if (v <= 0) return 0;
-        return toCents(v);
+    private long getMoneyCentsVerified(ItemStack item) {
+        if (item == null || item.getType().isAir()) return 0;
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null) return 0;
+        var pdc = meta.getPersistentDataContainer();
+        Double v = pdc.get(KEY_VALUE, PersistentDataType.DOUBLE);
+        if (v == null || v <= 0.0) return 0;
+        return toCents(round2(v));
     }
 
     private long getInventoryCashCents(Inventory inv) {
         long sum = 0L;
         for (ItemStack stack : inv.getStorageContents()) {
             if (!verifyMoney(stack)) continue;
-            long unit = getMoneyCents(stack);
+            long unit = getMoneyCentsVerified(stack);
             if (unit <= 0) continue;
             sum += unit * stack.getAmount();
         }
@@ -288,7 +304,7 @@ public class MoneyManager implements Listener {
         for (int i = 0; i < contents.length; i++) {
             ItemStack stack = contents[i];
             if (!verifyMoney(stack)) continue;
-            long unit = getMoneyCents(stack);
+            long unit = getMoneyCentsVerified(stack);
             if (unit <= 0) continue;
             total += unit * stack.getAmount();
             inv.setItem(i, null);
@@ -306,24 +322,24 @@ public class MoneyManager implements Listener {
         long dollars = totalCents / 100;
         int cents     = (int) (totalCents % 100);
 
-        // Купюры
         for (int d : dollarDenominations) {
-            while (dollars >= d) {
-                list.add(createMoneyItem(Material.PRISMARINE_SHARD, d, "Ⓕ"));
-                dollars -= d;
+            long count = dollars / d;
+            while (count > 0) {
+                int stack = (int) Math.min(64, count);
+                list.add(createMoneyItem(Material.PRISMARINE_SHARD, d, "Ⓕ", stack));
+                count -= stack;
             }
+            dollars %= d;
         }
 
-        // Монеты
         for (int c : centDenominations) {
-            while (cents >= c) {
-                list.add(createMoneyItem(
-                        Material.PRISMARINE_CRYSTALS,
-                        c / 100.0,
-                        "ⓒ"
-                ));
-                cents -= c;
+            int count = cents / c;
+            while (count > 0) {
+                int stack = Math.min(64, count);
+                list.add(createMoneyItem(Material.PRISMARINE_CRYSTALS, c / 100.0, "ⓒ", stack));
+                count -= stack;
             }
+            cents %= c;
         }
 
         return list;
@@ -347,25 +363,26 @@ public class MoneyManager implements Listener {
 
     /* ===================== СОЗДАНИЕ / ПРОВЕРКА КУПЮР ===================== */
 
-    private ItemStack createMoneyItem(Material material, double value, String symbol) {
+    private ItemStack createMoneyItem(Material material, double value, String symbol, int amount) {
         ItemStack item = new ItemStack(material);
+        item.setAmount(Math.max(1, Math.min(64, amount)));
+
         ItemMeta meta = item.getItemMeta();
         if (meta != null) {
-            // Для доллара показываем целое, для монет — количество центов
             String displayValue = symbol.equals("Ⓕ")
                     ? String.valueOf((int) value)
                     : String.valueOf((int) Math.round(value * 100.0));
 
-            meta.setDisplayName(ChatColor.GREEN + symbol + "   " +
-                    ChatColor.RESET + displayValue);
+            meta.setDisplayName(ChatColor.GREEN + symbol + "   " + ChatColor.RESET + displayValue);
 
-            if (material == Material.PRISMARINE_SHARD)    meta.setCustomModelData(10010); // «доллары»
-            if (material == Material.PRISMARINE_CRYSTALS) meta.setCustomModelData(10011); // «центы»
+            if (material == Material.PRISMARINE_SHARD)    meta.setCustomModelData(10010);
+            if (material == Material.PRISMARINE_CRYSTALS) meta.setCustomModelData(10011);
 
             var pdc = meta.getPersistentDataContainer();
+            double v2 = round2(value);
             pdc.set(KEY_VER,   PersistentDataType.INTEGER, 1);
-            pdc.set(KEY_VALUE, PersistentDataType.DOUBLE,  round2(value));
-            String sig = hmac(signPayload(round2(value), 1, material));
+            pdc.set(KEY_VALUE, PersistentDataType.DOUBLE,  v2);
+            String sig = hmac(signPayload(v2, 1, material));
             if (sig != null) pdc.set(KEY_SIG, PersistentDataType.STRING, sig);
 
             meta.addItemFlags(org.bukkit.inventory.ItemFlag.HIDE_ATTRIBUTES,
@@ -375,7 +392,7 @@ public class MoneyManager implements Listener {
         return item;
     }
 
-    private double getMoneyValue(ItemStack item) {
+    public double getMoneyValue(ItemStack item) {
         if (item == null || item.getType().isAir()) return 0.0;
         if (!verifyMoney(item)) return 0.0;
 
@@ -384,9 +401,7 @@ public class MoneyManager implements Listener {
         var pdc = meta.getPersistentDataContainer();
 
         Double v = pdc.get(KEY_VALUE, PersistentDataType.DOUBLE);
-        if (v != null && v > 0.0) {
-            return round2(v);
-        }
+        if (v != null && v > 0.0) return round2(v);
         return 0.0;
     }
 
@@ -453,4 +468,209 @@ public class MoneyManager implements Listener {
         String v = String.format(java.util.Locale.ROOT, "%.2f", value);
         return v + "|" + ver + "|" + mat.name();
     }
+
+    public void tryWithdraw(String playerName, double amount, java.util.function.Consumer<Boolean> cb) {
+        if (playerName == null || playerName.isBlank() || amount <= 0) {
+            if (cb != null) cb.accept(false);
+            return;
+        }
+
+        long amountCents = toCents(amount);
+        if (amountCents <= 0) { if (cb != null) cb.accept(false); return; }
+
+        UnityCommands.getInstance().getPlayerInfo(playerName, data -> {
+            if (data == null) { if (cb != null) cb.accept(false); return; }
+
+            long curCents = toCents(data.money);
+            if (curCents < amountCents) {
+                if (cb != null) cb.accept(false);
+                return;
+            }
+
+            long newCents = curCents - amountCents;
+
+            new BukkitRunnable() {
+                @Override public void run() {
+                    boolean ok = UnityCommands.getInstance().applyMoneyDelta(playerName, -centsToDouble(amountCents));
+                    if (cb != null) cb.accept(ok);
+                }
+            }.runTaskAsynchronously(UnityLauncher.getInstance());
+        });
+    }
+
+    /**
+     * Снять со счёта игрока grossAmount и выдать наличными netCashAmount.
+     * Разница (gross - net) "сгорает".
+     *
+     * Важно: здесь MoneyManager НЕ считает комиссию — ему передают уже рассчитанные суммы.
+     */
+    public void withdrawToCashBurnFee(Player player, double grossAmount, double netCashAmount) {
+        if (player == null) return;
+        if (grossAmount <= 0) { player.sendMessage(ChatColor.RED + "Сумма должна быть > 0."); return; }
+        if (netCashAmount < 0 || netCashAmount > grossAmount + 1e-9) {
+            player.sendMessage(ChatColor.RED + "Некорректная сумма.");
+            return;
+        }
+
+        long grossCents = toCents(grossAmount);
+        long netCents   = toCents(netCashAmount);
+        if (grossCents <= 0) { player.sendMessage(ChatColor.RED + "Сумма слишком мала."); return; }
+        if (netCents < 0) netCents = 0;
+        if (netCents > grossCents) netCents = grossCents;
+
+        final long finalNetCents = netCents;
+        final double finalGross = round2(grossAmount);
+        final double finalNet   = round2(netCashAmount);
+
+        Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
+            boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), -centsToDouble(grossCents));
+
+            Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
+                if (!ok) {
+                    player.sendMessage(ChatColor.RED + "Не удалось снять деньги со счёта (БД/баланс).");
+                    return;
+                }
+
+                if (finalNetCents > 0) {
+                    addItemsOrDrop(player, buildCashItemsFromCents(finalNetCents));
+                }
+
+                long feeCents = grossCents - finalNetCents;
+                if (feeCents > 0) {
+                    player.sendMessage(ChatColor.GRAY + "Снято со счёта: " + ChatColor.YELLOW + finalGross
+                            + ChatColor.GRAY + " Ⓕ, выдано наличными: " + ChatColor.YELLOW + finalNet
+                            + ChatColor.GRAY + " Ⓕ.");
+                } else {
+                    player.sendMessage(ChatColor.GRAY + "С твоего счёта снято " + ChatColor.YELLOW + finalGross
+                            + ChatColor.GRAY + " Ⓕ наличными.");
+                }
+            });
+        });
+    }
+
+    /**
+     * Внести наличку: из инвентаря списываем grossAmount, на счёт зачисляем netDepositAmount.
+     * Разница (gross - net) "сгорает". Сдача возвращается ТОЛЬКО от переплаты купюрами (как и раньше).
+     */
+    public boolean depositCashToPlayerBurnFee(Player player, double grossAmount, double netDepositAmount) {
+        if (player == null) return false;
+        if (grossAmount <= 0) return false;
+        if (netDepositAmount < 0 || netDepositAmount > grossAmount + 1e-9) {
+            player.sendMessage(ChatColor.RED + "Некорректная сумма.");
+            return false;
+        }
+
+        // inventory operations — main thread
+        boolean okCash = spendCash(player, grossAmount);
+        if (!okCash) {
+            player.sendMessage(ChatColor.RED + "Недостаточно наличных в инвентаре.");
+            return false;
+        }
+
+        long grossCents = toCents(grossAmount);
+        long netCents   = toCents(netDepositAmount);
+        if (netCents < 0) netCents = 0;
+        if (netCents > grossCents) netCents = grossCents;
+
+        final long finalNetCents = netCents;
+        final double gross2 = round2(grossAmount);
+        final double net2   = round2(centsToDouble(finalNetCents));
+        final long feeCents = grossCents - finalNetCents;
+
+        Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
+            boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), centsToDouble(finalNetCents));
+
+            Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
+                if (!ok) {
+                    // возврат gross наличкой
+                    giveCash(player, gross2);
+                    player.sendMessage(ChatColor.RED + "Не удалось зачислить деньги (БД). Сумма возвращена наличными.");
+                    return;
+                }
+
+                if (feeCents > 0) {
+                    player.sendMessage(ChatColor.GRAY + "Внесено наличными: " + ChatColor.YELLOW + gross2
+                            + ChatColor.GRAY + " Ⓕ, зачислено: " + ChatColor.YELLOW + net2
+                            + ChatColor.GRAY + " Ⓕ.");
+                } else {
+                    player.sendMessage(ChatColor.GRAY + "На твой счёт зачислено " + ChatColor.YELLOW + net2
+                            + ChatColor.GRAY + " Ⓕ.");
+                }
+            });
+        });
+
+        return true;
+    }
+
+    /**
+     * Внести наличку в казну: из инвентаря списываем grossAmount, в казну зачисляем netDepositAmount.
+     * Разница (gross - net) "сгорает".
+     */
+    public boolean depositCashToCountryBurnFee(Player player, double grossAmount, double netDepositAmount) {
+        if (player == null) return false;
+        if (grossAmount <= 0) return false;
+        if (netDepositAmount < 0 || netDepositAmount > grossAmount + 1e-9) {
+            player.sendMessage(ChatColor.RED + "Некорректная сумма.");
+            return false;
+        }
+
+        boolean okCash = spendCash(player, grossAmount);
+        if (!okCash) {
+            player.sendMessage(ChatColor.RED + "Недостаточно наличных в инвентаре.");
+            return false;
+        }
+
+        long grossCents = toCents(grossAmount);
+        long netCents   = toCents(netDepositAmount);
+        if (netCents < 0) netCents = 0;
+        if (netCents > grossCents) netCents = grossCents;
+
+        final long finalNetCents = netCents;
+        final double gross2 = round2(grossAmount);
+        final double net2   = round2(centsToDouble(finalNetCents));
+        final long feeCents = grossCents - finalNetCents;
+
+        UnityCommands.getInstance().getPlayerInfo(player.getName(), data -> {
+            if (data == null || data.countryName == null || data.countryName.isBlank()) {
+                Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
+                    giveCash(player, gross2);
+                    player.sendMessage(ChatColor.RED + "Ты не состоишь в стране — взнос невозможен. Сумма возвращена.");
+                });
+                return;
+            }
+
+            final String country = data.countryName;
+
+            Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
+                boolean ok = true;
+                try {
+                    UnityLauncher.getInstance().getCountryRegistryJdbc().addCountryMoney(country, centsToDouble(finalNetCents));
+                } catch (Exception e) {
+                    ok = false;
+                    Bukkit.getLogger().warning("[MoneyManager] addCountryMoney failed: " + e);
+                }
+
+                boolean finalOk = ok;
+                Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
+                    if (!finalOk) {
+                        giveCash(player, gross2);
+                        player.sendMessage(ChatColor.RED + "Не удалось внести в казну (БД). Сумма возвращена наличными.");
+                        return;
+                    }
+
+                    if (feeCents > 0) {
+                        player.sendMessage(ChatColor.GRAY + "В казну [" + ChatColor.YELLOW + country + ChatColor.GRAY + "] внесено: "
+                                + ChatColor.YELLOW + gross2 + ChatColor.GRAY + " Ⓕ, зачислено: "
+                                + ChatColor.YELLOW + net2 + ChatColor.GRAY + " Ⓕ.");
+                    } else {
+                        player.sendMessage(ChatColor.GRAY + "В казну страны [" + ChatColor.YELLOW + country + ChatColor.GRAY
+                                + "] внесено " + ChatColor.YELLOW + net2 + ChatColor.GRAY + " Ⓕ.");
+                    }
+                });
+            });
+        });
+
+        return true;
+    }
+
 }

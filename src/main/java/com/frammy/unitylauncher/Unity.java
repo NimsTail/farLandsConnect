@@ -4,7 +4,9 @@ import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
 import com.frammy.unitylauncher.chunkactivity.ActivityWeights;
 import com.frammy.unitylauncher.chunkactivity.ChunkActivityHeatmapExporter;
 import com.frammy.unitylauncher.chunkactivity.ZonesEconomyConfig;
-import com.frammy.unitylauncher.upgrades.UpgradesListener;
+import com.frammy.unitylauncher.upgrades.core.Upgrade;
+import com.frammy.unitylauncher.upgrades.core.UpgradesManager;
+import com.frammy.unitylauncher.upgrades.impl.SafeDepositUpgrade;
 import com.frammy.unitylauncher.zones.ZoneInfo;
 import com.frammy.unitylauncher.zones.ZoneManager;
 import net.kyori.adventure.text.Component;
@@ -16,6 +18,7 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.NotNull;
 
@@ -48,7 +51,8 @@ public class Unity implements CommandExecutor {
     public boolean onCommand(@NotNull CommandSender sender,
                              @NotNull Command command,
                              @NotNull String label,
-                             @NotNull String[] args) {
+                             @NotNull String[] args)
+    {
 
         String cmd = command.getName().toLowerCase(Locale.ROOT);
 
@@ -80,6 +84,7 @@ public class Unity implements CommandExecutor {
 
             if (auth.checkPassword(p.getName(), password.toCharArray())) {
                 auth.markSession(p.getName(), ip);
+                auth.updateCacheAfterSession(p.getName(), System.currentTimeMillis(), ip);
                 limiter.reset(key);
                 authListener.completeLogin(p);
             } else {
@@ -105,20 +110,30 @@ public class Unity implements CommandExecutor {
             var auth         = plugin.getAuthService();
             var authListener = plugin.getAuthListener();
 
+            // если строка уже есть в Users/пароль уже задан — считаем, что имя занято
             if (auth.isRegistered(p.getName())) {
                 p.sendMessage(ChatColor.RED + "Ты уже зарегистрирован. Используй /login.");
                 return true;
             }
+
             String err = com.frammy.unitylauncher.auth.PasswordPolicy.validate(password);
             if (err != null) {
                 p.sendMessage(ChatColor.RED + err);
                 return true;
             }
-            if (auth.setNewPassword(p.getName(), password.toCharArray())) {
-                authListener.completeRegister(p);
-            } else {
-                p.sendMessage(ChatColor.RED + "Ошибка регистрации. Попробуй позже.");
+
+            // СОЗДАЁМ ЗАПИСЬ как в PHP: INSERT Users(Name, Password, CustomizationData, SocialData, GeneralData, StatsData)
+            boolean created = auth.registerNewUser(p.getName(), password.toCharArray(), "0");
+            if (!created) {
+                p.sendMessage(ChatColor.RED + "Ошибка регистрации (возможно имя уже существует). Попробуй позже.");
+                return true;
             }
+
+            String ip = (p.getAddress() != null) ? p.getAddress().getAddress().getHostAddress() : "unknown";
+            auth.markSession(p.getName(), ip);
+            auth.updateCacheAfterSession(p.getName(), System.currentTimeMillis(), ip);
+
+            authListener.completeRegister(p);
             return true;
         }
 
@@ -145,7 +160,13 @@ public class Unity implements CommandExecutor {
             }
 
             // 3) перезагрузить апгрейды и зоны
-            UpgradesListener.reload(plugin);
+            UpgradesManager um = plugin.getUpgradesManager();
+            if (um != null) {
+                um.reload();
+            } else {
+                sender.sendMessage(ChatColor.RED + "UpgradesManager не инициализирован. Проверь onEnable().");
+            }
+
             plugin.getZoneManager().loadZonesFromConfig();
 
             if (plugin.getSignManager() != null) {
@@ -175,6 +196,74 @@ public class Unity implements CommandExecutor {
         if (args.length >= 2 && args[0].equalsIgnoreCase("zone")) {
             String[] zoneArgs = Arrays.copyOfRange(args, 1, args.length);
             zoneManager.handleCommand(p, zoneArgs);
+            return true;
+        }
+
+        // ===================== /ul trash confirm|cancel =====================
+        if (args[0].equalsIgnoreCase("trash")) {
+            var sm = plugin.getSignManager();
+            if (sm == null) {
+                p.sendMessage(ChatColor.RED + "SignManager не инициализирован.");
+                return true;
+            }
+
+            var tc = sm.getTrashController();
+            if (tc == null) {
+                p.sendMessage(ChatColor.RED + "TrashController не инициализирован.");
+                return true;
+            }
+
+            if (args.length < 2) {
+                p.sendMessage(ChatColor.YELLOW + "Используй: /ul trash confirm или /ul trash cancel");
+                return true;
+            }
+
+            String sub = args[1].toLowerCase(Locale.ROOT);
+            switch (sub) {
+                case "confirm" -> tc.handleTrashConfirm(p);
+                case "cancel" -> tc.handleTrashCancel(p);
+                default -> p.sendMessage(ChatColor.YELLOW + "Используй: /ul trash confirm или /ul trash cancel");
+            }
+            return true;
+        }
+
+        if (args[0].equalsIgnoreCase("shop")) {
+            var sm = plugin.getSignManager();
+            var sc = sm.getShopController();
+            if (args.length >= 2 && args[1].equalsIgnoreCase("buy")) {
+                sc.confirmPendingBuy(p);
+                return true;
+            }
+            if (args.length >= 2 && args[1].equalsIgnoreCase("cancel")) {
+                sc.cancelPendingBuy(p);
+                return true;
+            }
+
+            p.sendMessage(ChatColor.GRAY + "Используй кнопки в чате: [КУПИТЬ] / [ОТМЕНА]");
+            return true;
+        }
+
+        // ===================== /ul safe create =====================
+        if (args[0].equalsIgnoreCase("safe")) {
+
+            String sub = (args.length >= 2) ? args[1].toLowerCase(Locale.ROOT) : "";
+
+            if (sub.equals("create")) {
+                SafeDepositUpgrade safe = getEnabledUpgrade(p, SafeDepositUpgrade.class,
+                        "Сейфы сейчас отключены (апгрейд не активен).");
+                if (safe == null) return true;
+
+                ItemStack key = p.getInventory().getItemInMainHand();
+                if (key.getType().isAir()) {
+                    p.sendMessage(ChatColor.RED + "Возьми предмет-ключ в основную руку.");
+                    return true;
+                }
+
+                safe.beginCreateSafe(p, key);
+                return true;
+            }
+
+            p.sendMessage(ChatColor.YELLOW + "Используй: /ul safe create");
             return true;
         }
 
@@ -250,7 +339,7 @@ public class Unity implements CommandExecutor {
                 }
 
                 case "daydeal": {
-                    sender.sendMessage(ChatColor.YELLOW + "Ежедневные предложения появятся в следующих обновлениях.");
+                    UnityCommands.getInstance().dayDealInfo(sender);
                     return true;
                 }
 
@@ -318,6 +407,20 @@ public class Unity implements CommandExecutor {
                     return true;
                 }
 
+                case "daydeal": {
+                    String sub = args[1].toLowerCase(Locale.ROOT);
+                    if (sub.equals("info")) {
+                        UnityCommands.getInstance().dayDealInfo(sender);
+                        return true;
+                    }
+                    if (sub.equals("complete")) {
+                        UnityCommands.getInstance().dayDealComplete(sender);
+                        return true;
+                    }
+                    sender.sendMessage(ChatColor.RED + "Используй: /ul daydeal info или /ul daydeal complete");
+                    return true;
+                }
+
                 default:
                     return true;
             }
@@ -363,5 +466,20 @@ public class Unity implements CommandExecutor {
                     .hoverEvent(HoverEvent.showText(Component.text("Нажми, чтобы показать команды категории")));
             p.sendMessage(clickableCategory);
         }
+    }
+
+    private <T extends Upgrade> T getEnabledUpgrade(Player p, Class<T> clazz, String errIfDisabled) {
+        UpgradesManager um = plugin.getUpgradesManager();
+        if (um == null) {
+            p.sendMessage(ChatColor.RED + "UpgradesManager не инициализирован.");
+            return null;
+        }
+
+        T u = um.getEnabled(clazz);
+        if (u == null) {
+            p.sendMessage(ChatColor.RED + errIfDisabled);
+            return null;
+        }
+        return u;
     }
 }

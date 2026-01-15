@@ -7,28 +7,33 @@ description: Connects with our Unity launcher
 prefix: Unity Launcher
 website: farlands.in
 depend: [LuckPerms, UltimateAdvancementAPI]
-softdepend: [BlueMap, TAB, PlaceholderAPI]
+softdepend: [BlueMap, TAB, PlaceholderAPI, ProtocolLib]
 commands:
   brand:
-    usage: "/brand [set <текст> | clear | info]"
-    description: "Брендинг своих вещей"
-    permission: "unity.brand"
+    usage: /brand [set <текст> | clear | info]
+    description: Брендинг своих вещей
+    permission: unity.brand
     permission-message: "&cНет прав: unity.brand"
   unityLauncher:
-    aliases: ul
+    aliases: [ul]
     description: Для связи с нашим лаунчером
     usage: /<command> [subcommand]
     permission: unitylauncher.use
   register:
+    aliases: [reg]
     description: Register password
     usage: /register <password>
-    aliases: [reg]
     permission: unitylauncher.auth.register
   login:
+    aliases: [l]
     description: Login with password
     usage: /login <password>
-    aliases: [l]
     permission: unitylauncher.auth.login
+  state:
+    description: Государственные апгрейды
+    usage: /state <contract|focus|sampler|happyhour|recycle>
+    permission: unitylauncher.state
+    permission-message: "&cНет прав: unitylauncher.state"
 
 permissions:
   unity.brand:
@@ -41,4 +46,9 @@ permissions:
   unitylauncher.auth.register:
     default: true
   unitylauncher.auth.login:
+    default: true
+  unitylauncher.state:
+    default: true
+  unitylauncher.state.happyhour:
+    description: Настройка Happy Hour (проверка по роли страны внутри команды)
     default: true
