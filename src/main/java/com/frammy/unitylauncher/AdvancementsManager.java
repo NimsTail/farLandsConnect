@@ -1,6 +1,6 @@
 package com.frammy.unitylauncher;
 
-import com.frammy.unitylauncher.advs.AdvancementTabNamespaces;
+import com.frammy.unitylauncher.advs.*;
 import com.frammy.unitylauncher.advs.achievements.*;
 import com.fren_gor.ultimateAdvancementAPI.AdvancementTab;
 import com.fren_gor.ultimateAdvancementAPI.UltimateAdvancementAPI;
@@ -19,6 +19,7 @@ public final class AdvancementsManager implements Listener {
     private final UnityLauncher plugin;
     private AdvancementTab achievements;
     private static final String ROOT_BG = "textures/block/calcite.png";
+    private RootAdvancement ach0;
 
     public AdvancementsManager(UnityLauncher plugin) {
         this.plugin = plugin;
@@ -28,7 +29,7 @@ public final class AdvancementsManager implements Listener {
         UltimateAdvancementAPI api = UltimateAdvancementAPI.getInstance(plugin);
         achievements = api.createAdvancementTab(AdvancementTabNamespaces.achievements_NAMESPACE);
 
-        RootAdvancement ach0 = new RootAdvancement(
+        ach0 = new RootAdvancement(
                 achievements,
                 "ach0",
                 new FancyAdvancementDisplay(
@@ -155,6 +156,25 @@ public final class AdvancementsManager implements Listener {
         });
 
         Bukkit.getPluginManager().registerEvents(this, plugin);
+        Bukkit.getPluginManager().registerEvents(new BlockBreakAdvancementsListener(ach1), plugin);
+        Bukkit.getPluginManager().registerEvents(new CraftAdvancementsListener(plugin, ach1_1), plugin);
+
+        BiomeTimeAdvancements cherry5Days = new BiomeTimeAdvancements(plugin, ach1_1_1);
+        Bukkit.getPluginManager().registerEvents(cherry5Days, plugin);
+        cherry5Days.start();
+        Bukkit.getPluginManager().registerEvents(
+                new FishingAdvancementsListener(plugin, ach1_2),
+                plugin
+        );
+        Bukkit.getPluginManager().registerEvents(
+                new CoralAdvancementsListener(plugin, ach1_2_1, ach1_2_2, ach1_2_3),
+                plugin
+        );
+
+
+
+
+
 
         plugin.getLogger().info("[Advancements] Таб '" +
                 AdvancementTabNamespaces.achievements_NAMESPACE + "' инициализирован.");
@@ -164,6 +184,7 @@ public final class AdvancementsManager implements Listener {
     public void onJoin(PlayerJoinEvent e) {
         try {
             achievements.showTab(e.getPlayer());
+            ach0.grant(e.getPlayer()); // ← ROOT АЧИВКА
         } catch (Throwable ex) {
             plugin.getLogger().warning("[Advancements] showTab on join failed for " + e.getPlayer().getName() + ": " + ex.getMessage());
         }

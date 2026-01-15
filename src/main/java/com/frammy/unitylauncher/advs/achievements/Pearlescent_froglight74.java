@@ -1,4 +1,5 @@
 package com.frammy.unitylauncher.advs.achievements;
+import com.frammy.unitylauncher.advs.FrameRewardAdvancement;
 
 import com.fren_gor.ultimateAdvancementAPI.util.AdvancementKey;
 import com.fren_gor.ultimateAdvancementAPI.advancement.display.FancyAdvancementDisplay;
@@ -8,14 +9,20 @@ import com.fren_gor.ultimateAdvancementAPI.advancement.display.AdvancementFrameT
 import com.fren_gor.ultimateAdvancementAPI.advancement.Advancement;
 import com.frammy.unitylauncher.advs.AdvancementTabNamespaces;
 
-public class Pearlescent_froglight74 extends BaseAdvancement  {
+public class Pearlescent_froglight74 extends FrameRewardAdvancement  {
 
     public static AdvancementKey KEY = new AdvancementKey(
             AdvancementTabNamespaces.achievements_NAMESPACE,
             "pearlescent_froglight74"
     );
 
-    public Pearlescent_froglight74(Advancement parent) {
+    
+private static final int FRAME_ID = 8;
+
+@Override
+protected int getFrameId() {
+    return FRAME_ID;
+}public Pearlescent_froglight74(Advancement parent) {
         super(
                 KEY.getKey(),
                 new FancyAdvancementDisplay(

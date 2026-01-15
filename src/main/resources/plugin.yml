@@ -6,8 +6,8 @@ authors: [ frammy, NimsTail ]
 description: Connects with our Unity launcher
 prefix: Unity Launcher
 website: farlands.in
-depend: [LuckPerms, UltimateAdvancementAPI]
-softdepend: [BlueMap, TAB, PlaceholderAPI, ProtocolLib]
+depend: [LuckPerms, UltimateAdvancementAPI, ProtocolLib, BlueMap]
+softdepend: [TAB, PlaceholderAPI]
 commands:
   brand:
     usage: /brand [set <текст> | clear | info]
