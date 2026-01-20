@@ -9,6 +9,7 @@ import com.frammy.unitylauncher.chunkactivity.*;
 import com.frammy.unitylauncher.signs.SignManager;
 import com.frammy.unitylauncher.tab.LuckPermsPrefixService;
 import com.frammy.unitylauncher.tab.TabPrefixService;
+import com.frammy.unitylauncher.upgrades.UpgradeCondition;
 import com.frammy.unitylauncher.upgrades.core.UpgradesManager;
 import com.frammy.unitylauncher.upgrades.impl.*;
 import com.frammy.unitylauncher.zones.ZoneActivityCalculations;
@@ -18,6 +19,8 @@ import com.frammy.unitylauncher.zones.countryrelations.CountryRelationshipDao;
 import com.frammy.unitylauncher.zones.countryrelations.DiplomacyService;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import net.luckperms.api.LuckPerms;
+import net.luckperms.api.LuckPermsProvider;
 import net.md_5.bungee.api.chat.ClickEvent;
 import net.md_5.bungee.api.chat.HoverEvent;
 import net.md_5.bungee.api.chat.TextComponent;
@@ -270,6 +273,19 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
         // === upgrades (single entrypoint) ===
         upgradesManager = new UpgradesManager(this);
+
+        try {
+            LuckPerms lp = LuckPermsProvider.get();
+            lp.getEventBus().subscribe(this, net.luckperms.api.event.group.GroupDataRecalculateEvent.class, e -> {
+                String name = e.getGroup().getName();
+                if (name == null) return;
+
+                if (name.equalsIgnoreCase("default")) UpgradeCondition.invalidateDefaultNodeCache();
+                else UpgradeCondition.invalidateCountryNodeCache(name);
+            });
+        } catch (Throwable t) {
+            getLogger().severe("[UL] LuckPerms not available, upgrade cache invalidation disabled: " + t.getMessage());
+        }
 
         // --- zone billing scheduler (daily cost calc + auto-billing async logic) ---
         zoneActivityCalculations.startZoneBillingScheduler();

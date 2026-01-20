@@ -24,6 +24,94 @@ public final class UpgradeCondition {
         USE
     }
 
+    private static final long PLAYER_COUNTRY_CACHE_MS = 3000L;
+
+    private static final ConcurrentHashMap<String, CachedCountry> PLAYER_COUNTRY_CACHE = new ConcurrentHashMap<>();
+
+    private record CachedCountry(String canonical, long atMs) {}
+
+    public static String playerCountryCanonical(String playerName) {
+        if (playerName == null || playerName.isBlank()) return null;
+
+        long now = System.currentTimeMillis();
+        CachedCountry cc = PLAYER_COUNTRY_CACHE.get(playerName);
+        if (cc != null && now - cc.atMs < PLAYER_COUNTRY_CACHE_MS) {
+            return cc.canonical;
+        }
+
+        String c;
+        try {
+            c = UnityLauncher.getInstance()
+                    .countryRegistryJdbc
+                    .getCountryOfPlayer(playerName);
+        } catch (Throwable t) {
+            d("playerCountryCanonical DB EX " + t);
+            return cc != null ? cc.canonical : null; // мягкий fallback, чтобы не ронять гейтинг
+        }
+
+        String canon = (c == null || c.isBlank()) ? null : normalizeCountry(c);
+        if (PLAYER_COUNTRY_CACHE.size() > 50_000) PLAYER_COUNTRY_CACHE.clear();
+        PLAYER_COUNTRY_CACHE.put(playerName, new CachedCountry(canon, now));
+        d("playerCountryCanonical: player=" + playerName + " raw=" + c + " canon=" + canon);
+        return canon;
+    }
+
+    public static void invalidateCountryNodeCache(String canonicalCountry) {
+        if (canonicalCountry == null || canonicalCountry.isBlank()) {
+            NODE_TRUE_CACHE.clear();
+            return;
+        }
+        String prefix = canonicalCountry + "§";
+        NODE_TRUE_CACHE.keySet().removeIf(k -> k.startsWith(prefix));
+        d("invalidateCountryNodeCache -> " + canonicalCountry);
+    }
+
+    public static void invalidateDefaultNodeCache() {
+        String prefix = DEFAULT_GROUP_NAME + "§";
+        NODE_TRUE_CACHE.keySet().removeIf(k -> k.startsWith(prefix));
+        DEFAULT_GROUP = null; // заставим заново взять Group после рекалька
+        d("invalidateDefaultNodeCache");
+    }
+
+    private static volatile LuckPerms LP;
+
+    private static LuckPerms lp() {
+        LuckPerms x = LP;
+        if (x != null) return x;
+        try {
+            x = LuckPermsProvider.get();
+            LP = x;
+            return x;
+        } catch (Throwable t) {
+            d("LuckPermsProvider.get EX " + t);
+            return null;
+        }
+    }
+
+    private static final String DEFAULT_GROUP_NAME = "default";
+    private static volatile Group DEFAULT_GROUP;
+
+    private static Group getDefaultGroup() {
+        Group g = DEFAULT_GROUP;
+        if (g != null) return g;
+
+        LuckPerms lp = lp();
+        if (lp == null) return null;
+
+        try {
+            g = lp.getGroupManager().getGroup(DEFAULT_GROUP_NAME);
+            d("getDefaultGroup: lookup name=" + DEFAULT_GROUP_NAME + " -> " + (g != null ? "FOUND" : "NULL") + " (" + lpState() + ")");
+            if (g == null) {
+                d("getDefaultGroup: group not found -> " + DEFAULT_GROUP_NAME + " (check group name in LP)");
+            }
+            DEFAULT_GROUP = g;
+            return g;
+        } catch (Throwable t) {
+            d("getDefaultGroup EX " + t);
+            return null;
+        }
+    }
+
     private static boolean debug() {
         try {
             var pl = UnityLauncher.getInstance();
@@ -42,6 +130,20 @@ public final class UpgradeCondition {
         if (debug()) Bukkit.getLogger().info("[UL/UpgradeCondition] " + msg);
     }
 
+    private static String b(boolean v) { return v ? "Y" : "N"; }
+
+    private static String lpState() {
+        LuckPerms lp = lp();
+        if (lp == null) return "LP=null";
+        try {
+            boolean gm = lp.getGroupManager() != null;
+            boolean cm = lp.getContextManager() != null;
+            return "LP=ok gm=" + (gm ? "Y" : "N") + " cm=" + (cm ? "Y" : "N");
+        } catch (Throwable t) {
+            return "LP=ok (partial)";
+        }
+    }
+
     /* =====================
        НОРМАЛИЗАЦИЯ СТРАНЫ
        ===================== */
@@ -52,15 +154,6 @@ public final class UpgradeCondition {
         String t = raw.trim().toLowerCase(java.util.Locale.ROOT);
         t = t.replace(' ', '_');
         return t.replaceAll("[^a-z0-9_\\-.]", "");
-    }
-
-    // для игрока
-    public static String playerCountryCanonical(String playerName) {
-        String c = UnityLauncher.getInstance()
-                .countryRegistryJdbc
-                .getCountryOfPlayer(playerName);
-        if (c == null || c.isBlank()) return null;
-        return normalizeCountry(c);
     }
 
     // для зоны
@@ -84,13 +177,16 @@ public final class UpgradeCondition {
 
     private static Group getCountryGroup(String canonicalCountry) {
         if (canonicalCountry == null || canonicalCountry.isBlank()) return null;
+
+        LuckPerms lp = lp();
+        if (lp == null) return null;
+
         try {
-            LuckPerms lp = LuckPermsProvider.get();
             Group g = lp.getGroupManager().getGroup(canonicalCountry);
-            if (g == null) {
-                d("getCountryGroup: group not found -> " + canonicalCountry);
-            }
+            d("getCountryGroup: lookup name=" + canonicalCountry + " -> " + (g != null ? "FOUND" : "NULL"));
+            if (g == null) d("getCountryGroup: group not found -> " + canonicalCountry);
             return g;
+
         } catch (Throwable t) {
             d("getCountryGroup EX " + t);
             return null;
@@ -114,28 +210,71 @@ public final class UpgradeCondition {
      * Возвращает true, если у группы страны есть эта нода.
      */
     public static boolean countryHasNode(String canonicalCountry, String node) {
-        if (canonicalCountry == null || canonicalCountry.isBlank()) return false;
-        if (node == null || node.isBlank()) return false;
+        if (node == null || node.isBlank()) {
+            d("countryHasNode: node blank");
+            return false;
+        }
 
-        long now = System.currentTimeMillis();
-        Long hit = NODE_TRUE_CACHE.get(nk(canonicalCountry, node));
-        if (hit != null && now - hit < NODE_CACHE_MS) return true;
+        // 1) default
+        Group def = getDefaultGroup();
+        boolean defOk = (def != null) && groupHasNode(def, DEFAULT_GROUP_NAME, node);
+        d("countryHasNode: default check node=" + node + " defGroup=" + (def != null ? "FOUND" : "NULL") + " ok=" + b(defOk));
+        if (defOk) return true;
+
+        // 2) country
+        if (canonicalCountry == null || canonicalCountry.isBlank()) {
+            d("countryHasNode: no country, node=" + node + " -> DENY");
+            return false;
+        }
 
         Group g = getCountryGroup(canonicalCountry);
-        if (g == null) return false;
+        boolean cOk = groupHasNode(g, canonicalCountry, node);
+        d("countryHasNode: country=" + canonicalCountry + " node=" + node + " group=" + (g != null ? "FOUND" : "NULL") + " ok=" + b(cOk));
+        return cOk;
+    }
+
+    private static boolean groupHasNode(Group g, String groupNameForCache, String node) {
+        if (g == null) {
+            d("groupHasNode: g==null groupNameForCache=" + groupNameForCache + " node=" + node);
+            return false;
+        }
+        if (node == null || node.isBlank()) {
+            d("groupHasNode: node blank for group=" + groupNameForCache);
+            return false;
+        }
+
+        long now = System.currentTimeMillis();
+        String key = nk(groupNameForCache, node);
+        Long hit = NODE_TRUE_CACHE.get(key);
+        boolean cacheHit = (hit != null && now - hit < NODE_CACHE_MS);
+        if (cacheHit) {
+            d("groupHasNode: CACHE HIT group=" + groupNameForCache + " node=" + node);
+            return true;
+        }
 
         try {
-            LuckPerms lp = LuckPermsProvider.get();
-            var opts = lp.getContextManager().getStaticQueryOptions();
-            boolean ok = g.getCachedData().getPermissionData(opts).checkPermission(node).asBoolean();
-            if (ok) {
-                if (NODE_TRUE_CACHE.size() > 50_000) NODE_TRUE_CACHE.clear();
-                NODE_TRUE_CACHE.put(nk(canonicalCountry, node), now);
+            LuckPerms lp = lp();
+            if (lp == null) {
+                d("groupHasNode: lp()==null group=" + groupNameForCache + " node=" + node);
+                return false;
             }
 
+            var opts = lp.getContextManager().getStaticQueryOptions();
+            var result = g.getCachedData().getPermissionData(opts).checkPermission(node);
+            boolean ok = result.asBoolean();
+
+            d("groupHasNode: CHECK group=" + groupNameForCache
+                    + " node=" + node
+                    + " ok=" + b(ok)
+                    + " (" + lpState() + ")");
+
+            if (ok) {
+                if (NODE_TRUE_CACHE.size() > 50_000) NODE_TRUE_CACHE.clear();
+                NODE_TRUE_CACHE.put(key, now);
+            }
             return ok;
         } catch (Throwable t) {
-            d("countryHasNode EX " + t);
+            d("groupHasNode EX group=" + groupNameForCache + " node=" + node + " ex=" + t);
             return false;
         }
     }
@@ -327,10 +466,23 @@ public final class UpgradeCondition {
 
         if (!blocked) return true;
 
-        String pc = playerCountryCanonical(p.getName());
-        if (pc == null || pc.isBlank()) return false;
+        // 1) СНАЧАЛА default для всех
+        String node = unlockPermBase + "." + requiredLevel;
+        if (countryHasNode(null, node)) { // canonicalCountry не нужен: внутри сначала проверится default
+            d("gatingAllowedByCountry: ALLOW by DEFAULT node=" + node + " player=" + p.getName());
+            return true;
+        }
 
-        return countryMaxLevel(pc, unlockPermBase, requiredLevel) >= requiredLevel;
+        // 2) Потом страна
+        String pc = playerCountryCanonical(p.getName());
+        if (pc == null || pc.isBlank()) {
+            d("gatingAllowedByCountry: DENY no country and default doesn't grant node=" + node + " player=" + p.getName());
+            return false;
+        }
+
+        boolean ok = countryMaxLevel(pc, unlockPermBase, requiredLevel) >= requiredLevel;
+        d("gatingAllowedByCountry: " + (ok ? "ALLOW" : "DENY") + " by COUNTRY=" + pc + " node=" + node + " player=" + p.getName());
+        return ok;
     }
 
         /* =====================

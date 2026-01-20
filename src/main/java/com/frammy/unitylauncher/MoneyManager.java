@@ -65,8 +65,7 @@ public class MoneyManager implements Listener {
         // 1) списываем банк в async
         Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
             boolean ok = UnityCommands.getInstance()
-                    .applyMoneyDelta(player.getName(), -centsToDouble(totalCents));
-
+                    .applyMoneyDelta(player.getName(), dbAmount(-centsToDouble(totalCents)));
             // 2) выдаём наличку только при успехе (main)
             Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
                 if (!ok) {
@@ -122,8 +121,7 @@ public class MoneyManager implements Listener {
                     return;
                 }
                 Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
-                    boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), deposited);
-
+                    boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), dbAmount(deposited));
                     Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
                         if (ok) {
                             player.sendMessage(ChatColor.GRAY + "На твой счёт зачислено " +
@@ -149,7 +147,7 @@ public class MoneyManager implements Listener {
                 Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
                     boolean ok = true;
                     try {
-                        UnityLauncher.getInstance().getCountryRegistryJdbc().addCountryMoney(country, deposited);
+                        UnityLauncher.getInstance().getCountryRegistryJdbc().addCountryMoney(country, dbAmount(deposited));
                     } catch (Exception e) {
                         ok = false;
                         Bukkit.getLogger().warning("[MoneyManager] addCountryMoney failed: " + e);
@@ -201,7 +199,7 @@ public class MoneyManager implements Listener {
 
             new BukkitRunnable() {
                 @Override public void run() {
-                    boolean ok = UnityCommands.getInstance().applyMoneyDelta(playerName, -centsToDouble(amountCents));
+                    boolean ok = UnityCommands.getInstance().applyMoneyDelta(playerName, dbAmount(-centsToDouble(amountCents)));
                     if (!ok) {
                         Bukkit.getLogger().warning("[MoneyManager] withdraw failed for '" + playerName + "'");
                     }
@@ -491,7 +489,7 @@ public class MoneyManager implements Listener {
 
             new BukkitRunnable() {
                 @Override public void run() {
-                    boolean ok = UnityCommands.getInstance().applyMoneyDelta(playerName, -centsToDouble(amountCents));
+                    boolean ok = UnityCommands.getInstance().applyMoneyDelta(playerName, dbAmount(-centsToDouble(amountCents)));
                     if (cb != null) cb.accept(ok);
                 }
             }.runTaskAsynchronously(UnityLauncher.getInstance());
@@ -523,8 +521,7 @@ public class MoneyManager implements Listener {
         final double finalNet   = round2(netCashAmount);
 
         Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
-            boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), -centsToDouble(grossCents));
-
+            boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), dbAmount(-centsToDouble(grossCents)));
             Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
                 if (!ok) {
                     player.sendMessage(ChatColor.RED + "Не удалось снять деньги со счёта (БД/баланс).");
@@ -578,8 +575,7 @@ public class MoneyManager implements Listener {
         final long feeCents = grossCents - finalNetCents;
 
         Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
-            boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), centsToDouble(finalNetCents));
-
+            boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), dbAmount(centsToDouble(finalNetCents)));
             Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
                 if (!ok) {
                     // возврат gross наличкой
@@ -644,7 +640,7 @@ public class MoneyManager implements Listener {
             Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
                 boolean ok = true;
                 try {
-                    UnityLauncher.getInstance().getCountryRegistryJdbc().addCountryMoney(country, centsToDouble(finalNetCents));
+                    UnityLauncher.getInstance().getCountryRegistryJdbc().addCountryMoney(country, dbAmount(centsToDouble(finalNetCents)));
                 } catch (Exception e) {
                     ok = false;
                     Bukkit.getLogger().warning("[MoneyManager] addCountryMoney failed: " + e);
@@ -671,6 +667,11 @@ public class MoneyManager implements Listener {
         });
 
         return true;
+    }
+
+    /** Всегда приводим деньги к 2 знакам (через центы), перед записью в БД */
+    private double dbAmount(double value) {
+        return centsToDouble(toCents(value));
     }
 
 }
