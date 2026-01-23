@@ -11,10 +11,12 @@ import com.frammy.unitylauncher.signs.persistence.SignYamlRepository;
 import com.frammy.unitylauncher.signs.render.SignRenderer;
 import com.frammy.unitylauncher.signs.render.SignScrollService;
 import com.frammy.unitylauncher.signs.storage.SignStore;
-import com.frammy.unitylauncher.upgrades.core.UpgradeKey;
 import com.frammy.unitylauncher.zones.ZoneManager;
 import org.bukkit.*;
 import org.bukkit.block.*;
+import org.bukkit.block.data.BlockData;
+import org.bukkit.block.data.type.WallHangingSign;
+import org.bukkit.block.data.type.WallSign;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -60,7 +62,7 @@ public final class SignManager implements Listener {
         this.repo = new SignYamlRepository(plugin, dataFolder, SignManager::playerCountryCanonical);
         this.trash = new TrashController(plugin);
 
-        MarkerService markers = new MarkerService(plugin, zoneManager);
+        MarkerService markers = new MarkerService(zoneManager);
 
         this.shopLists = new ShopListUpdater(plugin, zoneManager, store, renderer,
                 (loc) -> shopKey(zoneManager, loc)
@@ -290,53 +292,57 @@ public final class SignManager implements Listener {
         return shop;
     }
 
-    /** Перестроить ownerName у всех табличек на основе текущих зон (мягко, батчами). */
-    public void recalcOwnershipLater(int signsPerTick) {
-        // делегируем в ZoneManager, потому что геометрия там
-        zoneManager.scheduleSignOwnershipRecalc(this, signsPerTick);
-    }
-
     /** Сообщить, что имя SHOP-зоны изменилось — обновить все связанные таблички магазина. */
     public void onShopZoneRenamed() {
         shopLists.rebuildAllListsLater();
     }
 
-    private void rebuildShopListsWhenZonesReady() {
-        // ждём максимум ~10 секунд (200 тиков), проверка каждые 10 тиков
-        final int[] tries = {0};
+    private static final String SIGNS_BYPASS_PERM = "unity.signs.bypass";
 
-        Bukkit.getScheduler().runTaskTimer(plugin, task -> {
-            tries[0]++;
+    /** Локация блока-опоры для конкретной таблички в мире. */
+    private static Location getSupportBlockOfSign(Block signBlock) {
+        if (signBlock == null) return null;
 
-            boolean ready = false;
+        BlockData data = signBlock.getBlockData();
 
-            // если есть хотя бы одна SHOP табличка и её зона уже определяется — считаем, что зоны готовы
-            for (var e : store.signs().entrySet()) {
-                var sv = e.getValue();
-                if (sv == null) continue;
-                if (sv.getSignCategory() != SignCategory.SHOP_SOURCE && sv.getSignCategory() != SignCategory.SHOP_LIST) continue;
+        // 1) Обычная настенная табличка
+        switch (data) {
+            case WallSign ws -> {
+                BlockFace facing = ws.getFacing();               // куда "смотрит" табличка
 
-                Location loc = e.getKey();
-                if (loc == null || loc.getWorld() == null) continue;
+                return signBlock.getRelative(facing.getOppositeFace()).getLocation(); // блок, к которому прикреплена
 
-                if (zoneManager.getShopZoneAt(loc) != null) {
-                    ready = true;
-                    break;
-                }
             }
-
-            if (ready) {
-                try { shopLists.rebuildAllListsLater(); }
-                catch (Throwable t) { plugin.getLogger().warning("[Signs] rebuildAllListsLater failed: " + t.getMessage()); }
-                task.cancel();
-                return;
+            // 2) Свисающая со стены
+            case WallHangingSign whs -> {
+                BlockFace facing = whs.getFacing();
+                return signBlock.getRelative(facing.getOppositeFace()).getLocation();
             }
-
-            if (tries[0] >= 20) { // 20 * 10 тиков = 200 тиков = 10 секунд
-                plugin.getLogger().warning("[Signs] SHOP zones not ready after 10s. Rebuild skipped (will stay empty until next update).");
-                task.cancel();
+            // 3) Свисающая с потолка
+            case HangingSign ignored -> {
+                return signBlock.getRelative(BlockFace.UP).getLocation();
             }
-        }, 10L, 10L);
+            default -> {
+            }
+        }
+
+        // 4) Напольная табличка (столбик)
+        // В 1.21 для standing sign нет Directional, поэтому просто блок снизу — это “опора”
+        return signBlock.getRelative(BlockFace.DOWN).getLocation();
+    }
+
+    private boolean canBreakProtectedSupport(Player p, Location signLoc, SignVariables sv) {
+        if (p == null) return false;
+        if (p.isOp() || p.hasPermission(SIGNS_BYPASS_PERM)) return true;
+
+        // SHOP: истинный владелец — владелец зоны (ownerName может устареть)
+        if (sv != null && (sv.getSignCategory() == SignCategory.SHOP_SOURCE || sv.getSignCategory() == SignCategory.SHOP_LIST)) {
+            return zoneManager.isPlayerOwnerOfShopZoneAt(p.getName(), signLoc);
+        }
+
+        // Остальные: владелец таблички по ownerName
+        String owner = (sv != null ? sv.getOwnerName() : null);
+        return owner != null && owner.equalsIgnoreCase(p.getName());
     }
 
     // ======= events =======
@@ -345,6 +351,45 @@ public final class SignManager implements Listener {
     public void onBlockBreak(BlockBreakEvent e) {
         Block b = e.getBlock();
         Player p = e.getPlayer();
+
+        // 0) защита опорных блоков табличек
+        // Если этот блок держит любую сохранённую табличку — ломать может только хозяин таблички.
+        Location broken = SignStore.keyLoc(b.getLocation());
+
+        // маленькая оптимизация: если мир null или store пуст — не бегаем
+        if (broken.getWorld() != null && !store.signs().isEmpty()) {
+            for (var entry : store.signs().entrySet()) {
+                Location signLoc = entry.getKey();
+                SignVariables sv = entry.getValue();
+                if (signLoc == null || sv == null) continue;
+                if (signLoc.getWorld() == null) continue;
+
+                // мир/координаты сравниваем нормализовано
+                Block signBlock = signLoc.getBlock();
+                BlockState st = signBlock.getState();
+                if (!(st instanceof Sign)) continue; // защищаем только реальные таблички в мире
+
+                Location support = getSupportBlockOfSign(signBlock);
+                if (support == null || support.getWorld() == null) continue;
+
+                Location supportKey = SignStore.keyLoc(support);
+                if (!supportKey.equals(broken)) continue; // это не опора этой таблички
+
+                if (!canBreakProtectedSupport(p, signLoc, sv)) {
+                    e.setCancelled(true);
+
+                    // Человеческое сообщение
+                    if (sv.getSignCategory() == SignCategory.SHOP_SOURCE || sv.getSignCategory() == SignCategory.SHOP_LIST) {
+                        p.sendMessage(ChatColor.RED + "Этот блок держит табличку магазина. Ломать может только владелец SHOP-зоны.");
+                    } else {
+                        String owner = sv.getOwnerName();
+                        p.sendMessage(ChatColor.RED + "Этот блок держит защищённую табличку. Ломать может только её хозяин"
+                                + (owner != null && !owner.isBlank() ? (": " + ChatColor.YELLOW + owner) : "") + ChatColor.RED + ".");
+                    }
+                    return;
+                }
+            }
+        }
 
         // 1) защита контейнеров магазина
         BlockState st = b.getState();
@@ -521,8 +566,6 @@ public final class SignManager implements Listener {
         String line0raw = e.getLine(0);
         if (line0raw == null) line0raw = "";
 
-        String line1raw = e.getLine(1);
-
         store.originalSignTexts().putIfAbsent(loc, new String[]{
                 safeLine(e, 0),
                 safeLine(e, 1),
@@ -678,7 +721,7 @@ public final class SignManager implements Listener {
                     e.setUseItemInHand(org.bukkit.event.Event.Result.DENY);
                     return;
                 }
-                trash.handleTrashSell(p, sign);
+                trash.handleTrashSell(p);
                 e.setCancelled(true);
                 e.setUseInteractedBlock(org.bukkit.event.Event.Result.DENY);
                 e.setUseItemInHand(org.bukkit.event.Event.Result.DENY);
@@ -766,8 +809,6 @@ public final class SignManager implements Listener {
         shop.onPlayerQuit(e.getPlayer());
     }
 
-    private static final UpgradeKey KEY = UpgradeKey.of("core.signs");
-
     public void enable() { onEnable(); }
     public void disable() { onDisable(); }
 
@@ -798,16 +839,6 @@ public final class SignManager implements Listener {
         if (atm.onChat(e)) {
             e.setCancelled(true);
         }
-    }
-
-    private boolean isShopLinkedContainerBlock(Block b) {
-        if (b == null) return false;
-
-        BlockState st = b.getState();
-        if (!(st instanceof org.bukkit.block.Container c)) return false;
-
-        Location loc = SignStore.keyLoc(c.getLocation());
-        return store.sourceSignByContainer(loc) != null;
     }
 
     private boolean isShopLinkedInventory(org.bukkit.inventory.Inventory inv) {

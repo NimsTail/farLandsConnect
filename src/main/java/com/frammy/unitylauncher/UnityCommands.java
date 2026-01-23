@@ -656,24 +656,6 @@ public class UnityCommands {
         sender.sendMessage(ChatColor.YELLOW + "Система уведомлений временно отключена.");
     }
 
-    public void createOrder(String sellerName, String customerName, String spriteName,
-                            Double price, Integer quantity, org.bukkit.Location location,
-                            Map<org.bukkit.enchantments.Enchantment, Integer> enchantments) {
-        Bukkit.getLogger().info("[UnityCommands] Orders временно отключены.");
-    }
-
-    public void getGroups(@NotNull CommandSender sender) {
-        sender.sendMessage(ChatColor.YELLOW + "Группы страны управляются через LuckPerms/JSON. Команда устарела.");
-    }
-
-    public void setGroup(@NotNull CommandSender sender, String nickname, String group) {
-        sender.sendMessage(ChatColor.YELLOW + "Назначение групп через эту команду отключено. Используйте актуальные механики.");
-    }
-
-    public void setPrefix(@NotNull CommandSender sender, String group, String prefix) {
-        sender.sendMessage(ChatColor.YELLOW + "Префиксы управляются через текущую систему ролей. Команда устарела.");
-    }
-
     public void changePass(@NotNull CommandSender sender, String oldPass, String newPass) {
         if (!(sender instanceof Player p)) {
             sender.sendMessage(ChatColor.RED + "Только для игроков.");
@@ -715,14 +697,6 @@ public class UnityCommands {
         sender.sendMessage(ChatColor.GREEN + "Пароль изменён.");
     }
 
-    public void setFrame(@NotNull CommandSender sender, String nickname, String frameID) {
-        sender.sendMessage(ChatColor.YELLOW + "Frames не используются.");
-    }
-
-    public void getTop(@NotNull CommandSender sender, String category) {
-        sender.sendMessage(ChatColor.YELLOW + "Таблица лидеров временно отключена.");
-    }
-
     /* ===================== Внутренние JSON/SQL утилиты ===================== */
 
     private static class UserJsonRow { Double money; }
@@ -748,40 +722,12 @@ public class UnityCommands {
         }
     }
 
-    private static void writeCountryMoney(Connection con, String countryName, double newMoney) throws Exception {
-        String up = "UPDATE Countries SET CountryInfo = JSON_SET(CountryInfo, '$.Money', ?) WHERE Name=?";
-        try (PreparedStatement ps = con.prepareStatement(up)) {
-            ps.setDouble(1, newMoney);
-            ps.setString(2, countryName);
-            ps.executeUpdate();
-        }
-    }
-
-    private static Double lockAndReadCountryMoney(Connection con, String countryName) throws Exception {
-        String sql = "SELECT JSON_EXTRACT(CountryInfo,'$.Money') AS m FROM Countries WHERE Name=? FOR UPDATE";
-        try (PreparedStatement ps = con.prepareStatement(sql)) {
-            ps.setString(1, countryName);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (!rs.next()) return null;
-                return parseJsonNumber(rs.getString("m"));
-            }
-        }
-    }
-
     private static Double parseJsonNumber(String s) {
         if (s == null) return null;
         s = s.trim();
         if (s.startsWith("\"") && s.endsWith("\"")) s = s.substring(1, s.length() - 1);
         if ("null".equalsIgnoreCase(s) || s.isEmpty()) return null;
         try { return Double.valueOf(s); } catch (Exception ignore) { return null; }
-    }
-
-    private static String parseJsonString(String s) {
-        if (s == null) return null;
-        s = s.trim();
-        if (s.startsWith("\"") && s.endsWith("\"")) return s.substring(1, s.length() - 1);
-        if ("null".equalsIgnoreCase(s) || s.isEmpty()) return null;
-        return s;
     }
 
     /**
@@ -886,57 +832,6 @@ public class UnityCommands {
             e.printStackTrace();
         }
         return resultMap;
-    }
-
-    // ==== Shop spots (Users.GeneralData.shopSpots) ====
-    public int getShops(@NotNull CommandSender sender) {
-        // сначала пробуем из кэша
-        CachedPlayerRow cached = getOrLoadCachedPlayer(sender.getName());
-        if (cached != null && cached.general != null && cached.general.has("shopSpots")) {
-            try { return cached.general.get("shopSpots").getAsInt(); } catch (Exception ignored) {}
-        }
-
-        // иначе — быстро из БД JSON_EXTRACT
-        try (Connection con = DBConnect()) {
-            if (con == null) return 0;
-            String q = "SELECT JSON_EXTRACT(GeneralData,'$.shopSpots') FROM Users WHERE Name=? LIMIT 1;";
-            try (PreparedStatement ps = con.prepareStatement(q)) {
-                ps.setString(1, sender.getName());
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (rs.next()) {
-                        String raw = rs.getString(1);
-                        if (raw == null || "null".equalsIgnoreCase(raw)) return 0;
-                        // может прийти как число или строка
-                        try { return Integer.parseInt(raw.replace("\"","").trim()); } catch (Exception ignored) {}
-                    }
-                }
-            }
-        } catch (Exception e) {
-            System.err.println("[UnityCommands] getShops error: " + e.getMessage());
-        }
-        return 0;
-    }
-
-    public void setShops(@NotNull CommandSender sender, int shopCount) {
-        if (shopCount < 0) shopCount = 0;
-        try (Connection con = DBConnect()) {
-            if (con == null) return;
-            String up = "UPDATE Users SET GeneralData = JSON_SET(GeneralData, '$.shopSpots', ?) WHERE Name=?;";
-            try (PreparedStatement ps = con.prepareStatement(up)) {
-                ps.setInt(1, shopCount);
-                ps.setString(2, sender.getName());
-                ps.executeUpdate();
-            }
-            // обновим кэш
-            CachedPlayerRow cached = getOrLoadCachedPlayer(sender.getName());
-            if (cached != null && cached.general != null) {
-                com.google.gson.JsonObject newGen = cached.general.deepCopy();
-                newGen.addProperty("shopSpots", shopCount);
-                upsertCacheAfterUpdate(sender.getName(), "GeneralData", newGen);
-            }
-        } catch (Exception e) {
-            System.err.println("[UnityCommands] setShops error: " + e.getMessage());
-        }
     }
 
     /** Безопасно конвертирует JsonElement в обычный Java Object (Map/List/String/Number/Boolean/null). */

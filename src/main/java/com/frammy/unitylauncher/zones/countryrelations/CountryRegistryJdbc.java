@@ -35,6 +35,8 @@ public class CountryRegistryJdbc {
     private final java.util.concurrent.atomic.AtomicBoolean refreshInFlight = new java.util.concurrent.atomic.AtomicBoolean(false);
     private final Map<String, String> playerToCountry = new ConcurrentHashMap<>();
     private final Map<String, String> countryToLeader = new ConcurrentHashMap<>();
+    // lowerCountry -> display name as stored in DB (original casing)
+    private final Map<String, String> countryLowerToDisplay = new ConcurrentHashMap<>();
     private final Map<String, Double> countryToTransferFeePct = new ConcurrentHashMap<>();
 
     private final Map<String, Double> countryMoney = new ConcurrentHashMap<>();
@@ -72,6 +74,14 @@ public class CountryRegistryJdbc {
     }
 
     /* ===================== ПУБЛИЧНОЕ API ===================== */
+
+    /** Список всех стран (displayName из БД). */
+    public List<String> getAllCountryNames() {
+        refreshCacheIfExpired();
+        List<String> out = new ArrayList<>(countryLowerToDisplay.values());
+        out.sort(String.CASE_INSENSITIVE_ORDER);
+        return out;
+    }
 
     /** Накопленный недельный налог (CountryInfo.WeeklyTaxDue), если нет — 0.0. */
     public double getWeeklyTaxDue(String countryName) {
@@ -234,11 +244,6 @@ public class CountryRegistryJdbc {
         if (playerName == null || playerName.isBlank()) return null;
         refreshCacheIfExpired();
         return playerToCountry.get(playerName.toLowerCase(Locale.ROOT));
-    }
-
-    /** Совместимость со старым кодом. */
-    public String getCountryCachedOrSchedule(String playerName) {
-        return getCountryOfPlayer(playerName);
     }
 
     /** true, если игрок является лидером своей страны. */
@@ -411,6 +416,7 @@ public class CountryRegistryJdbc {
 
         Map<String, Double> newCountryMoney = new HashMap<>();
         Map<String, Double> newCountryWeeklyTaxDue = new HashMap<>();
+        Map<String, String> newCountryLowerToDisplay = new HashMap<>();
 
         try (Connection con = DBConnect()) {
             if (con == null) {
@@ -430,6 +436,7 @@ public class CountryRegistryJdbc {
                     if (countryName == null || countryName.isBlank()) continue;
 
                     String countryLower = countryName.toLowerCase(Locale.ROOT);
+                    newCountryLowerToDisplay.put(countryLower, countryName);
 
                     // --- 1. распарсили роли этой страны
                     Map<Integer, RoleInfo> rolesMap = parseRoles(permsJson);
@@ -545,6 +552,9 @@ public class CountryRegistryJdbc {
 
         countryMoney.clear();
         countryMoney.putAll(newCountryMoney);
+
+        countryLowerToDisplay.clear();
+        countryLowerToDisplay.putAll(newCountryLowerToDisplay);
 
         countryWeeklyTaxDue.clear();
         countryWeeklyTaxDue.putAll(newCountryWeeklyTaxDue);

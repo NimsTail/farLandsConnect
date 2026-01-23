@@ -23,16 +23,11 @@ public final class BlueMapHeatService {
     private HeatRegionWriter writer;
     private BukkitTask flushTask;
 
-    // настройки (можно вынести в конфиг позже)
-    private final long flushPeriodTicks = 40L; // раз в 2 секунды async
     private final int maxRegionsPerFlush = 20;
-    private final int maxZoomDistance = 5000; // ограничение отдаления для webapp
 
     private final AtomicReference<Map<String, Double>> taxByChunkRef =
             new AtomicReference<>(Map.of()); // key "world:cx,cz" -> tax
     private BukkitTask taxRebuildTask;
-
-    private final long taxRebuildPeriodTicks = 20L * 60L * 5L;
 
     public BlueMapHeatService(UnityLauncher plugin) {
         this.plugin = Objects.requireNonNull(plugin);
@@ -60,11 +55,16 @@ public final class BlueMapHeatService {
 
         // ВАЖНО: этот же bluemapWebRoot передавать в HeatRegionWriter/Export, где пишутся r.*.json
 
+        // ограничение отдаления для webapp
+        int maxZoomDistance = 5000;
         WebappConfPatcher.patch(blueMap.getDataFolder().toPath().resolve("webapp.conf"), maxZoomDistance);
 
         this.writer = new HeatRegionWriter(plugin, bluemapWebRoot, this);
 
         // периодически сбрасываем dirty-регионы (ASYNC)
+        // настройки (можно вынести в конфиг позже)
+        // раз в 2 секунды async
+        long flushPeriodTicks = 40L;
         this.flushTask = Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, () -> {
             try {
                 writer.flushDirty(maxRegionsPerFlush);
@@ -74,6 +74,7 @@ public final class BlueMapHeatService {
         }, flushPeriodTicks, flushPeriodTicks);
 
         // пересчитываем "налог по чанкам" (ASYNC)
+        long taxRebuildPeriodTicks = 20L * 60L * 5L;
         this.taxRebuildTask = Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, () -> {
             try {
                 rebuildTaxByChunkCache();

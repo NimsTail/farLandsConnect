@@ -21,7 +21,6 @@ public record LazyBlueMapLoader(UnityLauncher plugin) {
     // Параметры (вынесите в config.yml при желании)
     private static final long STARTUP_DELAY_TICKS = 40L;     // ~2 секунды после старта
     private static final int MARKERS_PER_TICK = 250;     // сколько задач выполнять за тик
-    private static final long SHOP_LIST_DELAY = 20L * 5; // задержка перед массовым обновлением SHOP_LIST
 
     /**
      * Планирует мягкую загрузку: ждём BlueMap и чуть откладываем, чтобы сервер «встал».
@@ -41,7 +40,6 @@ public record LazyBlueMapLoader(UnityLauncher plugin) {
      * Вся логика на главном потоке: безопасно для Bukkit/BlueMap, но порционно.
      */
     private void loadAndApplyOnMainThread() {
-        long t0 = System.currentTimeMillis();
 
         // 1) Грузим/обновляем данные (Bukkit API внутри этих методов, поэтому — MAIN thread)
         try {
@@ -57,12 +55,10 @@ public record LazyBlueMapLoader(UnityLauncher plugin) {
         // 2) Делаем снимки коллекций, чтобы не шарить «живые» мапы в раннер
         Map<Location, SignVariables> signsSnapshot = new HashMap<>();
         var sm = plugin.getSignManager();
-        if (sm != null && sm.store() != null && sm.store().signs() != null) {
+        if (sm != null) {
             signsSnapshot.putAll(sm.store().signs()); // Map<Location, SignVariables>
         }
         List<ZoneInfo> zonesSnapshot = plugin.getZoneManager().getAllZonesSnapshot();
-
-        long prepDt = System.currentTimeMillis() - t0;
 
         // 3) Инициализируем MarkerSet'ы один раз
         try {

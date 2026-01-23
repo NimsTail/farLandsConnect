@@ -1,7 +1,6 @@
 package com.frammy.unitylauncher.signs.markers;
 
 import com.flowpowered.math.vector.Vector2d;
-import com.frammy.unitylauncher.UnityLauncher;
 import com.frammy.unitylauncher.zones.ZoneManager;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import de.bluecolored.bluemap.api.BlueMapMap;
@@ -22,7 +21,7 @@ public final class MarkerService {
     private String cachedWorld = null;
     private String cachedSet = null;
 
-    public MarkerService(UnityLauncher plugin, ZoneManager zoneManager) {
+    public MarkerService(ZoneManager zoneManager) {
         this.zoneManager = zoneManager;
     }
 

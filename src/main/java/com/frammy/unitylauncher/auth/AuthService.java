@@ -170,35 +170,6 @@ public class AuthService {
         }
     }
 
-    /** Есть ли вообще строка в Users по Name (как в PHP uniqueness check). */
-    public boolean userExists(String player) {
-        if (player == null || player.isBlank()) return false;
-        try (Connection con = DBConnect()) {
-            if (con == null) return false;
-            try (PreparedStatement ps = con.prepareStatement("SELECT 1 FROM Users WHERE Name=? LIMIT 1")) {
-                ps.setString(1, player);
-                try (ResultSet rs = ps.executeQuery()) {
-                    return rs.next();
-                }
-            }
-        } catch (Exception e) {
-            Bukkit.getLogger().warning("[Auth] userExists: " + e.getMessage());
-            return false;
-        }
-    }
-
-    public void updateLastSeen(String name, String value) {
-        try (Connection con = DBConnect();
-             PreparedStatement ps = con.prepareStatement(
-                     "UPDATE Users SET `Last seen`=? WHERE Name=?")) {
-            ps.setString(1, value);
-            ps.setString(2, name);
-            ps.executeUpdate();
-        } catch (Exception e) {
-            Bukkit.getLogger().warning("[Auth] updateLastSeen: " + e.getMessage());
-        }
-    }
-
     /**
      * @param phcHash          $argon2id$...  (или null, если не зарегистрирован)
      * @param lastAuthAtMs     until, если есть активная сессия
@@ -221,40 +192,6 @@ public class AuthService {
         System.arraycopy(b, 0, r, a.length, b.length);
         return r;
     }
-
-    // === ПУБЛИЧНО ===
-    public AuthRecord getCached(String nameLc) {
-        return authCache.get(nameLc);
-    }
-
-    /** Единичная загрузка одного игрока из БД, если промах по кэшу (используй в onJoin). */
-    public AuthRecord loadOneFromDb(String nameLc) {
-        try (Connection con = DBConnect()) {
-            if (con == null) return null;
-            String sql = """
-            SELECT Password,
-                   JSON_EXTRACT(GeneralData, '$.lastAuthAt') AS lastAuthAt,
-                   JSON_UNQUOTE(JSON_EXTRACT(GeneralData, '$.lastAuthIP')) AS lastIp
-            FROM Users WHERE Name=? LIMIT 1
-        """;
-            try (PreparedStatement ps = con.prepareStatement(sql)) {
-                ps.setString(1, nameLc);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (!rs.next()) return null;
-                    String phc  = rs.getString("Password");
-                    Long at     = parseJsonLong(rs.getString("lastAuthAt"));
-                    String lastIp = parseJsonString(rs.getString("lastIp"));
-                    AuthRecord rec = new AuthRecord(phc, at, lastIp, System.currentTimeMillis());
-                    authCache.put(nameLc, rec);
-                    return rec;
-                }
-            }
-        } catch (Exception e) {
-            Bukkit.getLogger().warning("[Auth] loadOneFromDb: " + e.getMessage());
-            return null;
-        }
-    }
-
 
     /** Прогрев кэша всех пользователей при старте. Дёргаем из onEnable() асинхронно. */
     public void preloadAllAuth() {
@@ -325,23 +262,6 @@ public class AuthService {
     }
 
     /* ---------------- DB: Users.Password ---------------- */
-
-//    public boolean isRegistered(String player) {
-//        try (Connection con = DBConnect()) {
-//            if (con == null) return false;
-//            try (PreparedStatement ps = con.prepareStatement("SELECT Password FROM Users WHERE Name=? LIMIT 1")) {
-//                ps.setString(1, player);
-//                try (ResultSet rs = ps.executeQuery()) {
-//                    if (!rs.next()) return false; // нет вообще записи в Users
-//                    String v = rs.getString(1);
-//                    return v != null && !v.isBlank();
-//                }
-//            }
-//        } catch (Exception e) {
-//            Bukkit.getLogger().warning("[Auth] isRegistered: " + e);
-//            return false;
-//        }
-//    }
 
     public boolean setNewPassword(String player, char[] newPass) {
         try (Connection con = DBConnect()) {

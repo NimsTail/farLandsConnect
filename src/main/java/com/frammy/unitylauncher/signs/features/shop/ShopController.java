@@ -35,6 +35,7 @@ import org.bukkit.inventory.ItemStack;
 import java.lang.reflect.Method;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -67,7 +68,7 @@ public final class ShopController {
             long expiresAtMs,
 
             // snapshot (что именно подтверждали)
-            String ownerCountry,
+            String ownerName,
             Location chestLoc,
             String materialKey,
             int qty,
@@ -76,13 +77,24 @@ public final class ShopController {
         boolean expired(long now) { return now > expiresAtMs; }
     }
 
-    // anti-race: один сундук — одна покупка за раз
-    private final Map<String, Object> chestLocks = new ConcurrentHashMap<>();
+    // anti-race: один сундук — одна покупка за раз + авто-очистка
+    private static final long CHEST_LOCK_IDLE_TTL_MS = 30 * 60 * 1000L; // 30 минут
+    private static final long CHEST_LOCK_CLEAN_PERIOD_TICKS = 20L * 60L * 5L; // каждые 5 минут
 
-    private Object lockForChest(Location chestLoc) {
+    private static final class ChestLockEntry {
+        final ReentrantLock lock = new ReentrantLock();
+        volatile long lastUsedMs = System.currentTimeMillis();
+    }
+
+    private final ConcurrentHashMap<String, ChestLockEntry> chestLocks = new ConcurrentHashMap<>();
+
+    private ChestLockEntry lockForChest(Location chestLoc) {
         chestLoc = SignStore.keyLoc(chestLoc);
         String k = SignStore.locKey(chestLoc);
-        return chestLocks.computeIfAbsent(k, __ -> new Object());
+
+        ChestLockEntry e = chestLocks.computeIfAbsent(k, __ -> new ChestLockEntry());
+        e.lastUsedMs = System.currentTimeMillis();
+        return e;
     }
 
     public ShopController(UnityLauncher plugin,
@@ -102,6 +114,17 @@ public final class ShopController {
         this.scroll = scroll;
         this.shopLists = shopLists;
         this.onStored = onStored;
+        // периодическая очистка старых lock'ов (не трогаем, если сейчас залочено)
+        Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, () -> {
+            long now = System.currentTimeMillis();
+            chestLocks.entrySet().removeIf(en -> {
+                ChestLockEntry v = en.getValue();
+                if (v == null) return true;
+                if (v.lock.isLocked()) return false; // критично: не удаляем активные
+                return (now - v.lastUsedMs) > CHEST_LOCK_IDLE_TTL_MS;
+            });
+        }, CHEST_LOCK_CLEAN_PERIOD_TICKS, CHEST_LOCK_CLEAN_PERIOD_TICKS);
+
     }
 
     private static final Pattern INT_ANY = Pattern.compile("-?\\d+");
@@ -515,12 +538,12 @@ public final class ShopController {
             return;
         }
 
-        if (sv.getOwnerCountry() == null || sv.getOwnerCountry().isBlank()) {
-            p.sendMessage(ChatColor.RED + "У магазина не задан владелец (ownerCountry).");
+        String ownerName = resolveShopOwnerName(loc, sv);
+        if (ownerName == null || ownerName.isBlank()) {
+            p.sendMessage(ChatColor.RED + "У магазина не задан владелец (ownerName).");
             return;
         }
 
-        String ownerCountry = sv.getOwnerCountry().trim().toLowerCase(Locale.ROOT);
         Location chestLoc = SignStore.keyLoc(item.chestLocation());
         String itemName = ChatColor.stripColor(items.get(selected));
 
@@ -530,7 +553,7 @@ public final class ShopController {
 
         pendingBuys.put(p.getUniqueId(), new PendingBuy(
                 loc, selected, System.currentTimeMillis() + BUY_CONFIRM_TTL_MS,
-                ownerCountry, chestLoc, item.materialKey(), qty, price
+                ownerName, chestLoc, item.materialKey(), qty, price
         ));
 
         p.sendMessage(ChatColor.DARK_AQUA + "=== Подтверждение покупки ===");
@@ -606,8 +629,8 @@ public final class ShopController {
         }
 
         // ownerCountry тоже проверим (паранойя полезна)
-        String ownerCountry = (sv.getOwnerCountry() != null) ? sv.getOwnerCountry().trim().toLowerCase(Locale.ROOT) : null;
-        if (ownerCountry == null || ownerCountry.isBlank() || !ownerCountry.equals(pb.ownerCountry())) {
+        String ownerName = resolveShopOwnerName(pb.signLoc(), sv);
+        if (ownerName == null || ownerName.isBlank() || !ownerName.equalsIgnoreCase(pb.ownerName())) {
             p.sendMessage(ChatColor.RED + "Владелец магазина изменился. Нажми ПКМ ещё раз.");
             return;
         }
@@ -678,11 +701,11 @@ public final class ShopController {
         }
 
         // страна-владелец магазина (казна получит деньги)
-        if (sv.getOwnerCountry() == null || sv.getOwnerCountry().isBlank()) {
-            p.sendMessage(ChatColor.RED + "У магазина не задан владелец (ownerCountry).");
+        String ownerName = resolveShopOwnerName(loc, sv);
+        if (ownerName == null || ownerName.isBlank()) {
+            p.sendMessage(ChatColor.RED + "У магазина не задан владелец (ownerName).");
             return;
         }
-        String ownerCountry = sv.getOwnerCountry().trim().toLowerCase(Locale.ROOT);
 
         final double price = item.dealPrice();
         final int qty = item.dealQuantity();
@@ -711,10 +734,18 @@ public final class ShopController {
             Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
                 boolean deposited = true;
                 try {
-                    UnityLauncher.getInstance().getCountryRegistryJdbc().addCountryMoney(ownerCountry, price);
+                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price);
+                    if (!credited) {
+                        Bukkit.getScheduler().runTask(plugin, () -> {
+                            mm.giveCash(p, price);
+                            p.sendMessage(ChatColor.RED + "Оплата не прошла (владелец недоступен). Деньги возвращены наличными.");
+                        });
+                        return;
+                    }
+
                 } catch (Exception ex) {
                     deposited = false;
-                    plugin.getLogger().warning("[Shop] addCountryMoney failed for " + ownerCountry + ": " + ex);
+                    plugin.getLogger().warning("[Shop] addCountryMoney failed for " + ownerName + ": " + ex);
                 }
 
                 if (!deposited) {
@@ -731,8 +762,8 @@ public final class ShopController {
                     if (!ok) {
                         // товара нет → вернуть наличку + откатить казну best-effort
                         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                            try { UnityLauncher.getInstance().getCountryRegistryJdbc().addCountryMoney(ownerCountry, -price); }
-                            catch (Exception ignored) {}
+                            try { UnityCommands.getInstance().applyMoneyDelta(ownerName, -price); }
+                            catch (Throwable ignored) {}
                         });
                         mm.giveCash(p, price);
 
@@ -784,10 +815,16 @@ public final class ShopController {
                 // 2) зачисляем в казну страны (async). если не удалось — вернём деньги и выйдем
                 boolean deposited = true;
                 try {
-                    UnityLauncher.getInstance().getCountryRegistryJdbc().addCountryMoney(ownerCountry, price);
+                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price);
+                    if (!credited) {
+                        UnityCommands.getInstance().applyMoneyDelta(p.getName(), price); // вернуть покупателю
+                        Bukkit.getScheduler().runTask(plugin, () ->
+                                p.sendMessage(ChatColor.RED + "Оплата не прошла (владелец недоступен). Деньги возвращены."));
+                        return;
+                    }
                 } catch (Exception ex) {
                     deposited = false;
-                    plugin.getLogger().warning("[Shop] addCountryMoney failed for " + ownerCountry + ": " + ex);
+                    plugin.getLogger().warning("[Shop] addCountryMoney failed for " + ownerName + ": " + ex);
                 }
 
                 if (!deposited) {
@@ -805,8 +842,7 @@ public final class ShopController {
                         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
                             UnityCommands.getInstance().applyMoneyDelta(p.getName(), price);
                             try {
-                                // откат казны — best-effort
-                                UnityLauncher.getInstance().getCountryRegistryJdbc().addCountryMoney(ownerCountry, -price);
+                                UnityCommands.getInstance().applyMoneyDelta(ownerName, -price);
                             } catch (Exception ignored) {}
                         });
 
@@ -826,34 +862,17 @@ public final class ShopController {
         });
     }
 
-    private void handleShopListBuyClick(Player p, Location loc) {
-        if (p == null || loc == null) return;
-
-        List<String> items = store.signPages().get(loc);
-        List<ItemData> dataList = store.signItemData().get(loc);
-        if (items == null || items.isEmpty() || dataList == null || dataList.isEmpty()) {
-            p.sendMessage(ChatColor.RED + "В этом магазине пока нет товаров.");
-            return;
-        }
-
-        int n = Math.min(items.size(), dataList.size());
-        int selected = Math.floorMod(playerScrollIndex.getOrDefault(p.getUniqueId(), 0), n);
-
-        handleShopListBuyClickForcedIndex(p, loc, selected);
-    }
-
     private void handleShopSourceBuyClick(Player p, Location signLoc) {
         if (p == null || signLoc == null) return;
 
         SignVariables sv = store.get(signLoc);
         if (sv == null || sv.getSignCategory() != SignCategory.SHOP_SOURCE) return;
 
-        // страна-владелец магазина (казна получит деньги)
-        if (sv.getOwnerCountry() == null || sv.getOwnerCountry().isBlank()) {
-            p.sendMessage(ChatColor.RED + "У магазина не задан владелец (ownerCountry).");
+        String ownerName = resolveShopOwnerName(signLoc, sv);
+        if (ownerName == null || ownerName.isBlank()) {
+            p.sendMessage(ChatColor.RED + "У магазина не задан владелец (ownerName).");
             return;
         }
-        String ownerCountry = sv.getOwnerCountry().trim().toLowerCase(Locale.ROOT);
 
         // qty/price берём из signText (или из мира позже)
         List<String> t = safe4(sv.getSignText());
@@ -908,10 +927,17 @@ public final class ShopController {
             Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
                 boolean deposited = true;
                 try {
-                    UnityLauncher.getInstance().getCountryRegistryJdbc().addCountryMoney(ownerCountry, price);
+                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price);
+                    if (!credited) {
+                        Bukkit.getScheduler().runTask(plugin, () -> {
+                            mm.giveCash(p, price);
+                            p.sendMessage(ChatColor.RED + "Оплата не прошла (владелец недоступен). Деньги возвращены наличными.");
+                        });
+                        return;
+                    }
                 } catch (Exception ex) {
                     deposited = false;
-                    plugin.getLogger().warning("[Shop] addCountryMoney failed for " + ownerCountry + ": " + ex);
+                    plugin.getLogger().warning("[Shop] addCountryMoney failed for " + ownerName + ": " + ex);
                 }
 
                 if (!deposited) {
@@ -926,8 +952,8 @@ public final class ShopController {
                     boolean ok = dispenseFromChestAtomic(chestLoc, mat, qty, p);
                     if (!ok) {
                         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                            try { UnityLauncher.getInstance().getCountryRegistryJdbc().addCountryMoney(ownerCountry, -price); }
-                            catch (Exception ignored) {}
+                            try { UnityCommands.getInstance().applyMoneyDelta(ownerName, -price); }
+                            catch (Throwable ignored) {}
                         });
                         mm.giveCash(p, price);
                         p.sendMessage(ChatColor.RED + "Товара не хватает. Деньги возвращены наличными.");
@@ -969,16 +995,23 @@ public final class ShopController {
 
                 boolean deposited = true;
                 try {
-                    UnityLauncher.getInstance().getCountryRegistryJdbc().addCountryMoney(ownerCountry, price);
+                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price);
+                    if (!credited) {
+                        // вернуть на счёт игрока, потому что платили со счёта
+                        UnityCommands.getInstance().applyMoneyDelta(p.getName(), price);
+                        Bukkit.getScheduler().runTask(plugin, () ->
+                                p.sendMessage(ChatColor.RED + "Оплата не прошла (владелец недоступен). Деньги возвращены на счёт."));
+                        return;
+                    }
                 } catch (Exception ex) {
                     deposited = false;
-                    plugin.getLogger().warning("[Shop] addCountryMoney failed for " + ownerCountry + ": " + ex);
+                    plugin.getLogger().warning("[Shop] addCountryMoney failed for " + ownerName + ": " + ex);
                 }
 
                 if (!deposited) {
                     UnityCommands.getInstance().applyMoneyDelta(p.getName(), price);
                     Bukkit.getScheduler().runTask(plugin, () ->
-                            p.sendMessage(ChatColor.RED + "Оплата не прошла (казна). Деньги возвращены."));
+                            p.sendMessage(ChatColor.RED + "Оплата не прошла (казна). Деньги возвращены на счёт."));
                     return;
                 }
 
@@ -987,8 +1020,8 @@ public final class ShopController {
                     if (!ok) {
                         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
                             UnityCommands.getInstance().applyMoneyDelta(p.getName(), price);
-                            try { UnityLauncher.getInstance().getCountryRegistryJdbc().addCountryMoney(ownerCountry, -price); }
-                            catch (Exception ignored) {}
+                            try { UnityCommands.getInstance().applyMoneyDelta(ownerName, -price); }
+                            catch (Throwable ignored) {}
                         });
 
                         p.sendMessage(ChatColor.RED + "Товара не хватает. Деньги возвращены.");
@@ -1047,8 +1080,11 @@ public final class ShopController {
             return false;
         }
 
-        Object lock = lockForChest(chestLoc);
-        synchronized (lock) {
+        ChestLockEntry entry = lockForChest(chestLoc);
+        ReentrantLock lock = entry.lock;
+
+        lock.lock();
+        try {
             Block block = chestLoc.getBlock();
             BlockState live = getLiveState(block);
 
@@ -1059,24 +1095,22 @@ public final class ShopController {
 
             Inventory inv = container.getInventory();
 
-            // 1) шаблон товара (реальный ItemStack с meta)
             ItemStack template = findFirstNonAir(inv);
             if (template == null) return false;
 
             int before = countSimilar(inv, template);
             if (before < qty) return false;
 
-            // 2) делаем rollback-снапшот содержимого
-            ItemStack[] snapshot = inv.getContents();
+            ItemStack[] snapshot = Arrays.stream(inv.getContents())
+                    .map(it -> it == null ? null : it.clone())
+                    .toArray(ItemStack[]::new);
 
-            // 3) снимаем стандартным removeItem (он нормально работает на live инвентарях)
             ItemStack request = template.clone();
             request.setAmount(qty);
 
             Map<Integer, ItemStack> notRemoved = inv.removeItem(request);
 
             if (!notRemoved.isEmpty()) {
-                // не хватило (или не совпал meta) -> откат
                 inv.setContents(snapshot);
                 safeUpdate(container);
                 return false;
@@ -1084,20 +1118,17 @@ public final class ShopController {
 
             safeUpdate(container);
 
-            // 4) ЖЁСТКАЯ ВЕРИФИКАЦИЯ: сундук обязан уменьшиться ровно на qty
             int after = countSimilar(inv, template);
             if (after != before - qty) {
                 plugin.getLogger().warning("[Shop] Container did NOT decrease properly! before=" + before
                         + " after=" + after + " qty=" + qty + " chestLoc=" + chestLoc
                         + " type=" + block.getType() + " template=" + template.getType());
 
-                // откат и стоп
                 inv.setContents(snapshot);
                 safeUpdate(container);
                 return false;
             }
 
-            // 5) выдаём игроку только после подтверждения уменьшения сундука
             ItemStack out = template.clone();
             out.setAmount(qty);
 
@@ -1107,6 +1138,9 @@ public final class ShopController {
             }
 
             return true;
+        } finally {
+            entry.lastUsedMs = System.currentTimeMillis(); // отметим использование в конце
+            lock.unlock();
         }
     }
 
@@ -1325,10 +1359,6 @@ public final class ShopController {
                     // Главное правило: контейнер должен быть в ТОМ ЖЕ магазине, что и табличка.
                     if (!sameShopKey(origin, b.getLocation())) {
                         foundContainersButRejected = true;
-
-                        var za = zoneManager.getShopZoneAt(origin);
-                        var zb = zoneManager.getShopZoneAt(b.getLocation());
-
                         continue;
                     }
 
@@ -1344,6 +1374,30 @@ public final class ShopController {
         }
 
         return nearest;
+    }
+
+    private String resolveShopOwnerName(Location loc, SignVariables sv) {
+        // 1) самый надёжный источник в твоей текущей архитектуре — ownerName в SignVariables
+        if (sv != null) {
+            String o = sv.getOwnerName();
+            if (o != null && !o.isBlank()) return o;
+        }
+
+        // 2) fallback: попробуем достать владельца из SHOP-зоны через reflection (если у зоны есть owner/ownerName)
+        try {
+            Object zone = zoneManager.getShopZoneAt(loc);
+            if (zone != null) {
+                for (String mName : new String[]{"getOwnerName", "getOwner", "ownerName", "owner"}) {
+                    try {
+                        var m = zone.getClass().getMethod(mName);
+                        Object v = m.invoke(zone);
+                        if (v instanceof String s && !s.isBlank()) return s;
+                    } catch (NoSuchMethodException ignored) {}
+                }
+            }
+        } catch (Throwable ignored) {}
+
+        return null;
     }
 
     private boolean sameShopKey(Location a, Location b) {

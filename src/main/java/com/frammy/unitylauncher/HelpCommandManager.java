@@ -4,7 +4,6 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
-import org.bukkit.entity.Player;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -41,12 +40,5 @@ public class HelpCommandManager {
             }
         }
         return filtered;
-    }
-
-    // Отправка всех команд игроку
-    public void sendHelp(Player player) {
-        for (HelpCommand cmd : commands) {
-            player.sendMessage(cmd.toComponent());
-        }
     }
 }

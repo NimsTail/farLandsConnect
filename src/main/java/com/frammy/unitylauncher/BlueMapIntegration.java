@@ -16,10 +16,6 @@ import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
-import org.locationtech.jts.geom.Coordinate;
-import org.locationtech.jts.geom.GeometryFactory;
-import org.locationtech.jts.geom.LinearRing;
-import org.locationtech.jts.geom.Polygon;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
@@ -305,36 +301,6 @@ public class BlueMapIntegration {
         }));
     }
 
-    public void loadBlueMapMarkers() {
-        BlueMapAPI.getInstance().ifPresent(blueMapAPI -> blueMapAPI.getMaps().forEach(map -> {
-            File markerDirectory = new File(getDataFolder().getParentFile(),
-                    "BMMarker/customData/" + map.getId() + "/");
-            if (!markerDirectory.exists() || !markerDirectory.isDirectory()) {
-                getLogger().warning("Папка с маркерами не найдена или не директория: " + markerDirectory.getAbsolutePath());
-                return;
-            }
-
-            File[] markerFiles = markerDirectory.listFiles((dir, name) -> name.endsWith(".json"));
-            if (markerFiles == null) return;
-
-            for (File markerFile : markerFiles) {
-                try (InputStreamReader reader = new InputStreamReader(
-                        new FileInputStream(markerFile), StandardCharsets.UTF_8)) {
-                    MarkerSet markerSet = MarkerGson.INSTANCE.fromJson(reader, MarkerSet.class);
-                    String markerSetName = markerFile.getName().replace(".json", "");
-                    if (markerSet.getLabel() == null || markerSet.getLabel().isEmpty()) {
-                        markerSet.setLabel(markerSetName);
-                    }
-                    map.getMarkerSets().put(markerSetName, markerSet);
-                } catch (IOException ex) {
-                    getLogger().severe("Ошибка при загрузке маркеров BlueMap из файла: " + markerFile.getName());
-                    ex.printStackTrace();
-                }
-
-            }
-        }));
-    }
-
     private static Shape blueMapShapeFromExtrude(List<Vector3d> extrudePoints) {
         if (extrudePoints == null || extrudePoints.size() < 3) return null;
 
@@ -363,48 +329,6 @@ public class BlueMapIntegration {
     }
 
     /* ===================== ПРОЧНЫЕ ХЕЛПЕРЫ ДЛЯ ПЕРЕСЕЧЕНИЙ ===================== */
-
-    private static final GeometryFactory JTS = new GeometryFactory();
-    private static final double EPS_AREA = 1e-6;
-
-    private static boolean yOverlap(double aMin, double aMax, double bMin, double bMax) {
-        return !(aMax < bMin || bMax < aMin);
-    }
-
-    /** Преобразуем Shape (BlueMap) -> JTS Polygon (только XZ), с замыканием контура. */
-    private static Polygon shapeToPolygon(Shape shape) {
-        Object[] pts = shape.getPoints(); // Vector2d[] но "чужой" по ClassLoader
-        if (pts == null || pts.length < 3) return null;
-
-        Coordinate[] coords = new Coordinate[pts.length + 1];
-        try {
-            for (int i = 0; i < pts.length; i++) {
-                Object v = pts[i];
-                if (v == null) return null;
-
-                // у BlueMap Vector2d есть getX(), getY()
-                double x = (double) v.getClass().getMethod("getX").invoke(v);
-                double y = (double) v.getClass().getMethod("getY").invoke(v);
-
-                coords[i] = new Coordinate(x, y); // XZ -> (x, z) у нас лежит во втором компоненте
-            }
-            coords[pts.length] = new Coordinate(coords[0]);
-
-            LinearRing shell = JTS.createLinearRing(coords);
-            return JTS.createPolygon(shell);
-        } catch (Throwable t) {
-            return null;
-        }
-    }
-
-    /** Пересечение по XZ-проекции (полигон с полигоном), с порогом площади. */
-    private static boolean polygonsIntersectXZ(Shape s1, Shape s2) {
-        Polygon p1 = shapeToPolygon(s1);
-        Polygon p2 = shapeToPolygon(s2);
-        if (p1 == null || p2 == null || p1.isEmpty() || p2.isEmpty()) return false;
-        var inter = p1.intersection(p2);
-        return !inter.isEmpty() && inter.getArea() > EPS_AREA;
-    }
 
     private record ZoneColors(Color fill, Color line) {}
 

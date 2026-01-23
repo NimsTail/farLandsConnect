@@ -4,11 +4,9 @@ import com.frammy.unitylauncher.UnityLauncher;
 import com.frammy.unitylauncher.signs.SignVariables;
 import com.frammy.unitylauncher.signs.storage.SignStore;
 import org.bukkit.Bukkit;
-import org.bukkit.ChatColor;
 import org.bukkit.Location;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.Sign;
-import org.bukkit.scheduler.BukkitRunnable;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.util.*;
@@ -51,59 +49,6 @@ public final class SignScrollService {
         BukkitTask task = tasks.remove(lineIndex);
         if (task != null) task.cancel();
         if (tasks.isEmpty()) activeScrolls.remove(signLocation);
-    }
-
-    public void startSignTextScroll(Sign sign, int lineIndex, String fullText, ChatColor color,
-                                    int visibleWidth, int durationTicks, int intervalTicks, Runnable onComplete) {
-        if (sign == null) return;
-
-        String stripped = ChatColor.stripColor(fullText);
-        Location loc = SignStore.keyLoc(sign.getLocation());
-
-        activeScrolls.computeIfAbsent(loc, l -> new HashMap<>());
-        BukkitTask oldTask = activeScrolls.get(loc).get(lineIndex);
-        if (oldTask != null) oldTask.cancel();
-
-        if (stripped.length() <= visibleWidth) {
-            sign.setLine(lineIndex, color + stripped);
-            sign.update();
-            if (onComplete != null) onComplete.run();
-            return;
-        }
-
-        BukkitTask newTask = new BukkitRunnable() {
-            int tick = 0;
-            boolean forward = true;
-
-            @Override public void run() {
-                BlockState st = loc.getBlock().getState();
-                if (tick >= durationTicks || !(st instanceof Sign currentSign)) {
-                    cancel();
-                    Map<Integer, BukkitTask> m = activeScrolls.get(loc);
-                    if (m != null) {
-                        m.remove(lineIndex);
-                        if (m.isEmpty()) activeScrolls.remove(loc);
-                    }
-                    if (onComplete != null) onComplete.run();
-                    return;
-                }
-
-                int maxOffset = stripped.length() - visibleWidth;
-
-                int offset = tick % (maxOffset + 1);
-                if (!forward) offset = maxOffset - offset;
-
-                String view = stripped.substring(offset, offset + visibleWidth);
-                currentSign.setLine(lineIndex, color + view);
-                currentSign.update();
-
-                if (tick % (maxOffset + 1) == 0) forward = !forward;
-                tick++;
-            }
-
-        }.runTaskTimer(plugin, 0L, intervalTicks);
-
-        activeScrolls.get(loc).put(lineIndex, newTask);
     }
 
     public void makeSignScrollingLines(Location signLocation, Map<Integer, String> originalLines, int intervalTicks, int maxLength) {
@@ -169,32 +114,6 @@ public final class SignScrollService {
         }, 0L, intervalTicks);
 
         scrollingTasks.put(signLocation, task);
-    }
-
-    public void scheduleSignReset(Location loc) {
-        loc = SignStore.keyLoc(loc);
-        BukkitTask prev = resetTasks.remove(loc);
-        if (prev != null) prev.cancel();
-
-        Location finalLoc = loc;
-        BukkitTask task = Bukkit.getScheduler().runTaskLater(plugin, () -> {
-            SignVariables sv = store.get(finalLoc);
-            if (sv == null) { resetTasks.remove(finalLoc); return; }
-
-            if (sv.isPaused()) { scheduleSignReset(finalLoc); return; }
-
-            BlockState st = finalLoc.getBlock().getState();
-            if (!(st instanceof Sign sign)) { resetTasks.remove(finalLoc); return; }
-
-            String[] lines = store.originalSignTexts().get(finalLoc);
-            if (lines != null) {
-                for (int i = 0; i < Math.min(4, lines.length); i++) sign.setLine(i, lines[i]);
-                sign.update();
-            }
-            resetTasks.remove(finalLoc);
-        }, 20L * 10L);
-
-        resetTasks.put(loc, task);
     }
 
     public Map<Location, BukkitTask> scrollingTasks() { return scrollingTasks; }

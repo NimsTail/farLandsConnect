@@ -7,7 +7,6 @@ import org.bukkit.util.BoundingBox;
 
 import java.time.LocalDate;
 import java.util.*;
-import java.util.concurrent.ThreadLocalRandom;
 
 /** Минимальная и удобная модель зоны. */
 public class ZoneInfo {
@@ -72,18 +71,6 @@ public class ZoneInfo {
     }
 
     public boolean hasCountry() { return notBlank(ownerCountry); }
-
-    /** Имя LP-группы страны: "group.<normalized>". */
-    public String getLuckPermsGroupName() {
-        if (!notBlank(ownerCountry)) return null;
-        String norm = ownerCountry.trim().toLowerCase(Locale.ROOT)
-                .replace(' ', '_')
-                .replaceAll("[^a-z0-9_\\-.]", "");
-        return "group." + norm;
-    }
-
-    // ===== Convenience =====
-    public boolean isType(ZoneType t) { return t != null && t == this.type; }
 
     /** Мир зоны по первому углу (или null). */
     public World getWorld() {
@@ -156,7 +143,6 @@ public class ZoneInfo {
     public LocalDate getNextBillingDate() {
         return nextBillingDate != null ? nextBillingDate : LocalDate.now().plusDays(7);
     }
-    public LocalDate getLastBilledDate() { return lastBilledDate; }
 
     // ===== Utils =====
     private static boolean notBlank(String s) { return s != null && !s.isBlank(); }
@@ -198,23 +184,6 @@ public class ZoneInfo {
         return new BoundingBox(minX, 0, minZ, maxX, maxY, maxZ);
     }
 
-    public Location randomPointInBox(ThreadLocalRandom rnd) {
-        BoundingBox bb = getBoundingBoxXZ();
-        World w = getWorld();
-        if (w == null || bb == null) return null;
-
-        int minX = (int) Math.floor(bb.getMinX());
-        int maxX = (int) Math.floor(bb.getMaxX());
-        int minZ = (int) Math.floor(bb.getMinZ());
-        int maxZ = (int) Math.floor(bb.getMaxZ());
-        if (minX > maxX || minZ > maxZ) return null;
-
-        int x = rnd.nextInt(minX, maxX + 1);
-        int z = rnd.nextInt(minZ, maxZ + 1);
-        int y = w.getHighestBlockYAt(x, z);
-        return new Location(w, x, y, z);
-    }
-
     /** Центр зоны (примерно): центр AABB по XZ + y по highestBlock. */
     public Location getCenter() {
         World w = getWorld();
@@ -226,16 +195,6 @@ public class ZoneInfo {
 
         int y = w.getHighestBlockYAt((int) Math.floor(cx), (int) Math.floor(cz));
         return new Location(w, cx, y, cz);
-    }
-
-    /** Быстрый центр XZ (если кому-то нужен только 2D). */
-    public org.bukkit.util.Vector getCenterXZ() {
-        BoundingBox bb = getBoundingBoxXZ();
-        return new org.bukkit.util.Vector(
-                (bb.getMinX() + bb.getMaxX()) / 2.0,
-                0,
-                (bb.getMinZ() + bb.getMaxZ()) / 2.0
-        );
     }
 
 }

@@ -3,8 +3,6 @@ package com.frammy.unitylauncher.upgrades.core;
 import com.frammy.unitylauncher.UnityLauncher;
 import com.frammy.unitylauncher.upgrades.config.UpgradesCfg;
 import com.frammy.unitylauncher.zones.ZoneManager;
-import org.bukkit.event.Listener;
-import org.jetbrains.annotations.Nullable;
 
 public abstract class BaseUpgrade implements Upgrade {
 
@@ -39,7 +37,4 @@ public abstract class BaseUpgrade implements Upgrade {
 
     protected void onEnable() { }
     protected void onDisable() { }
-
-    @Override
-    public @Nullable Listener listener() { return null; }
 }

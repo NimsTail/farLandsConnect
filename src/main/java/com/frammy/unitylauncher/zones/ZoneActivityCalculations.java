@@ -2,6 +2,7 @@ package com.frammy.unitylauncher.zones;
 
 import com.frammy.unitylauncher.chunkactivity.ActivityWeights;
 import com.frammy.unitylauncher.chunkactivity.ChunkStats;
+import com.frammy.unitylauncher.zones.geom.ZoneOverlapRules;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
@@ -403,7 +404,7 @@ public class ZoneActivityCalculations {
             if (!intersectsByChunks(tKeys, chunkKeysForCorners(oc))) continue;
 
             // учтём только те пересечения, которые действительно разрешены правилами
-            if (!zm.canZonesCoexist(target, other)) {
+            if (!ZoneOverlapRules.canZonesCoexist(target, other, zm.zoneLimits)) {
                 // пересечение есть, но правила запрещают — НЕ усредняем по нему
                 continue;
             }

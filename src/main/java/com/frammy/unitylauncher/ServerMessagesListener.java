@@ -1,6 +1,5 @@
 package com.frammy.unitylauncher;
 
-import com.mysql.cj.x.protobuf.MysqlxExpr;
 import io.papermc.paper.advancement.AdvancementDisplay;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
@@ -220,12 +219,6 @@ public final class ServerMessagesListener implements Listener {
         Bukkit.getServer().broadcastMessage(msg);
     }
 
-    // для грозы и любых глобальных сообщений без конкретного игрока
-    private static void broadcastRaw(String template) {
-        if (template == null) return;
-        Bukkit.getServer().broadcastMessage(colorize(template));
-    }
-
     /* ===================== JOIN / QUIT ===================== */
 
     @EventHandler(priority = EventPriority.HIGHEST)
@@ -270,25 +263,14 @@ public final class ServerMessagesListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onAdvancement(PlayerAdvancementDoneEvent event) {
         if (!ADV_ENABLED) return;
-        boolean debug = false;
         var adv = event.getAdvancement();
         AdvancementDisplay display = adv.getDisplay();
 
         if (display == null) {
-            if (debug) {
-                plugin.getLogger().info("ADV DEBUG: " + adv.getKey() + " has no display (hidden/recipe)");
-            }
             return;
         }
 
         if (!display.doesAnnounceToChat() || display.isHidden()) {
-            if (debug) {
-                plugin.getLogger().info(
-                        "ADV DEBUG: " + adv.getKey() +
-                                " announce=" + display.doesAnnounceToChat() +
-                                " hidden=" + display.isHidden()
-                );
-            }
             return;
         }
 

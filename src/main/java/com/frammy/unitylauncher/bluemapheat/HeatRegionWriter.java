@@ -11,7 +11,6 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class HeatRegionWriter {
 
     public static final int REGION_SIZE_CHUNKS = 32;
-    private static final int CHUNK = 16;
 
     private final UnityLauncher plugin;
     private final Path bluemapWebRoot;
@@ -30,8 +29,8 @@ public final class HeatRegionWriter {
     }
 
     public void markDirty(String world, int chunkX, int chunkZ) {
-        int rx = floorDiv(chunkX, REGION_SIZE_CHUNKS);
-        int rz = floorDiv(chunkZ, REGION_SIZE_CHUNKS);
+        int rx = floorDiv(chunkX);
+        int rz = floorDiv(chunkZ);
         dirty.add(world + ":" + rx + ":" + rz);
     }
 
@@ -40,8 +39,8 @@ public final class HeatRegionWriter {
         visits.merge(k, delta, Long::sum);
     }
 
-    public int flushDirty(int maxRegionsPerFlush) {
-        if (dirty.isEmpty()) return 0;
+    public void flushDirty(int maxRegionsPerFlush) {
+        if (dirty.isEmpty()) return;
 
         List<String> batch = new ArrayList<>(Math.min(maxRegionsPerFlush, dirty.size()));
         Iterator<String> it = dirty.iterator();
@@ -51,7 +50,6 @@ public final class HeatRegionWriter {
             batch.add(k);
         }
 
-        int n = 0;
         for (String key : batch) {
             String[] p = key.split(":");
             if (p.length != 3) continue;
@@ -61,12 +59,10 @@ public final class HeatRegionWriter {
 
             try {
                 writeRegion(world, rx, rz);
-                n++;
             } catch (Throwable t) {
                 plugin.getLogger().warning("[BlueMapHeat] Failed write region " + key + ": " + t.getMessage());
             }
         }
-        return n;
     }
 
     private void writeRegion(String world, int rx, int rz) throws IOException {
@@ -136,9 +132,9 @@ public final class HeatRegionWriter {
         try { return Integer.parseInt(s); } catch (Exception e) { return 0; }
     }
 
-    private static int floorDiv(int a, int b) {
-        int r = a / b;
-        if ((a ^ b) < 0 && (r * b != a)) r--;
+    private static int floorDiv(int a) {
+        int r = a / HeatRegionWriter.REGION_SIZE_CHUNKS;
+        if ((a ^ HeatRegionWriter.REGION_SIZE_CHUNKS) < 0 && (r * HeatRegionWriter.REGION_SIZE_CHUNKS != a)) r--;
         return r;
     }
 

@@ -7,6 +7,7 @@ import com.frammy.unitylauncher.auth.LoginRateLimiter;
 import com.frammy.unitylauncher.bluemapheat.BlueMapHeatService;
 import com.frammy.unitylauncher.chunkactivity.*;
 import com.frammy.unitylauncher.signs.SignManager;
+import com.frammy.unitylauncher.signs.features.trash.TrashSellConfig;
 import com.frammy.unitylauncher.tab.LuckPermsPrefixService;
 import com.frammy.unitylauncher.tab.TabPrefixService;
 import com.frammy.unitylauncher.upgrades.UpgradeCondition;
@@ -115,6 +116,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     @Override
     public void onEnable() {
         instance = this;
+
+        TrashSellConfig.load(this);
+
         loadAuthSecrets();
 
         // --- init DB pool как можно раньше ---
@@ -591,22 +595,6 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         return loc.getWorld().getName() + "_" + loc.getBlockX() + "_" + loc.getBlockY() + "_" + loc.getBlockZ();
     }
 
-    public void addPlayerToWaitList(Player player) {
-        if (player != null) awaitingCorrectCommand.add(player.getUniqueId());
-    }
-
-    public void removePlayerFromWaitList(Player player) {
-        if (player != null) awaitingCorrectCommand.remove(player.getUniqueId());
-    }
-
-    public boolean isPlayerInWaitList(Player player) {
-        return player != null && awaitingCorrectCommand.contains(player.getUniqueId());
-    }
-
-    public int getMaxBaseLength(Collection<String> values) {
-        return values.stream().mapToInt(String::length).max().orElse(1);
-    }
-
     /**
      * Возвращает {prefix, suffix} для TAB по UUID игрока.
      */
@@ -637,14 +625,6 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             t.printStackTrace();
             return new String[]{null, null};
         }
-    }
-
-    public ZonesEconomyConfig getZonesEconomyConfig() {
-        return zonesEconomyConfig;
-    }
-
-    public CountryRegistryJdbc getCountryRegistry() {
-        return countryRegistryJdbc;
     }
 
     /* ===================== DATABASE ===================== */

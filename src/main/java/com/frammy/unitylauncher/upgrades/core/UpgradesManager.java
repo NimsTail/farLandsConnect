@@ -32,41 +32,10 @@ public final class UpgradesManager {
 
     public UpgradesCfg config() { return config; }
 
-    /** Возвращает UpgradeContext если апгрейды запущены, иначе null (core.enabled=false или start ещё не был). */
-    public UpgradeContext contextOrNull() { return ctx; }
-
-    /** Зарегистрирован ли апгрейд (вообще существует в системе), независимо от включённости. */
-    public boolean isRegistered(UpgradeKey key) { return upgrades.containsKey(key); }
-
-    /** Включён ли апгрейд (успешно enable). */
-    public boolean isEnabled(UpgradeKey key) {
-        for (Upgrade u : enabled) {
-            if (u.key().equals(key)) return true;
-        }
-        return false;
-    }
-
-    /** Достать включённый апгрейд по ключу. */
-    public Upgrade getEnabled(UpgradeKey key) {
-        for (Upgrade u : enabled) {
-            if (u.key().equals(key)) return u;
-        }
-        return null;
-    }
-
     /** Достать включённый апгрейд по классу (самый нужный метод для интеграций). */
     public <T extends Upgrade> T getEnabled(Class<T> type) {
         if (type == null) return null;
         for (Upgrade u : enabled) {
-            if (type.isInstance(u)) return type.cast(u);
-        }
-        return null;
-    }
-
-    /** Достать зарегистрированный апгрейд по классу (даже если выключен). */
-    public <T extends Upgrade> T getRegistered(Class<T> type) {
-        if (type == null) return null;
-        for (Upgrade u : upgrades.values()) {
             if (type.isInstance(u)) return type.cast(u);
         }
         return null;

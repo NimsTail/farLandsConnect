@@ -22,6 +22,6 @@ public final class CfgIO {
 
     public static List<String> strList(FileConfiguration c, String path, List<String> fallback) {
         List<String> v = c.getStringList(path);
-        return (v == null || v.isEmpty()) ? fallback : v;
+        return v.isEmpty() ? fallback : v;
     }
 }

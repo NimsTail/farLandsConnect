@@ -4,6 +4,7 @@ import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
 import com.frammy.unitylauncher.chunkactivity.ActivityWeights;
 import com.frammy.unitylauncher.chunkactivity.ChunkActivityHeatmapExporter;
 import com.frammy.unitylauncher.chunkactivity.ZonesEconomyConfig;
+import com.frammy.unitylauncher.signs.features.trash.TrashSellConfig;
 import com.frammy.unitylauncher.upgrades.core.Upgrade;
 import com.frammy.unitylauncher.upgrades.core.UpgradesManager;
 import com.frammy.unitylauncher.upgrades.impl.SafeDepositUpgrade;
@@ -21,6 +22,7 @@ import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.jetbrains.annotations.NotNull;
+import org.jspecify.annotations.NonNull;
 
 import java.time.LocalDate;
 import java.util.Arrays;
@@ -51,7 +53,7 @@ public class Unity implements CommandExecutor {
     public boolean onCommand(@NotNull CommandSender sender,
                              @NotNull Command command,
                              @NotNull String label,
-                             @NotNull String[] args)
+                             @NotNull String @NonNull [] args)
     {
 
         String cmd = command.getName().toLowerCase(Locale.ROOT);
@@ -150,6 +152,7 @@ public class Unity implements CommandExecutor {
 
             // 1) перезагрузить config.yml
             plugin.reloadConfig();
+            TrashSellConfig.load(plugin);
 
             // 2) перезагрузить фразы join/quit/advancement
             ServerMessagesListener msgListener = plugin.getServerMessagesListener();
@@ -208,10 +211,6 @@ public class Unity implements CommandExecutor {
             }
 
             var tc = sm.getTrashController();
-            if (tc == null) {
-                p.sendMessage(ChatColor.RED + "TrashController не инициализирован.");
-                return true;
-            }
 
             if (args.length < 2) {
                 p.sendMessage(ChatColor.YELLOW + "Используй: /ul trash confirm или /ul trash cancel");

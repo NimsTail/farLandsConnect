@@ -28,10 +28,6 @@ public record ItemData(
         return totalQuantity >= dealQuantity && dealPrice > 0;
     }
 
-    public double unitPrice() {
-        return dealPrice / dealQuantity;
-    }
-
     public String displayName() {
         String[] parts = materialKey.split("_");
         StringBuilder sb = new StringBuilder();

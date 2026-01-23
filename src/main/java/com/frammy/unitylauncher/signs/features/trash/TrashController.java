@@ -2,7 +2,6 @@ package com.frammy.unitylauncher.signs.features.trash;
 
 import com.frammy.unitylauncher.UnityCommands;
 import com.frammy.unitylauncher.UnityLauncher;
-import com.frammy.unitylauncher.chunkactivity.ZonesEconomyConfig;
 import net.md_5.bungee.api.chat.ClickEvent;
 import net.md_5.bungee.api.chat.ComponentBuilder;
 import net.md_5.bungee.api.chat.HoverEvent;
@@ -10,7 +9,6 @@ import net.md_5.bungee.api.chat.TextComponent;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.Material;
-import org.bukkit.block.Sign;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
@@ -35,7 +33,7 @@ public final class TrashController {
     private record TrashSnap(
             double totalReward,
             int totalItems,
-            Map<Integer, Integer> slots,
+            Map<Integer, ItemStack> slots,
             Map<Material, TrashLine> lines
     ) {}
 
@@ -45,13 +43,12 @@ public final class TrashController {
         return Math.round(v * 100.0) / 100.0;
     }
 
-    public void handleTrashSell(Player p, Sign sign) {
-        ZonesEconomyConfig.TrashSell ts = ZonesEconomyConfig.get().trashSell;
-        if (!ts.enabled) {
+    public void handleTrashSell(Player p) {
+        TrashSellConfig.Data ts = TrashSellConfig.get();
+        if (!ts.enabled()) {
             p.sendMessage(ChatColor.RED + "Продажа мусора временно отключена на сервере.");
             return;
         }
-
         // чистим протухшие pending
         cleanupExpired(p.getUniqueId());
 
@@ -68,8 +65,8 @@ public final class TrashController {
     }
 
     public void handleTrashConfirm(Player p) {
-        ZonesEconomyConfig.TrashSell ts = ZonesEconomyConfig.get().trashSell;
-        if (!ts.enabled) {
+        TrashSellConfig.Data ts = TrashSellConfig.get();
+        if (!ts.enabled()) {
             p.sendMessage(ChatColor.RED + "Продажа мусора временно отключена на сервере.");
             return;
         }
@@ -148,9 +145,30 @@ public final class TrashController {
     }
 
     private boolean sameSnapshot(TrashSnap a, TrashSnap b) {
-        // достаточно сравнить “что будет удалено”: слоты+кол-во
-        // (если игрок переставил предметы — слоты изменятся → попросим подтвердить ещё раз)
-        return a.slots().equals(b.slots()) && a.totalItems() == b.totalItems() && a.totalReward() == b.totalReward();
+        if (a.totalItems() != b.totalItems()) return false;
+        if (Double.compare(a.totalReward(), b.totalReward()) != 0) return false;
+
+        return sameSlotStacks(a.slots(), b.slots());
+    }
+
+    private boolean sameSlotStacks(Map<Integer, ItemStack> a, Map<Integer, ItemStack> b) {
+        if (a.size() != b.size()) return false;
+
+        for (var e : a.entrySet()) {
+            int slot = e.getKey();
+            ItemStack as = e.getValue();
+            ItemStack bs = b.get(slot);
+            if (!sameStack(as, bs)) return false;
+        }
+        return true;
+    }
+
+    private boolean sameStack(ItemStack a, ItemStack b) {
+        if (a == null && b == null) return true;
+        if (a == null || b == null) return false;
+        if (a.getType() != b.getType()) return false;
+        if (a.getAmount() != b.getAmount()) return false;
+        return a.isSimilar(b); // тип+meta
     }
 
     private void sendPreview(Player p, TrashSnap snap) {
@@ -186,11 +204,11 @@ public final class TrashController {
         p.spigot().sendMessage(new TextComponent(" "), confirm, new TextComponent(" "), cancel);
     }
 
-    private TrashSnap scanTrash(Player p, ZonesEconomyConfig.TrashSell ts) {
+    private TrashSnap scanTrash(Player p, TrashSellConfig.Data ts) {
         ItemStack[] contents = p.getInventory().getStorageContents();
         double totalReward = 0.0;
         int totalItems = 0;
-        Map<Integer, Integer> slots = new HashMap<>();
+        Map<Integer, ItemStack> slots = new HashMap<>();
         Map<Material, TrashLine> lines = new HashMap<>();
 
         for (int i = 0; i < contents.length; i++) {
@@ -198,19 +216,22 @@ public final class TrashController {
             if (stack == null || stack.getType().isAir()) continue;
 
             Material type = stack.getType();
-            if (ts.blacklist.contains(type)) continue;
+            if (ts.blacklist().contains(type)) continue;
 
-            Double price = ts.prices.get(type);
+            Double price = ts.prices().get(type);
             if (price == null || price <= 0.0) continue;
 
             int amount = stack.getAmount();
-            if (amount < ts.minStackSize) continue;
+            if (amount < ts.minStackSize()) continue;
 
             double subtotal = price * amount;
 
             totalReward += subtotal;
             totalItems += amount;
-            slots.put(i, amount);
+
+            ItemStack snapStack = stack.clone();     // фиксируем тип+meta+amount
+            snapStack.setAmount(amount);            // на всякий (clone и так хранит amount)
+            slots.put(i, snapStack);
 
             TrashLine prev = lines.get(type);
             if (prev == null) {
@@ -225,15 +246,15 @@ public final class TrashController {
         return new TrashSnap(round2(totalReward), totalItems, slots, lines);
     }
 
-    private void applyTrashRemoval(Player p, Map<Integer, Integer> slots) {
+    private void applyTrashRemoval(Player p, Map<Integer, ItemStack> slots) {
         Inventory inv = p.getInventory();
         for (var e : slots.entrySet()) {
             int slot = e.getKey();
-            int expectedAmount = e.getValue();
+            ItemStack expected = e.getValue();
 
             ItemStack cur = inv.getItem(slot);
-            if (cur == null || cur.getType().isAir()) continue;
-            if (cur.getAmount() != expectedAmount) continue; // предмет поменяли — не трогаем
+            if (!sameStack(expected, cur)) continue; // предмет поменяли — не трогаем
+
             inv.setItem(slot, null);
         }
     }
