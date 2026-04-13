@@ -1,6 +1,7 @@
 package com.frammy.unitylauncher.chunkactivity;
 
 import com.frammy.unitylauncher.UnityLauncher;
+import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
 import org.bukkit.Location;
 import org.bukkit.entity.Entity;
@@ -19,9 +20,9 @@ import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.scheduler.BukkitTask;
 
-import java.util.HashSet;
-import java.util.Set;
+import java.util.UUID;
 
 /**
  * Сбор сырых метрик активности по чанкам:
@@ -35,14 +36,15 @@ import java.util.Set;
  */
 public class ChunkActivityEventsListener implements Listener {
 
-    private final UnityLauncher plugin;
     private final ActivityTracker tracker;
 
     // простой антиспам, чтобы не считать каждое смещение на 1 блок как отдельный ивент
-    private final Set<String> recentlyMoved = new HashSet<>();
+    private final java.util.Map<UUID, Long> lastMoveActivity = new java.util.HashMap<>();
+    private static final long MOVE_COOLDOWN_MS = 1000;
+    private BukkitTask pruneMoveTask;
+    private static final long MOVE_MAP_TTL_MS = 10L * 60L * 1000L; // 10 минут
 
-    public ChunkActivityEventsListener(UnityLauncher plugin, ActivityTracker tracker) {
-        this.plugin = plugin;
+    public ChunkActivityEventsListener(ActivityTracker tracker) {
         this.tracker = tracker;
     }
 
@@ -128,8 +130,7 @@ public class ChunkActivityEventsListener implements Listener {
 
     @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
     public void onPlayerMove(PlayerMoveEvent e) {
-        // уже есть onPlayerMove в UnityLauncher — мы не ломаем его:
-        // он слушает с дефолтным приоритетом, а мы — MONITOR и ничего не отменяем.
+        if (e.getTo() == null) return;
 
         if (e.getFrom().getBlockX() == e.getTo().getBlockX()
                 && e.getFrom().getBlockY() == e.getTo().getBlockY()
@@ -138,16 +139,16 @@ public class ChunkActivityEventsListener implements Listener {
         }
 
         Player p = e.getPlayer();
+        long now = System.currentTimeMillis();
+
+        Long last = lastMoveActivity.get(p.getUniqueId());
+        if (last != null && (now - last) < MOVE_COOLDOWN_MS) return;
+        lastMoveActivity.put(p.getUniqueId(), now);
+
         Chunk ch = chunkOf(e.getTo());
         if (ch == null) return;
 
-        String key = p.getName().toLowerCase();
-        if (!recentlyMoved.add(key)) return; // уже считали за последний тик/сек
-
-        // Сбросим флаг через 1 секунду, чтобы не заспамить
-        plugin.getServer().getScheduler().runTaskLater(plugin, () -> recentlyMoved.remove(key), 20L);
-
-        tracker.recordPlayerActivity(ch, p.getName(), 1.0);
+        tracker.recordPlayerActivity(ch, 1.0);
     }
 
     @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
@@ -159,7 +160,7 @@ public class ChunkActivityEventsListener implements Listener {
         Chunk ch = chunkOf(loc);
         if (ch == null) return;
 
-        tracker.recordPlayerActivity(ch, p.getName(), 0.5);
+        tracker.recordPlayerActivity(ch, 0.5);
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
@@ -168,7 +169,9 @@ public class ChunkActivityEventsListener implements Listener {
         Chunk ch = chunkOf(p.getLocation());
         if (ch == null) return;
 
+        lastMoveActivity.remove(e.getPlayer().getUniqueId());
+
         // Выход игрока — ещё один "сигнал", что в этом чанке была жизнь
-        tracker.recordPlayerActivity(ch, p.getName(), 0.2);
+        tracker.recordPlayerActivity(ch, 0.2);
     }
 }

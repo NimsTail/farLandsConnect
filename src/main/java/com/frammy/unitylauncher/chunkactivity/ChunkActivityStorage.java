@@ -1,15 +1,24 @@
 package com.frammy.unitylauncher.chunkactivity;
 
+import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 public class ChunkActivityStorage {
+
+    private static final String ROOT = "chunks";
+
+    // ":" и "," делаем безопасными (YAML-friendly)
+    private static String enc(String chunkKey) {
+        return chunkKey.replace(":", "@").replace(",", ";");
+    }
+
+    private static String dec(String encoded) {
+        return encoded.replace("@", ":").replace(";", ",");
+    }
 
     public static void saveToFile(Map<String, ChunkStats> statsMap, File dataFolder) {
         File file = new File(dataFolder, "chunk_activity.yml");
@@ -18,14 +27,21 @@ public class ChunkActivityStorage {
         for (Map.Entry<String, ChunkStats> entry : statsMap.entrySet()) {
             String key = entry.getKey();
             ChunkStats s = entry.getValue();
+            if (s == null) continue;
 
-            config.set(key + ".timeSpent", s.timeSpent);
-            config.set(key + ".blocksPlaced", s.blocksPlaced);
-            config.set(key + ".blocksBroken", s.blocksBroken);
-            config.set(key + ".lastUpdated", s.lastUpdated);
+            String path = ROOT + "." + enc(key);
 
-            // hourlySamples -> List<Double>
-            config.set(key + ".hourlySamples", new ArrayList<>(s.hourlySamples));
+            config.set(path + ".timeSpent", s.timeSpent);
+            config.set(path + ".blocksPlaced", s.blocksPlaced);
+            config.set(path + ".blocksBroken", s.blocksBroken);
+            config.set(path + ".lastUpdated", s.lastUpdated);
+            config.set(path + ".itemDrops", s.itemDrops);
+            config.set(path + ".entitySpawns", s.entitySpawns);
+            config.set(path + ".tickLoad", s.tickLoad);
+            config.set(path + ".playerActivity", s.playerActivity);
+            config.set(path + ".structureBonus", s.structureBonus);
+
+            config.set(path + ".hourlySamples", new ArrayList<>(s.hourlySamples));
         }
 
         try {
@@ -42,24 +58,44 @@ public class ChunkActivityStorage {
 
         YamlConfiguration config = YamlConfiguration.loadConfiguration(file);
 
-        for (String key : config.getKeys(false)) {
-            ChunkStats s = new ChunkStats();
-            s.timeSpent     = config.getLong(key + ".timeSpent", 0L);
-            s.blocksPlaced  = config.getInt(key + ".blocksPlaced", 0);
-            s.blocksBroken  = config.getInt(key + ".blocksBroken", 0);
-            s.lastUpdated   = config.getLong(key + ".lastUpdated", System.currentTimeMillis());
-
-            List<Double> samples = config.getDoubleList(key + ".hourlySamples");
-            for (Double d : samples) {
-                // защитимся от null
-                if (d != null) s.hourlySamples.addLast(d);
+        // (A) новый формат: chunks.<encodedKey>.*
+        ConfigurationSection root = config.getConfigurationSection(ROOT);
+        if (root != null) {
+            for (String encodedKey : root.getKeys(false)) {
+                String chunkKey = dec(encodedKey);
+                ChunkStats s = readStats(config, ROOT + "." + encodedKey);
+                map.put(chunkKey, s);
             }
-            // ограничим размер до 24 (на всякий)
-            while (s.hourlySamples.size() > 24) s.hourlySamples.removeFirst();
-
-            map.put(key, s);
+            return map;
         }
 
+        // (B) legacy формат: top-level keys типа "world:x,z"
+        // прочитаем и автоматически мигрируем при следующем save
+        for (String key : config.getKeys(false)) {
+            ChunkStats s = readStats(config, key);
+            map.put(key, s);
+        }
         return map;
+    }
+
+    private static ChunkStats readStats(YamlConfiguration config, String path) {
+        ChunkStats s = new ChunkStats();
+        s.timeSpent     = config.getLong(path + ".timeSpent", 0L);
+        s.blocksPlaced  = config.getInt(path + ".blocksPlaced", 0);
+        s.blocksBroken  = config.getInt(path + ".blocksBroken", 0);
+        s.lastUpdated   = config.getLong(path + ".lastUpdated", System.currentTimeMillis());
+        s.itemDrops     = config.getInt(path + ".itemDrops", 0);
+        s.entitySpawns  = config.getInt(path + ".entitySpawns", 0);
+        s.tickLoad      = config.getDouble(path + ".tickLoad", 0.0);
+        s.playerActivity= config.getDouble(path + ".playerActivity", 0.0);
+        s.structureBonus= config.getDouble(path + ".structureBonus", 0.0);
+
+        List<Double> samples = config.getDoubleList(path + ".hourlySamples");
+        for (Double d : samples) {
+            if (d != null) s.hourlySamples.addLast(d);
+        }
+        while (s.hourlySamples.size() > 24) s.hourlySamples.removeFirst();
+
+        return s;
     }
 }

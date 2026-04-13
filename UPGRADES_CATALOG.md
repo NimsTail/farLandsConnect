@@ -196,7 +196,8 @@ double reward = library.applyEducationBonus(player, baseReward);
 - `/state <subcommand>` - управление государственными апгрейдами
 
 ### Конфигурация
-Все настройки в `config.yml` под секцией `upgrades.*`
+Все настройки в `upgrades.yml` (файл плагина UnityLauncher).  
+Структура ключей: `core.*`, `commands.*`, `zones.*`, `industrial.*`, `fields.*`, `colony.*`, `bank.*`, `park.*`, `hospital.*`, `library.*`, `state.*`, `church.*`.
 
 ### Отладка
 `upgrades.debug: true` в config.yml для подробных логов.

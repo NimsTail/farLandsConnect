@@ -171,12 +171,20 @@ double finalReward = libraryManager.applyEducationBonus(player, baseReward);
 
 ## Конфигурация
 
-Все апгрейды настраиваются в `config.yml`:
-- Разрешения (permissions)
-- Множители и проценты
-- Длительности эффектов
-- Списки предметов
-- Радиусы действия
+Все апгрейды настраиваются в `upgrades.yml` (файл плагина UnityLauncher).  
+Ключи организованы по секциям:
+
+- `core.*` — общие настройки (например, debug)
+- `commands.*` — команды (например, `/brand`)
+- `zones.*` — анлоки зон
+- `industrial.*`, `fields.*`, `colony.*`, `bank.*`, `park.*`, `hospital.*`, `library.*`, `state.*`, `church.*`
+
+Описание апгрейда хранится отдельным ключом `*.description` (потому что YAML-комментарии не сохраняются надёжно).
+
+**Пример (Energy Saving):**
+- `industrial.energySaving.description`
+- `industrial.energySaving.perm`
+- `industrial.energySaving.multiplier`
 
 ## Отладка
 

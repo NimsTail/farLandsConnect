@@ -25,16 +25,6 @@ public class ChunkStats {
         lastUpdated = System.currentTimeMillis();
     }
 
-    public void incrementPlace() {
-        blocksPlaced++;
-        lastUpdated = System.currentTimeMillis();
-    }
-
-    public void incrementBreak() {
-        blocksBroken++;
-        lastUpdated = System.currentTimeMillis();
-    }
-
     // охлаждение (фикс багов с приведениями типов)
     public void applyCooling(long now) {
         long delta = now - lastUpdated;
@@ -89,8 +79,6 @@ public class ChunkStats {
         tickLoad = 0.0;
         playerActivity = 0.0;
         structureBonus = 0.0;
-
-        lastUpdated = System.currentTimeMillis();
     }
 
     // Среднее за "сутки" (по имеющимся часам), с фолбэком
@@ -101,4 +89,21 @@ public class ChunkStats {
         }
         return hourlySamples.stream().mapToDouble(d -> d).average().orElse(0.0);
     }
+
+    public ChunkStats copy() {
+        ChunkStats c = new ChunkStats();
+        c.timeSpent = this.timeSpent;
+        c.blocksPlaced = this.blocksPlaced;
+        c.blocksBroken = this.blocksBroken;
+        c.itemDrops = this.itemDrops;
+        c.entitySpawns = this.entitySpawns;
+        c.tickLoad = this.tickLoad;
+        c.playerActivity = this.playerActivity;
+        c.structureBonus = this.structureBonus;
+        c.lastUpdated = this.lastUpdated;
+        c.hourlySamples.clear();
+        c.hourlySamples.addAll(this.hourlySamples);
+        return c;
+    }
+
 }

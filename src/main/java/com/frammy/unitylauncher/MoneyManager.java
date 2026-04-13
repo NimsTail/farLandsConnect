@@ -243,7 +243,7 @@ public class MoneyManager implements Listener {
 
     private ItemStack createMoneyItem(Material material, double value, String symbol, int amount) {
         ItemStack item = new ItemStack(material);
-        item.setAmount(Math.max(1, Math.min(64, amount)));
+        item.setAmount(Math.clamp(amount, 1, 64));
 
         ItemMeta meta = item.getItemMeta();
         if (meta != null) {

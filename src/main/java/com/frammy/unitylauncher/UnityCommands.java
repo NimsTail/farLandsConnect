@@ -36,14 +36,13 @@ import static com.frammy.unitylauncher.UnityLauncher.DBConnect;
  * - Легаси-команды переведены в безопасные заглушки (можно удалить позже).
  */
 public class UnityCommands {
-    private static UnityCommands instance;
-    public static UnityCommands getInstance() {
-        if (instance == null) instance = new UnityCommands();
-        return instance;
-    }
+    private static final UnityCommands INSTANCE = new UnityCommands();
+    public static UnityCommands getInstance() { return INSTANCE; }
+
 
     /** Проекцию используем минимальную: страна + деньги игрока. */
     public static class PlayerData {
+        public int userId;
         public String countryName;
         public double money;
     }
@@ -93,6 +92,15 @@ public class UnityCommands {
                     JsonObject st   = safeParseObject(rs.getString("StatsData"));
                     return new CachedPlayerRow(cust, soc, gen, st, System.currentTimeMillis());
                 }
+            }
+        }
+    }
+
+    private Integer getUserIdByName(Connection con, String name) throws Exception {
+        try (PreparedStatement ps = con.prepareStatement("SELECT ID FROM Users WHERE Name=? LIMIT 1")) {
+            ps.setString(1, name);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() ? rs.getInt(1) : null;
             }
         }
     }
@@ -171,60 +179,98 @@ public class UnityCommands {
         if (playerName == null || playerName.isBlank()) return;
         if (updates == null || updates.isEmpty()) return;
 
-        // Разрешаем только эти 4 JSON-колонки:
-        final java.util.List<String> valid = java.util.List.of("CustomizationData","SocialData","GeneralData","StatsData");
+        final java.util.List<String> valid = java.util.List.of(
+                "CustomizationData", "SocialData", "GeneralData", "StatsData"
+        );
         if (!valid.contains(column)) {
             Bukkit.getLogger().warning("[UnityCommands] mergeAndUpdatePlayerData: bad column " + column);
             return;
         }
 
+        // строим: UPDATE Users SET col = JSON_SET(JSON_REMOVE(col,'$.a','$.b'), '$.c', CAST(? AS JSON), '$.d', CAST(? AS JSON)) WHERE Name=?
+        java.util.List<String> removePaths = new java.util.ArrayList<>();
+        java.util.List<String> setPaths = new java.util.ArrayList<>();
+        java.util.List<Object> setValues = new java.util.ArrayList<>();
+
+        Gson gson = new Gson();
+        for (var e : updates.entrySet()) {
+            String key = e.getKey();
+            if (key == null || key.isBlank()) continue;
+
+            String path = "$." + key; // ключи у тебя простые (без точек). Если будут сложные — надо экранировать.
+            Object val = e.getValue();
+            if (val == null) {
+                removePaths.add(path);
+            } else {
+                setPaths.add(path);
+                // значение как JSON-строка, которую MySQL распарсит через CAST(? AS JSON)
+                setValues.add(gson.toJsonTree(val).toString());
+            }
+        }
+
+        if (removePaths.isEmpty() && setPaths.isEmpty()) return;
+
+        StringBuilder sql = new StringBuilder();
+        sql.append("UPDATE Users SET ").append(column).append(" = ");
+
+        // JSON_REMOVE если есть удаления
+        if (!removePaths.isEmpty()) {
+            sql.append("JSON_REMOVE(").append(column);
+            for (String ignored : removePaths) {
+                sql.append(", ?");
+            }
+            sql.append(")");
+        } else {
+            sql.append(column);
+        }
+
+        // JSON_SET если есть установки
+        if (!setPaths.isEmpty()) {
+            sql.insert(0, "UPDATE Users SET " + column + " = JSON_SET(");
+            sql.append(", "); // между base и первым path
+            // если был JSON_REMOVE — он уже сформирован как выражение. если нет — base = column
+            // На этом этапе sql выглядит либо "UPDATE ... JSON_SET(GeneralData = JSON_REMOVE(...), " — поэтому делаем проще:
+            // Пересоберём аккуратно ниже.
+            sql.setLength(0);
+
+            String baseExpr;
+            if (!removePaths.isEmpty()) {
+                baseExpr = "JSON_REMOVE(" + column +
+                        ", ?".repeat(removePaths.size()) +
+                        ")";
+            } else {
+                baseExpr = column;
+            }
+
+            sql.append("UPDATE Users SET ").append(column).append(" = JSON_SET(").append(baseExpr);
+            sql.repeat(", ?, CAST(? AS JSON)", setPaths.size());
+            sql.append(") WHERE Name = ?");
+        } else {
+            // только удаления
+            sql.append(" WHERE Name = ?");
+        }
+
         try (Connection con = DBConnect()) {
             if (con == null) return;
 
-            // 1) Берём текущий JSON: сначала из кэша (если не просрочен), иначе из БД
-            JsonObject current;
-            CachedPlayerRow cached = playerCache.get(playerName);
-            if (cached != null && cached.isFresh(System.currentTimeMillis())) {
-                current = switch (column) {
-                    case "CustomizationData" -> cached.customization.deepCopy();
-                    case "SocialData"        -> cached.social.deepCopy();
-                    case "GeneralData"       -> cached.general.deepCopy();
-                    case "StatsData"         -> cached.stats.deepCopy();
-                    default -> new JsonObject();
-                };
-            } else {
-                String select = "SELECT " + column + " FROM Users WHERE Name = ? LIMIT 1;";
-                try (PreparedStatement ps = con.prepareStatement(select)) {
-                    ps.setString(1, playerName);
-                    try (ResultSet rs = ps.executeQuery()) {
-                        current = rs.next() ? safeParseObject(rs.getString(1)) : new JsonObject();
-                    }
-                }
-            }
+            try (PreparedStatement ps = con.prepareStatement(sql.toString())) {
+                int idx = 1;
 
-            // 2) Накатываем патч
-            Gson gson = new Gson();
-            for (var e : updates.entrySet()) {
-                String key = e.getKey();
-                Object val = e.getValue();
-                if (val == null) {
-                    // семантика "удалить ключ", если передали null
-                    current.remove(key);
-                } else {
-                    current.add(key, gson.toJsonTree(val));
-                }
-            }
+                // параметры для JSON_REMOVE
+                for (String p : removePaths) ps.setString(idx++, p);
 
-            // 3) Обновляем БД
-            String update = "UPDATE Users SET " + column + " = ? WHERE Name = ?;";
-            try (PreparedStatement ps = con.prepareStatement(update)) {
-                ps.setString(1, current.toString());
-                ps.setString(2, playerName);
+                // параметры для JSON_SET: path + json-string
+                for (int i = 0; i < setPaths.size(); i++) {
+                    ps.setString(idx++, setPaths.get(i));
+                    ps.setString(idx++, (String) setValues.get(i));
+                }
+
+                ps.setString(idx, playerName);
                 ps.executeUpdate();
             }
 
-            // 4) Освежаем кэш
-            upsertCacheAfterUpdate(playerName, column, current);
+            // кэш после атомарного UPDATE: лучше просто refresh (иначе можно не идеально смёрджить в памяти)
+            refreshPlayerCacheAsync(playerName);
 
         } catch (Exception e) {
             Bukkit.getLogger().warning("[UnityCommands] mergeAndUpdatePlayerData failed: " + e);
@@ -233,26 +279,39 @@ public class UnityCommands {
 
     /** Асинхронно достаёт PlayerData (countryName из SocialData, money из GeneralData). */
     public void getPlayerInfo(String playerName, Consumer<PlayerData> callback) {
-        Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
+        UnityLauncher ul = UnityLauncher.getInstance();
+        if (ul == null) { callback.accept(null); return; }
+
+        Bukkit.getScheduler().runTaskAsynchronously(ul, () -> {
+            PlayerData pd = null;
             try {
                 CachedPlayerRow row = getOrLoadCachedPlayer(playerName);
-                if (row == null) { callback.accept(null); return; }
-                PlayerData pd = new PlayerData();
-                // money
-                if (row.general.has("money") && row.general.get("money").isJsonPrimitive()) {
-                    try { pd.money = row.general.get("money").getAsDouble(); } catch (Exception ignored) {}
+                if (row != null) {
+                    pd = new PlayerData();
+
+                    if (row.general.has("money") && row.general.get("money").isJsonPrimitive()) {
+                        try { pd.money = row.general.get("money").getAsDouble(); } catch (Exception ignored) {}
+                    }
+
+                    try (Connection con = DBConnect()) {
+                        if (con != null) {
+                            Integer id = getUserIdByName(con, playerName);
+                            pd.userId = (id != null ? id : 0);
+                        }
+                    }
+
+                    String c = null;
+                    if (row.social.has("countryName")) c = safeGetString(row.social.get("countryName"));
+                    CountryRegistryJdbc reg = registry();
+                    if ((c == null || c.isBlank()) && reg != null) c = reg.getCountryOfPlayer(playerName);
+                    pd.countryName = (c != null && !c.isBlank()) ? c : null;
                 }
-                // countryName — сначала SocialData, если пусто — спросим у CountryRegistryJdbc
-                String c = null;
-                if (row.social.has("countryName")) c = safeGetString(row.social.get("countryName"));
-                CountryRegistryJdbc reg = registry();
-                if (c == null && reg != null) c = reg.getCountryOfPlayer(playerName);
-                pd.countryName = c;
-                callback.accept(pd);
             } catch (Exception e) {
-                e.printStackTrace();
-                callback.accept(null);
+                Bukkit.getLogger().warning("[UnityCommands] getPlayerInfo failed: " + e);
             }
+
+            PlayerData finalPd = pd;
+            Bukkit.getScheduler().runTask(ul, () -> callback.accept(finalPd));
         });
     }
 
@@ -787,49 +846,49 @@ public class UnityCommands {
                                                   String keyValue,
                                                   java.util.List<String> keys) {
         Map<String, Object> resultMap = new java.util.HashMap<>();
-        if (table == null || jsonColumn == null || keyColumn == null || keyValue == null || keys == null || keys.isEmpty())
-            return resultMap;
+        if (keyValue == null || keyValue.isBlank() || keys == null || keys.isEmpty()) return resultMap;
 
-        // Оптимизация: если читаем Users по Name — попробуем из кэша
-        boolean canUseCache = "Users".equalsIgnoreCase(table) && "Name".equalsIgnoreCase(keyColumn);
-        if (canUseCache) {
-            CachedPlayerRow row = getOrLoadCachedPlayer(keyValue);
-            if (row != null) {
-                com.google.gson.JsonObject col = switch (jsonColumn) {
-                    case "CustomizationData" -> row.customization;
-                    case "SocialData"        -> row.social;
-                    case "GeneralData"       -> row.general;
-                    case "StatsData"         -> row.stats;
-                    default -> null;
-                };
-                if (col != null) {
-                    for (String k : keys) {
-                        if (col.has(k)) resultMap.put(k, jsonElementToJava(col.get(k)));
-                    }
-                    return resultMap;
-                }
+        // Жёстко разрешаем только Users + Name + 4 json-колонки
+        if (!"Users".equalsIgnoreCase(table)) return resultMap;
+        if (!"Name".equalsIgnoreCase(keyColumn)) return resultMap;
+
+        final java.util.List<String> validCols = java.util.List.of(
+                "CustomizationData", "SocialData", "GeneralData", "StatsData"
+        );
+        if (!validCols.contains(jsonColumn)) return resultMap;
+
+        // сначала кэш
+        CachedPlayerRow row = getOrLoadCachedPlayer(keyValue);
+        if (row != null) {
+            JsonObject col = switch (jsonColumn) {
+                case "CustomizationData" -> row.customization;
+                case "SocialData"        -> row.social;
+                case "GeneralData"       -> row.general;
+                case "StatsData"         -> row.stats;
+                default -> null;
+            };
+            if (col != null) {
+                for (String k : keys) if (col.has(k)) resultMap.put(k, jsonElementToJava(col.get(k)));
+                return resultMap;
             }
-            // промах — пойдём в БД
         }
 
-        try (java.sql.Connection con = DBConnect()) {
+        // fallback в БД (идентификаторы безопасны, потому что whitelist)
+        try (Connection con = DBConnect()) {
             if (con == null) return resultMap;
-            String sql = "SELECT " + jsonColumn + " FROM " + table + " WHERE " + keyColumn + " = ? LIMIT 1;";
-            try (java.sql.PreparedStatement ps = con.prepareStatement(sql)) {
+
+            String sql = "SELECT " + jsonColumn + " FROM Users WHERE Name = ? LIMIT 1;";
+            try (PreparedStatement ps = con.prepareStatement(sql)) {
                 ps.setString(1, keyValue);
-                try (java.sql.ResultSet rs = ps.executeQuery()) {
+                try (ResultSet rs = ps.executeQuery()) {
                     if (rs.next()) {
-                        String json = rs.getString(1);
-                        var obj = safeParseObject(json);
-                        for (String k : keys) {
-                            if (obj.has(k)) resultMap.put(k, jsonElementToJava(obj.get(k)));
-                        }
+                        JsonObject obj = safeParseObject(rs.getString(1));
+                        for (String k : keys) if (obj.has(k)) resultMap.put(k, jsonElementToJava(obj.get(k)));
                     }
                 }
             }
         } catch (Exception e) {
-            System.err.println("[UnityCommands] getJsonFieldValues error: " + e.getMessage());
-            e.printStackTrace();
+            Bukkit.getLogger().warning("[UnityCommands] getJsonFieldValues error: " + e);
         }
         return resultMap;
     }

@@ -141,19 +141,24 @@ double finalReward = library.applyEducationBonus(player, baseReward);
 ## 🎮 Как добавить новый апгрейд
 
 ### 1. Добавить конфиг в UpgradesConfig.java
+
+```md
+### 1. Добавить конфиг в UpgradesConfig.java
+Выбирай секцию по категории апгрейда (industrial/fields/bank/…).
+Пример для industrial:
+
 ```java
 public final String myUpgradePerm;
 public final int myUpgradeValue;
 
-// В конструкторе:
-myUpgradePerm = c.getString("upgrades.myUpgrade.perm", "unity.my.upgrade");
-myUpgradeValue = c.getInt("upgrades.myUpgrade.value", 10);
+// В конструкторе (чтение):
+myUpgradePerm  = cfg.getString("industrial.myUpgrade.perm", "unity.my.upgrade");
+myUpgradeValue = cfg.getInt("industrial.myUpgrade.value", 10);
 
-// В addDefaults():
-c.addDefault("upgrades.myUpgrade.description", "Описание");
-c.addDefault("upgrades.myUpgrade.perm", "unity.my.upgrade");
-c.addDefault("upgrades.myUpgrade.value", 10);
-```
+// В addDefaults() (дефолты + описание отдельным ключом):
+c.addDefault("industrial.myUpgrade.description", "Описание апгрейда");
+c.addDefault("industrial.myUpgrade.perm", "unity.my.upgrade");
+c.addDefault("industrial.myUpgrade.value", 10);
 
 ### 2. Добавить обработчик
 **В существующий менеджер или UpgradesListener:**

@@ -481,31 +481,4 @@ public final class ZonesEconomyConfig {
         }
         return Collections.unmodifiableMap(map);
     }
-
-    /** Безопасно вернуть пресет для типа зоны или null, если не задан. */
-    public ZonePreset getPreset(ZoneType type) {
-        if (type == null) return null;
-        return zonePresets.get(type);
-    }
-
-    /** Пресет с дефолтами, если в конфиге нет секции для этого типа. */
-    public ZonePreset getPresetOrDefault(ZoneType type) {
-        ZonePreset p = getPreset(type);
-        if (p != null) return p;
-        // мягкий дефолт: ничего криминального, просто нули
-        return new ZonePreset(null);
-    }
-
-    /** Цена продажи мусора этому серверу для данного материала, либо 0.0 если не продаётся. */
-    public double getTrashPrice(Material mat) {
-        if (mat == null || trashSell == null || trashSell.prices == null) return 0.0;
-        return trashSell.prices.getOrDefault(mat, 0.0);
-    }
-
-    /** true, если предмет запрещён к продаже как мусор. */
-    public boolean isTrashBlacklisted(Material mat) {
-        if (mat == null || trashSell == null || trashSell.blacklist == null) return false;
-        return trashSell.blacklist.contains(mat);
-    }
-
 }

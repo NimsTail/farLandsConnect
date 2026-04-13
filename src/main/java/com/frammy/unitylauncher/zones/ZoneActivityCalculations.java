@@ -1,5 +1,8 @@
 package com.frammy.unitylauncher.zones;
 
+import com.frammy.unitylauncher.UnityCommands;
+import com.frammy.unitylauncher.UnityLauncher;
+import com.frammy.unitylauncher.bank.BankInvoicesDao;
 import com.frammy.unitylauncher.chunkactivity.ActivityWeights;
 import com.frammy.unitylauncher.chunkactivity.ChunkStats;
 import com.frammy.unitylauncher.zones.geom.ZoneOverlapRules;
@@ -7,6 +10,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
 
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZonedDateTime;
 import java.util.*;
@@ -20,8 +24,14 @@ public class ZoneActivityCalculations {
     private final ZoneManager zm;
     private static final long COST_TTL_MS = 5 * 60_000L; // 5 минут
     private final Map<String, CostCacheEntry> costCache = new ConcurrentHashMap<>();
+    private final BankInvoicesDao bankInvoicesDao; // твой реальный класс/интерфейс
+    private final UnityLauncher plugin;
 
-    public ZoneActivityCalculations(ZoneManager zoneManager) { this.zm = Objects.requireNonNull(zoneManager); }
+    public ZoneActivityCalculations(ZoneManager zoneManager, UnityLauncher plugin, BankInvoicesDao bankInvoicesDao) {
+        this.zm = Objects.requireNonNull(zoneManager);
+        this.plugin = Objects.requireNonNull(plugin);
+        this.bankInvoicesDao = Objects.requireNonNull(bankInvoicesDao);
+    }
 
     // === СНАПШОТ зоны без Bukkit-ссылок ===
     private record ZoneSnapshot(
@@ -235,12 +245,11 @@ public class ZoneActivityCalculations {
 
                     // 4) авто-списание по расписанию (как было)
                     for (ZoneInfo z : zoneById.values()) {
-                        LocalDate next = z.getNextBillingDate();
-                        if (LocalDate.now(zm.zoneId).isBefore(next)) continue;
+                        if (today.isBefore(z.getNextBillingDate())) continue;
 
                         double dueRaw = z.getDueSinceLastBill(today);
-                        double due = round2(dueRaw);
-                        if (due <= 0.0) {
+                        double amount = round2(dueRaw);
+                        if (amount <= 0.0) {
                             z.markBilled(today);
                             continue;
                         }
@@ -248,22 +257,39 @@ public class ZoneActivityCalculations {
                         String owner = z.getOwner();
                         if (owner == null || owner.isBlank()) {
                             Bukkit.getLogger().warning("[Zones] Auto-billing skipped for zone " + z.getName()
-                                    + ": owner is null/empty, amount=" + String.format(Locale.US, "%.2f", due));
+                                    + ": owner is null/empty, amount=" + String.format(Locale.US, "%.2f", amount));
                             z.markBilled(today);
                             continue;
                         }
 
                         try {
-                            zm.ul.moneyManager.withdraw(owner, due);
-                            z.markBilled(today);
+                            int fromUserId = 0;
+                            Instant dueAt = Instant.now().plusSeconds(7 * 24 * 3600L); // например 7 дней
+
+                            UnityCommands.getInstance().getPlayerInfo(owner, data -> {
+                                if (data == null) return;
+                                int toUserId = data.userId; // <-- важно: нужен именно user_id из БД
+
+                                bankInvoicesDao.createToUserAsync(
+                                        fromUserId,
+                                        toUserId,
+                                        amount,
+                                        "Оплата зоны: " + z.getName() + " (начисление за период)",
+                                        dueAt
+                                );
+
+                                // и только после успешного "выставления" (мы делаем async fire-and-forget),
+                                // помечаем billed, чтобы не выставить второй раз
+                                Bukkit.getScheduler().runTask(plugin, () -> z.markBilled(today));
+                            });
 
                             Bukkit.getLogger().info("[Zones] Auto-billed " + z.getName()
                                     + " owner=" + owner
-                                    + " amount=" + String.format(Locale.US, "%.2f", due));
+                                    + " amount=" + String.format(Locale.US, "%.2f", amount));
                         } catch (Exception ex) {
                             Bukkit.getLogger().warning("[Zones] Auto-billing failed for zone " + z.getName()
                                     + " owner=" + owner
-                                    + " amount=" + String.format(Locale.US, "%.2f", due)
+                                    + " amount=" + String.format(Locale.US, "%.2f", amount)
                                     + " error=" + ex.getMessage());
                         }
                     }

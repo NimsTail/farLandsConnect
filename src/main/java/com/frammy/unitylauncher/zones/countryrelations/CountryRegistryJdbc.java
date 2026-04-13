@@ -130,6 +130,13 @@ public class CountryRegistryJdbc {
         });
     }
 
+    public String getCountryDisplayName(String countryNameOrLower) {
+        if (countryNameOrLower == null || countryNameOrLower.isBlank()) return null;
+        refreshCacheIfExpired();
+        String lower = countryNameOrLower.toLowerCase(Locale.ROOT);
+        return countryLowerToDisplay.getOrDefault(lower, countryNameOrLower);
+    }
+
     /** Обнулить WeeklyTaxDue для страны (при выставлении недельного счёта/списании). */
     public void resetWeeklyTaxDue(String countryName) {
         if (countryName == null || countryName.isBlank()) return;
@@ -283,37 +290,6 @@ public class CountryRegistryJdbc {
         playerToCountry.entrySet().removeIf(e -> e.getValue().equalsIgnoreCase(countryName));
 
         touchCacheNow();
-    }
-
-    /**
-     * Асинхронное удаление страны (без общей транзакции с чем-то ещё).
-     * DBConnect() выполняется в async, кэш чистится потом в main-потоке.
-     */
-    public void deleteCountryAsync(String countryName) {
-        if (countryName == null || countryName.isBlank()) return;
-
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            try (Connection con = DBConnect()) {
-                if (con == null) {
-                    logDb("deleteCountryAsync");
-                    return;
-                }
-                try (PreparedStatement ps = con.prepareStatement("DELETE FROM Countries WHERE Name = ?")) {
-                    ps.setString(1, countryName);
-                    ps.executeUpdate();
-                }
-            } catch (Throwable t) {
-                logDb("deleteCountryAsync", t);
-            }
-
-            Bukkit.getScheduler().runTask(plugin, () -> {
-                String lower = countryName.toLowerCase(Locale.ROOT);
-                countryToLeader.remove(lower);
-                countryToTransferFeePct.remove(lower);
-                playerToCountry.entrySet().removeIf(e -> e.getValue().equalsIgnoreCase(countryName));
-                touchCacheNow();
-            });
-        });
     }
 
     /**

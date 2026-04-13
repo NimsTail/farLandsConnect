@@ -202,19 +202,21 @@ public class BlueMapIntegration {
 
                 case "point_atm" -> {
                     Vector3d position = new Vector3d(location.getX() + 0.5, location.getY(), location.getZ() + 0.5);
-                    POIMarker marker = new POIMarker("atm_" + id, position); // без null
+                    String mid = "atm_" + id;
+                    POIMarker marker = new POIMarker(mid, position);
                     marker.setLabel("ATM");
                     marker.setIcon("assets/atm.png", 8, 8);
-                    markerSet.getMarkers().put(String.valueOf(id), marker);
+                    markerSet.getMarkers().put(mid, marker);
                 }
 
                 case "point_shop" -> {
                     Vector3d position = new Vector3d(location.getX() + 0.5, location.getY(), location.getZ() + 0.5);
-                    POIMarker marker = new POIMarker("shop_" + id, position); // без null
+                    String mid = "shop_" + id;
+                    POIMarker marker = new POIMarker(mid, position);
                     marker.setLabel("Табличка о продаже");
                     marker.setDetail("ID - '" + id + "'");
                     marker.setIcon("assets/atm.png", 8, 8);
-                    markerSet.getMarkers().put(String.valueOf(id), marker);
+                    markerSet.getMarkers().put(mid, marker);
                 }
 
                 default -> Bukkit.getLogger().warning("Unknown markerType: " + markerType);

@@ -12,6 +12,7 @@ import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.jetbrains.annotations.NotNull;
+import org.jspecify.annotations.NonNull;
 
 import java.text.SimpleDateFormat;
 import java.util.*;
@@ -22,13 +23,12 @@ import java.util.stream.Stream;
  * /brand [set <текст...> | clear | info]
  * <p>
  * Новая реальность:
- * - НЕ зависит от LegacyUpgradesConfig
- * - Пермишены берём из plugin.yml (unity.brand + unity.brand.override)
+ * - Пермишены берём из plugin.yml (unity.brand.1 + unity.brand.override)
  * - Глобально можно выключить через upgrades core.enabled (если UpgradesManager доступен)
  */
 public record BrandCommand(UnityLauncher plugin) implements TabExecutor {
 
-    private static final String PERM_USE = "unity.brand";
+    private static final String PERM_USE = "unity.brand.1";
     private static final String PERM_OVERRIDE = "unity.brand.override";
 
     // PDC keys (инициализируем один раз от plugin, т.к. NamespacedKey требует instance)
@@ -66,7 +66,7 @@ public record BrandCommand(UnityLauncher plugin) implements TabExecutor {
     public boolean onCommand(@NotNull CommandSender sender,
                              @NotNull Command command,
                              @NotNull String label,
-                             @NotNull String[] args) {
+                             @NotNull String @NonNull [] args) {
 
         if (!(sender instanceof Player p)) {
             sender.sendMessage("Команда только для игроков.");
@@ -91,7 +91,7 @@ public record BrandCommand(UnityLauncher plugin) implements TabExecutor {
         }
 
         ItemStack item = p.getInventory().getItemInMainHand();
-        if (item == null || item.getType().isAir()) {
+        if (item.getType().isAir()) {
             p.sendMessage(ChatColor.RED + "Возьми предмет в основную руку.");
             return true;
         }
@@ -174,7 +174,7 @@ public record BrandCommand(UnityLauncher plugin) implements TabExecutor {
     public List<String> onTabComplete(@NotNull CommandSender sender,
                                       @NotNull Command command,
                                       @NotNull String alias,
-                                      @NotNull String[] args) {
+                                      @NotNull String @NonNull [] args) {
         if (args.length == 1) {
             String pref = args[0].toLowerCase(Locale.ROOT);
             return Stream.of("set", "clear", "info")

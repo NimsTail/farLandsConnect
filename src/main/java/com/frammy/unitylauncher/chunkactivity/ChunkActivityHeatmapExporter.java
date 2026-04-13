@@ -2,6 +2,7 @@ package com.frammy.unitylauncher.chunkactivity;
 
 import com.flowpowered.math.vector.Vector2d;
 import de.bluecolored.bluemap.api.BlueMapAPI;
+import de.bluecolored.bluemap.api.BlueMapMap;
 import de.bluecolored.bluemap.api.markers.MarkerSet;
 import de.bluecolored.bluemap.api.markers.ShapeMarker;
 import de.bluecolored.bluemap.api.math.Color;
@@ -15,7 +16,6 @@ public class ChunkActivityHeatmapExporter {
     // сколько доверяем “моментальной” активности (остальное — суточное среднее)
     private static final double SNAP_ALPHA = 0.30;     // 0..1
     private static final double PERCENTILE = 95.0;     // для cutoff
-    private static final int CHUNK_RADIUS = 250;       // область покрытия вокруг 0,0 (в чанках)
 
     private static Map<String, Double> smoothActivityMap(Map<String, Double> original) {
         Map<String, Double> smoothed = new HashMap<>();
@@ -51,6 +51,32 @@ public class ChunkActivityHeatmapExporter {
         return smoothed;
     }
 
+
+    private static Optional<BlueMapMap> findMapForWorld(BlueMapAPI api, String worldName) {
+        if (api == null || worldName == null || worldName.isBlank()) return Optional.empty();
+
+        // BlueMap: map.getId() — id карты; map.getWorld().getId() — id мира (часто совпадает с именем мира, но не всегда)
+        for (BlueMapMap map : api.getMaps()) {
+            if (map == null) continue;
+
+            try {
+                String mapId = map.getId();
+                if (mapId != null && mapId.equalsIgnoreCase(worldName)) {
+                    return Optional.of(map);
+                }
+            } catch (Throwable ignored) {}
+
+            try {
+                String worldId = map.getWorld().getId();
+                if (worldId != null && worldId.equalsIgnoreCase(worldName)) {
+                    return Optional.of(map);
+                }
+            } catch (Throwable ignored) {}
+        }
+
+        return Optional.empty();
+    }
+
     private static double getPercentile(Collection<Double> values) {
         if (values == null || values.isEmpty()) return 0.0;
         List<Double> sorted = new ArrayList<>(values);
@@ -63,9 +89,25 @@ public class ChunkActivityHeatmapExporter {
     public static void exportHeatmapToBlueMapLayer(Map<String, ChunkStats> statsMap, String worldName, ActivityWeights weights) {
         if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
 
-        BlueMapAPI.getInstance().flatMap(api -> api.getMap(worldName)).ifPresent(map -> {
-            MarkerSet markerSet = new MarkerSet("chunk-activity");
-            markerSet.setLabel("Ценность земли");
+        BlueMapAPI.getInstance().ifPresent(api -> {
+            Optional<BlueMapMap> optMap = findMapForWorld(api, worldName);
+            if (optMap.isEmpty()) {
+                Bukkit.getLogger().warning("[Heatmap] BlueMap: не найдена карта для мира '" + worldName + "'.");
+                return;
+            }
+
+            BlueMapMap map = optMap.get();
+
+            // дальше твой код без изменений, только убираем api.getMap(worldName)
+            MarkerSet markerSet = map.getMarkerSets().get("chunk-activity");
+            if (markerSet == null) {
+                markerSet = new MarkerSet("chunk-activity");
+                markerSet.setLabel("Ценность земли");
+                map.getMarkerSets().put("chunk-activity", markerSet);
+            } else {
+                markerSet.getMarkers().clear();
+                markerSet.setLabel("Ценность земли");
+            }
 
             // 1) Собираем “сырые” значения (смесь snap + daily)
             Map<String, Double> rawActivityMap = new HashMap<>();
@@ -98,78 +140,6 @@ public class ChunkActivityHeatmapExporter {
                 return;
             }
 
-            // 3) Подготовим сет “занятых” для прямоугольников пустых чанков
-            int chunkSize = CHUNK_RADIUS * 2;
-            boolean[][] used = new boolean[chunkSize][chunkSize];
-
-            // 4) Рисуем пустые (неактивные в карте) прямоугольниками, чтобы не было дыр
-            for (int cx = -CHUNK_RADIUS; cx < CHUNK_RADIUS; cx++) {
-                for (int cz = -CHUNK_RADIUS; cz < CHUNK_RADIUS; cz++) {
-                    int indexX = cx + CHUNK_RADIUS;
-                    int indexZ = cz + CHUNK_RADIUS;
-
-                    if (used[indexX][indexZ]) continue;
-                    if (activityMap.containsKey(cx + ";" + cz)) continue;
-
-                    int width = 1;
-                    int height = 1;
-
-                    while (cx + width < CHUNK_RADIUS
-                            && !used[cx + width + CHUNK_RADIUS][indexZ]
-                            && !activityMap.containsKey((cx + width) + ";" + cz)) {
-                        width++;
-                    }
-
-                    boolean expand = true;
-                    while (cz + height < CHUNK_RADIUS && expand) {
-                        for (int dx = 0; dx < width; dx++) {
-                            int testX = cx + dx;
-                            int testZ = cz + height;
-                            if (used[testX + CHUNK_RADIUS][testZ + CHUNK_RADIUS]
-                                    || activityMap.containsKey(testX + ";" + testZ)) {
-                                expand = false;
-                                break;
-                            }
-                        }
-                        if (expand) height++;
-                    }
-
-                    for (int dx = 0; dx < width; dx++) {
-                        for (int dz = 0; dz < height; dz++) {
-                            used[cx + dx + CHUNK_RADIUS][cz + dz + CHUNK_RADIUS] = true;
-                        }
-                    }
-
-                    int x = cx * 16;
-                    int z = cz * 16;
-                    int x2 = (cx + width) * 16;
-                    int z2 = (cz + height) * 16;
-
-                    List<Vector2d> square = Arrays.asList(
-                            new Vector2d(x, z),
-                            new Vector2d(x2, z),
-                            new Vector2d(x2, z2),
-                            new Vector2d(x, z2)
-                    );
-
-                    Shape shape = new Shape(square);
-                    String id = "empty_" + cx + "_" + cz;
-                    ShapeMarker marker = new ShapeMarker(id, shape, 256);
-                    marker.setLabel("0 | X: " + cx + "; Z:" + cz);
-                    marker.setDetail("0");
-
-                    Color fill = getColorFromValue(0.0);
-                    Color stroke = new Color(
-                            Math.min(fill.getRed() + 40, 255),
-                            Math.min(fill.getGreen() + 40, 255),
-                            Math.min(fill.getBlue() + 40, 255),
-                            0
-                    );
-                    marker.setColors(stroke, fill);
-                    markerSet.getMarkers().put(id, marker);
-                }
-            }
-
             // 5) Активные чанки с лог-нормализацией и cutoff по перцентилю
             double cutoff = getPercentile(activityMap.values());
             // защита от деления/логарифма на 0
@@ -190,6 +160,9 @@ public class ChunkActivityHeatmapExporter {
                         new Vector2d(x + 16, z + 16),
                         new Vector2d(x, z + 16)
                 );
+
+                // не рисуем почти нулевые значения
+                if (value <= 0.0001) continue;
 
                 Shape shape = new Shape(square);
                 String id = "active_" + cx + "_" + cz;
