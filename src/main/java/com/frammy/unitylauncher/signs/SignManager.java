@@ -47,6 +47,7 @@ public final class SignManager implements Listener {
     private final TrashController trash;
     private final ShopListUpdater shopLists;
     private final ShopController shop;
+    private final com.frammy.unitylauncher.signs.features.shop.AutoDebitService autoDebit;
 
     // Guards rebuildShopIndexAndListsNow() against running twice — once from
     // LazyBlueMapLoader's direct call (the real "zones are actually loaded"
@@ -63,7 +64,8 @@ public final class SignManager implements Listener {
         this.store = new SignStore();
         SignRenderer renderer = new SignRenderer();
         this.scroll = new SignScrollService(plugin, store);
-        this.atm = new AtmController(plugin, blueMapIntegration, store, scroll);
+        this.autoDebit = new com.frammy.unitylauncher.signs.features.shop.AutoDebitService(plugin, store, zoneManager);
+        this.atm = new AtmController(plugin, blueMapIntegration, store, scroll, autoDebit);
 
         this.repo = new SignYamlRepository(plugin, dataFolder, SignManager::playerCountryCanonical);
         this.trash = new TrashController(plugin);
@@ -77,7 +79,10 @@ public final class SignManager implements Listener {
         this.shop = new com.frammy.unitylauncher.signs.features.shop.ShopController(
                 plugin, zoneManager, blueMapIntegration, markers, store, renderer, scroll, shopLists, this::indexShopSign
         );
+    }
 
+    public com.frammy.unitylauncher.signs.features.shop.AutoDebitService getAutoDebitService() {
+        return autoDebit;
     }
 
     private static String shopKey(ZoneManager zm, Location loc) {
@@ -805,44 +810,11 @@ public final class SignManager implements Listener {
 
     @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
     public void onInventoryOpen(InventoryOpenEvent e) {
-        if (e.getPlayer() instanceof Player p) {
-            // если это магазинный контейнер — открыть может только владелец SHOP-зоны источника
-            if (isShopLinkedInventory(e.getInventory())) {
-
-                // найдём source sign по локации инвентаря (самый прямой способ)
-                Location invLoc = e.getInventory().getLocation();
-                if (invLoc != null) {
-                    invLoc = SignStore.keyLoc(invLoc);
-                    Location src = store.sourceSignByContainer(invLoc);
-
-                    // если вдруг это double-chest и invLoc указывает “не на ту половину”
-                    if (src == null) {
-                        // попробуем через holder (две половины)
-                        var holder = e.getInventory().getHolder();
-                        if (holder instanceof org.bukkit.block.DoubleChest dc) {
-                            if (dc.getLeftSide() instanceof org.bukkit.block.Chest cl) {
-                                src = store.sourceSignByContainer(SignStore.keyLoc(cl.getLocation()));
-                            }
-                            if (src == null && dc.getRightSide() instanceof org.bukkit.block.Chest cr) {
-                                src = store.sourceSignByContainer(SignStore.keyLoc(cr.getLocation()));
-                            }
-                        }
-                    }
-
-                    if (src != null && !zoneManager.isPlayerOwnerOfShopZoneAt(p.getName(), src)) {
-                        e.setCancelled(true);
-                        p.sendMessage(ChatColor.RED + "Этот сундук связан с магазином. Открывать может только владелец SHOP-зоны.");
-                        return;
-                    }
-                } else {
-                    // инвентарь без location, но мы уже знаем что он shop-linked -> просто режем всем кроме опа
-                    // (если хочешь — можешь тут разрешить op)
-                    e.setCancelled(true);
-                    p.sendMessage(ChatColor.RED + "Этот контейнер связан с магазином. Открывать может только владелец.");
-                    return;
-                }
-            }
-        }
+        // Не-владельцам больше не запрещаем ОТКРЫВАТЬ магазинный сундук —
+        // только смотреть содержимое разрешено всем. Трогать вещи не-владельцу
+        // можно только если у него включено авто-списание (см.
+        // AutoDebitService.onClick/onDrag — там же и решается, кто может
+        // забрать товар и по какой цене; тут только просмотр).
 
         // дальше обычная логика магазина (привязка/апдейт листов)
         shop.onInventoryOpen(e);
@@ -851,12 +823,34 @@ public final class SignManager implements Listener {
     @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
     public void onInventoryClose(InventoryCloseEvent e) {
         try { shop.onInventoryClose(e); } catch (Throwable ignored) {}
+        if (e.getPlayer() instanceof Player p) {
+            try { autoDebit.finalizeUnpaid(p); } catch (Throwable ignored) {}
+        }
     }
 
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent e) {
         atm.onQuit(e.getPlayer());
         shop.onPlayerQuit(e.getPlayer());
+        try { autoDebit.finalizeUnpaid(e.getPlayer()); } catch (Throwable ignored) {}
+    }
+
+    // Авто-списание с товаром в SHOP_SOURCE-сундуке не-владельцем — см.
+    // AutoDebitService для полного разбора механики (клэмп при заборе,
+    // списание при фактическом попадании в инвентарь игрока).
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
+    public void onShopChestClick(org.bukkit.event.inventory.InventoryClickEvent e) {
+        autoDebit.onClick(e);
+    }
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
+    public void onShopChestDrag(org.bukkit.event.inventory.InventoryDragEvent e) {
+        autoDebit.onDrag(e);
+    }
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
+    public void onShopChestDrop(org.bukkit.event.player.PlayerDropItemEvent e) {
+        autoDebit.onDrop(e);
     }
 
     // ATM's browse sessions hijack the mouse wheel (see AtmController) — only

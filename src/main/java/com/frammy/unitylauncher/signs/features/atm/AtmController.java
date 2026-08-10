@@ -73,19 +73,24 @@ public final class AtmController {
     private static final long EDIT_TIMEOUT_MS = 45_000L;
 
     private static final ActionType[] ACTIONS = {
-            ActionType.WITHDRAW, ActionType.DEPOSIT, ActionType.TRANSFER_PLAYER, ActionType.TRANSFER_COUNTRY, ActionType.BALANCE, ActionType.INFO
+            ActionType.WITHDRAW, ActionType.DEPOSIT, ActionType.TRANSFER_PLAYER, ActionType.TRANSFER_COUNTRY,
+            ActionType.BALANCE, ActionType.PREFERENCES, ActionType.INFO
     };
     // Kept short on purpose — sign lines are ~15 narrow-font characters wide
     // and Cyrillic glyphs render noticeably wider than Latin ones, so an
     // exact character budget isn't reliable blind. Tune these in-game if
     // anything clips.
-    private static final String[] ACTION_LABELS = { "Снять", "Внести", "-> Игроку", "-> Стране", "Баланс", "Инфо" };
+    private static final String[] ACTION_LABELS = { "Снять", "Внести", "-> Игроку", "-> Стране", "Баланс", "Настройки", "Инфо" };
 
-    public AtmController(UnityLauncher plugin, BlueMapIntegration blueMap, SignStore store, SignScrollService scroll) {
+    private final com.frammy.unitylauncher.signs.features.shop.AutoDebitService autoDebit;
+
+    public AtmController(UnityLauncher plugin, BlueMapIntegration blueMap, SignStore store, SignScrollService scroll,
+                         com.frammy.unitylauncher.signs.features.shop.AutoDebitService autoDebit) {
         this.plugin = plugin;
         this.blueMap = blueMap;
         this.store = store;
         this.scroll = scroll;
+        this.autoDebit = autoDebit;
         startWatchdog();
     }
 
@@ -237,7 +242,7 @@ public final class AtmController {
 
     // ===== browse session =====
 
-    private enum BrowseStage { ACTION, WD_KIND, TARGET_MODE, TARGET_LIST }
+    private enum BrowseStage { ACTION, WD_KIND, TARGET_MODE, TARGET_LIST, PREFS_MENU }
 
     private static final class BrowseSession {
         final Location atmLoc;
@@ -252,6 +257,8 @@ public final class AtmController {
         TargetKind kind;
         String targetValue;
         List<String> listCache = List.of();
+        boolean prefsAutoDebit;
+        String prefsPriority = "CASH";
 
         BrowseSession(Location atmLoc, int anchorSlot) {
             this.atmLoc = atmLoc;
@@ -267,7 +274,7 @@ public final class AtmController {
     private int optionsCountFor(BrowseSession s) {
         return switch (s.stage) {
             case ACTION -> ACTIONS.length;
-            case WD_KIND, TARGET_MODE -> 2;
+            case WD_KIND, TARGET_MODE, PREFS_MENU -> 2;
             case TARGET_LIST -> Math.max(1, s.listCache.size());
         };
     }
@@ -306,7 +313,7 @@ public final class AtmController {
     private void stepBack(Player p, BrowseSession s) {
         switch (s.stage) {
             case ACTION -> endSession(p, s);
-            case WD_KIND, TARGET_MODE -> {
+            case WD_KIND, TARGET_MODE, PREFS_MENU -> {
                 s.stage = BrowseStage.ACTION;
                 s.index = (s.action != null) ? indexOfAction(s.action) : 0;
                 renderBrowse(p, s);
@@ -332,6 +339,15 @@ public final class AtmController {
                 if (chosen == ActionType.BALANCE) {
                     endSession(p, s);
                     showBalance(p);
+                    return;
+                }
+                if (chosen == ActionType.PREFERENCES) {
+                    var prefs = autoDebit.getPreferencesBlocking(p.getName());
+                    s.prefsAutoDebit = prefs.autoDebitEnabled();
+                    s.prefsPriority = prefs.paymentPriority();
+                    s.stage = BrowseStage.PREFS_MENU;
+                    s.index = 0;
+                    renderBrowse(p, s);
                     return;
                 }
                 if (chosen == ActionType.WITHDRAW || chosen == ActionType.DEPOSIT) {
@@ -374,6 +390,16 @@ public final class AtmController {
                 s.targetValue = picked;
                 beginAmountEdit(p, s, false);
             }
+            case PREFS_MENU -> {
+                if (s.index == 0) {
+                    s.prefsAutoDebit = !s.prefsAutoDebit;
+                    autoDebit.setAutoDebitEnabled(p.getName(), s.prefsAutoDebit);
+                } else {
+                    s.prefsPriority = "BANK".equalsIgnoreCase(s.prefsPriority) ? "CASH" : "BANK";
+                    autoDebit.setPaymentPriority(p.getName(), s.prefsPriority);
+                }
+                renderBrowse(p, s); // остаёмся в меню настроек — переключатели, не шаги мастера
+            }
         }
     }
 
@@ -406,6 +432,14 @@ public final class AtmController {
                 lines[0] = trim(ACTION_LABELS[indexOfAction(s.action)]);
                 lines[1] = s.listCache.size() > 1 ? ("(" + (s.index + 1) + "/" + s.listCache.size() + ")") : "";
                 lines[2] = trim(s.listCache.isEmpty() ? "(пусто)" : s.listCache.get(s.index));
+                lines[3] = "";
+            }
+            case PREFS_MENU -> {
+                lines[0] = trim("Настройки");
+                lines[1] = "";
+                lines[2] = trim(s.index == 0
+                        ? ("Авто-спис: " + (s.prefsAutoDebit ? "ВКЛ" : "выкл"))
+                        : ("Оплата: " + ("BANK".equalsIgnoreCase(s.prefsPriority) ? "Счёт" : "Нал.")));
                 lines[3] = "";
             }
         }
@@ -913,6 +947,7 @@ public final class AtmController {
         TRANSFER_PLAYER,
         TRANSFER_COUNTRY,
         BALANCE,
+        PREFERENCES,
         INFO
     }
 
