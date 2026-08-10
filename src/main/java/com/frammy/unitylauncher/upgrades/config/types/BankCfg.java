@@ -38,6 +38,7 @@ public record BankCfg(
         dirty |= def(c, "bank.atmFees.enabled", af.enabled());
         dirty |= def(c, "bank.atmFees.atmNetworkPermBase", af.atmNetworkPermBase());
         dirty |= def(c, "bank.atmFees.freeTransferPermBase", af.freeTransferPermBase());
+        dirty |= def(c, "bank.atmFees.feeInBankBase", af.feeInBankBase());
         dirty |= def(c, "bank.atmFees.feeInBank", af.feeInBank());
         dirty |= def(c, "bank.atmFees.feeInCountry", af.feeInCountry());
         dirty |= def(c, "bank.atmFees.feeForeign", af.feeForeign());
@@ -70,6 +71,7 @@ public record BankCfg(
                 c.getBoolean("bank.atmFees.enabled", afD.enabled()),
                 str(c, "bank.atmFees.atmNetworkPermBase", afD.atmNetworkPermBase()),
                 str(c, "bank.atmFees.freeTransferPermBase", afD.freeTransferPermBase()),
+                c.getDouble("bank.atmFees.feeInBankBase", afD.feeInBankBase()),
                 c.getDouble("bank.atmFees.feeInBank", afD.feeInBank()),
                 c.getDouble("bank.atmFees.feeInCountry", afD.feeInCountry()),
                 c.getDouble("bank.atmFees.feeForeign", afD.feeForeign())
@@ -112,10 +114,18 @@ public record BankCfg(
         }
     }
 
+    // Три уровня, зеркалят backend/src/routes/bank.ts (SAME_COUNTRY_COMMISSION_RATE /
+    // FOREIGN_COMMISSION_RATE) — сайт и ATM в своей стране/на сайте всегда
+    // одна и та же комиссия и одно и то же улучшение её снимает, чтобы сайт
+    // никогда не был выгоднее похода к местному банкомату. Банковская зона —
+    // единственный уровень, которого на сайте физически нет, поэтому именно
+    // он самый дешёвый: приоритет 1) ATM в БАНКЕ, 2) сайт/ATM в своей
+    // стране, 3) ATM в чужой/нейтральной.
     public record AtmFeesCfg(
             boolean enabled,
             String atmNetworkPermBase,
             String freeTransferPermBase,
+            double feeInBankBase,
             double feeInBank,
             double feeInCountry,
             double feeForeign
@@ -125,9 +135,10 @@ public record BankCfg(
                     true,
                     "unity.bank.atm_network",
                     "unity.bank.atm_free_transfer",
-                    0.0,   // внутри банка
-                    0.5,   // внутри страны (не в банке)
-                    2.0    // чужая страна
+                    0.01,  // в банке без "Сети банкоматов" — уже самый дешёвый уровень
+                    0.0,   // в банке с "Сетью банкоматов" — бесплатно
+                    0.02,  // в своей стране (не в банке) — как на сайте без улучшения
+                    0.05   // чужая страна/нейтралка — как межстрановой перевод на сайте
             );
         }
     }

@@ -45,8 +45,12 @@ import java.util.*;
  * marquee (SignScrollService) is paused for that sign while it's in use and
  * explicitly restored afterward.
  *
- * All the actual money movement (runActionWithResolvedTarget and below) is
- * untouched from the old chest-GUI version — only the front end changed.
+ * The money movement (runActionWithResolvedTarget and below) carried over
+ * from the old chest-GUI version as-is at first; the commission model was
+ * later reworked (11.08) to "recipient always gets the full amount, sender
+ * pays the fee on top" — see atmFeeRate/grossFor near the bottom of this
+ * file — to match the site's own /bank/transfer, instead of the old
+ * "recipient gets less" model.
  */
 public final class AtmController {
 
@@ -689,9 +693,15 @@ public final class AtmController {
         switch (action) {
             case WITHDRAW -> {
                 if (kind == TargetKind.PLAYER) {
-                    double net = netAfterAtmFee(p, atmLoc, amount);
+                    // Единая модель (см. atmFeeRate/grossFor ниже, в ===== utils =====):
+                    // счёт списывается на gross (amount + комиссия), наличными игрок
+                    // получает amount целиком — комиссию платит источник денег, а
+                    // не получатель.
+                    double rate = atmFeeRate(p, atmLoc, amount);
+                    double gross = grossFor(amount, rate);
+                    announceFee(p, amount, rate);
                     p.sendMessage(ChatColor.GRAY + "Обрабатываем снятие...");
-                    plugin.moneyManager.withdrawToCashBurnFee(p, amount, net);
+                    plugin.moneyManager.withdrawToCashBurnFee(p, gross, amount);
                     return true;
                 }
                 if (kind == TargetKind.COUNTRY) {
@@ -706,10 +716,13 @@ public final class AtmController {
                     }
                     p.sendMessage(ChatColor.GRAY + "Проверяем казну страны...");
 
+                    double rate = atmFeeRate(p, atmLoc, amount);
+                    double gross = grossFor(amount, rate);
+
                     new BukkitRunnable() {
                         @Override public void run() {
                             double countryMoney = UnityLauncher.getInstance().countryRegistryJdbc.getCountryMoney(myCountry);
-                            if (countryMoney < amount) {
+                            if (countryMoney < gross) {
                                 new BukkitRunnable(){ @Override public void run(){
                                     p.sendMessage(ChatColor.RED + "В казне недостаточно средств. Доступно: "
                                             + ChatColor.YELLOW + round2(countryMoney) + ChatColor.RED + " Ⓕ.");
@@ -717,12 +730,13 @@ public final class AtmController {
                                 return;
                             }
 
-                            UnityLauncher.getInstance().countryRegistryJdbc.addCountryMoney(myCountry, -amount);
+                            UnityLauncher.getInstance().countryRegistryJdbc.addCountryMoney(myCountry, -gross);
 
                             new BukkitRunnable(){ @Override public void run(){
-                                double net = netAfterAtmFee(p, atmLoc, amount);
-                                plugin.moneyManager.giveCash(p, net);
-                                p.sendMessage(ChatColor.GREEN + "Снято из казны: " + ChatColor.YELLOW + round2(net)
+                                // Казна платит gross, игрок получает запрошенную сумму целиком.
+                                announceFee(p, amount, rate);
+                                plugin.moneyManager.giveCash(p, amount);
+                                p.sendMessage(ChatColor.GREEN + "Снято из казны: " + ChatColor.YELLOW + round2(amount)
                                         + ChatColor.GREEN + " Ⓕ (" + ChatColor.AQUA + myCountry + ChatColor.GREEN + ")");
                             }}.runTask(UnityLauncher.getInstance());
                         }
@@ -733,21 +747,18 @@ public final class AtmController {
             }
 
             case DEPOSIT -> {
-                AtmFeesUpgrade atmFees = atmFeesUpgradeOrNull();
-                double net = amount;
-                if (atmFees != null) {
-                    double rate = atmFees.calculateAtmFee(p.getName(), atmLoc, amount);
-                    net = amount - (amount * rate);
-                    if (net < 0) net = 0;
-                }
+                // Из инвентаря уходит gross, на счёт/в казну зачисляется amount целиком.
+                double rate = atmFeeRate(p, atmLoc, amount);
+                double gross = grossFor(amount, rate);
+                announceFee(p, amount, rate);
 
                 if (kind == TargetKind.PLAYER) {
                     p.sendMessage(ChatColor.GRAY + "Вносим наличку на счёт...");
-                    return plugin.moneyManager.depositCashToPlayerBurnFee(p, amount, net);
+                    return plugin.moneyManager.depositCashToPlayerBurnFee(p, gross, amount);
                 }
                 if (kind == TargetKind.COUNTRY) {
                     p.sendMessage(ChatColor.GRAY + "Вносим наличку в казну...");
-                    return plugin.moneyManager.depositCashToCountryBurnFee(p, amount, net);
+                    return plugin.moneyManager.depositCashToCountryBurnFee(p, gross, amount);
                 }
                 return true;
             }
@@ -775,7 +786,6 @@ public final class AtmController {
     private boolean handleTransferPlayerResolved(Player p, Location atmLoc, String targetName, double amount) {
         if (targetName.equalsIgnoreCase(p.getName())) { p.sendMessage(ChatColor.RED + "Нельзя перевести самому себе."); return false; }
 
-        AtmFeesUpgrade atmFees = atmFeesUpgradeOrNull();
         p.sendMessage(ChatColor.GRAY + "Проверяем данные и выполняем перевод...");
 
         new BukkitRunnable() {
@@ -798,9 +808,18 @@ public final class AtmController {
                         }}.runTask(UnityLauncher.getInstance());
                         return;
                     }
-                    if (senderMoney < amount) {
+
+                    // Единая модель, зеркалит сайтовый /bank/transfer: получатель
+                    // получает amount ЦЕЛИКОМ, отправитель платит gross = amount + комиссия.
+                    double rate = atmFeeRate(p, atmLoc, amount);
+                    double fee = round2(amount * rate);
+                    double gross = round2(amount + fee);
+
+                    if (senderMoney < gross) {
                         new BukkitRunnable(){ @Override public void run(){
-                            p.sendMessage(ChatColor.RED + "Недостаточно средств. Доступно: " + ChatColor.YELLOW + senderMoney + ChatColor.RED + " Ⓕ.");
+                            p.sendMessage(ChatColor.RED + "Недостаточно средств. Нужно: " + ChatColor.YELLOW + round2(gross)
+                                    + ChatColor.RED + " Ⓕ" + (fee > 0 ? (ChatColor.GRAY + " (из них комиссия " + ChatColor.RED + fee + " Ⓕ" + ChatColor.GRAY + ")") : "")
+                                    + ChatColor.RED + ". Доступно: " + ChatColor.YELLOW + senderMoney + ChatColor.RED + " Ⓕ.");
                         }}.runTask(UnityLauncher.getInstance());
                         return;
                     }
@@ -808,25 +827,20 @@ public final class AtmController {
                     new BukkitRunnable(){ @Override public void run(){
                         UnityCommands uc = UnityCommands.getInstance();
 
-                        double rate = 0.0;
-                        if (atmFees != null) rate = atmFees.calculateAtmFee(p.getName(), atmLoc, amount);
-
-                        double fee = amount * rate;
-                        double net = Math.max(0.0, amount - fee);
-
                         Map<String, Object> updSender = new HashMap<>();
-                        updSender.put("money", round2(senderMoney - amount));
+                        updSender.put("money", round2(senderMoney - gross));
                         uc.mergeAndUpdatePlayerData(p.getName(), "GeneralData", updSender);
 
                         Map<String, Object> updTarget = new HashMap<>();
-                        updTarget.put("money", round2(targetData.money + net));
+                        updTarget.put("money", round2(targetData.money + amount));
                         uc.mergeAndUpdatePlayerData(targetName, "GeneralData", updTarget);
 
                         new BukkitRunnable(){ @Override public void run(){
                             p.sendMessage(ChatColor.GREEN + "Перевод выполнен: " + ChatColor.YELLOW + round2(amount) + " Ⓕ"
                                     + ChatColor.GREEN + " → " + ChatColor.RESET + targetName
-                                    + (fee > 0 ? (ChatColor.GRAY + " (получатель получил " + ChatColor.YELLOW + round2(net) + " Ⓕ"
-                                    + ChatColor.GRAY + ", комиссия " + ChatColor.RED + round2(fee) + " Ⓕ" + ChatColor.GRAY + ")") : ""));
+                                    + (fee > 0 ? (ChatColor.GRAY + " (получатель получил " + ChatColor.YELLOW + round2(amount) + " Ⓕ"
+                                    + ChatColor.GRAY + " целиком, с тебя списано " + ChatColor.RED + round2(gross) + " Ⓕ"
+                                    + ChatColor.GRAY + ", комиссия " + ChatColor.RED + fee + " Ⓕ" + ChatColor.GRAY + ")") : ""));
                         }}.runTask(UnityLauncher.getInstance());
 
                     }}.runTaskAsynchronously(UnityLauncher.getInstance());
@@ -843,26 +857,26 @@ public final class AtmController {
             return false;
         }
 
-        AtmFeesUpgrade atmFees = atmFeesUpgradeOrNull();
         p.sendMessage(ChatColor.GRAY + "Выполняем перевод стране...");
 
-        double rate = 0.0;
-        if (atmFees != null) rate = atmFees.calculateAtmFee(p.getName(), atmLoc, amount);
+        // Та же модель: страна-получатель зачисляет amount целиком, отправитель
+        // платит gross = amount + комиссия со своего счёта.
+        double rate = atmFeeRate(p, atmLoc, amount);
+        final double fee = round2(amount * rate);
+        final double gross = round2(amount + fee);
 
-        final double fee = amount * rate;
-        final double net = Math.max(0.0, amount - fee);
-
-        plugin.moneyManager.tryWithdraw(p.getName(), amount, ok -> {
+        plugin.moneyManager.tryWithdraw(p.getName(), gross, ok -> {
             if (!ok) {
                 new BukkitRunnable() { @Override public void run() {
-                    p.sendMessage(ChatColor.RED + "Недостаточно средств на счёте для перевода.");
+                    p.sendMessage(ChatColor.RED + "Недостаточно средств на счёте для перевода"
+                            + (fee > 0 ? (" (нужно " + round2(gross) + " Ⓕ с учётом комиссии " + fee + " Ⓕ)") : "") + ".");
                 }}.runTask(UnityLauncher.getInstance());
                 return;
             }
 
             new BukkitRunnable() {
                 @Override public void run() {
-                    UnityLauncher.getInstance().countryRegistryJdbc.addCountryMoney(targetCountry, net);
+                    UnityLauncher.getInstance().countryRegistryJdbc.addCountryMoney(targetCountry, amount);
 
                     new BukkitRunnable() { @Override public void run() {
                         p.sendMessage(
@@ -870,8 +884,8 @@ public final class AtmController {
                                         ChatColor.YELLOW + round2(amount) + " Ⓕ" +
                                         ChatColor.GREEN + " → " + ChatColor.AQUA + targetCountry +
                                         (fee > 0
-                                                ? ChatColor.GRAY + " (зачислено " + ChatColor.YELLOW + round2(net) +
-                                                ChatColor.GRAY + " Ⓕ, комиссия " + ChatColor.RED + round2(fee) + " Ⓕ)"
+                                                ? ChatColor.GRAY + " (зачислено целиком, с тебя списано " + ChatColor.RED + round2(gross) +
+                                                ChatColor.GRAY + " Ⓕ, комиссия " + ChatColor.RED + fee + " Ⓕ)"
                                                 : "")
                         );
                     }}.runTask(UnityLauncher.getInstance());
@@ -884,10 +898,7 @@ public final class AtmController {
 
     private void showInfo(Player p, Location atmLoc, SignVariables sv) {
         double rate = 0.0;
-        AtmFeesUpgrade u = atmFeesUpgradeOrNull();
-        if (u != null) {
-            try { rate = u.calculateAtmFee(p.getName(), atmLoc, 100.0); } catch (Throwable ignored) {}
-        }
+        try { rate = atmFeeRate(p, atmLoc, 100.0); } catch (Throwable ignored) {}
 
         String owner = (sv != null && sv.getOwnerName() != null) ? sv.getOwnerName() : "?";
         String country = (sv != null) ? countryDisplayName(sv.getOwnerCountry()) : null;
@@ -897,7 +908,7 @@ public final class AtmController {
                 ChatColor.GREEN + "Принадлежит: " + ChatColor.RESET + country + "\n" +
                 ChatColor.GREEN + "Установлен: " + ChatColor.RESET + owner + "\n" +
                 ChatColor.GREEN + "Комиссия ATM сейчас: " + ChatColor.YELLOW + String.format(Locale.ROOT, "%.1f", rate * 100.0) + "%" + "\n" +
-                ChatColor.DARK_GRAY + "(модель: получатель получает меньше)"
+                ChatColor.DARK_GRAY + "(получатель получает сумму целиком, комиссию сверху платишь ты)"
         );
     }
 
@@ -933,12 +944,44 @@ public final class AtmController {
         }
     }
 
-    /** Receiver gets less: возвращает "чистую" сумму (amount - fee). */
-    private double netAfterAtmFee(Player actor, Location atmLoc, double amount) {
-        if (actor == null || atmLoc == null || amount <= 0.0) return amount;
+    // ===== единая модель комиссии: получатель получает amount целиком, =====
+    // ===== источник платит gross = amount + комиссия сверху ===============
+    // Зеркалит backend/src/routes/bank.ts (сайтовый /bank/transfer) — три
+    // уровня ставки считает AtmFeesUpgrade.calculateAtmFee, здесь только
+    // домножение до gross и (где уместно) чат-уведомление о комиссии.
+
+    /** Ставка [0,1] для данного ATM/суммы — без побочных эффектов (без сообщений). */
+    private double atmFeeRate(Player actor, Location atmLoc, double amount) {
+        if (actor == null || atmLoc == null || amount <= 0.0) return 0.0;
         AtmFeesUpgrade u = atmFeesUpgradeOrNull();
-        if (u == null) return amount;
-        return u.applyAtmFee(actor, atmLoc, amount);
+        if (u == null) return 0.0;
+        return u.calculateAtmFee(actor.getName(), atmLoc, amount);
+    }
+
+    /** Что спишется с источника, чтобы получатель получил amount целиком. */
+    private double grossFor(double amount, double rate) {
+        return round2(amount + amount * rate);
+    }
+
+    // ConcurrentHashMap, not HashMap: announceFee is reached both from the
+    // main-thread click handler and from async-runnable success callbacks
+    // (see WITHDRAW/COUNTRY above) — matches the thread-safety the old
+    // AtmFeesUpgrade.msgCooldown had before this moved here.
+    private final Map<UUID, Long> feeMsgCooldown = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /** "Комиссия банкомата: X (Y%)" — не чаще раза в 5с на игрока. Только для операций
+     *  без собственного inline-упоминания комиссии (переводы формируют его сами). */
+    private void announceFee(Player p, double amount, double rate) {
+        if (rate <= 1e-9) return;
+        double fee = round2(amount * rate);
+        if (fee < 0.01) return;
+        long now = System.currentTimeMillis();
+        Long last = feeMsgCooldown.get(p.getUniqueId());
+        if (last != null && (now - last) <= 5000) return;
+        feeMsgCooldown.put(p.getUniqueId(), now);
+        p.sendMessage(ChatColor.YELLOW + "Комиссия банкомата: " + ChatColor.RED
+                + String.format(Locale.ROOT, "%.2f", fee) + " Ⓕ " + ChatColor.GRAY
+                + "(" + String.format(Locale.ROOT, "%.1f", rate * 100.0) + "%)");
     }
 
     private enum ActionType {
