@@ -337,7 +337,8 @@ public final class AtmController {
 
     private void renderBrowse(Player p, BrowseSession s) {
         SignVariables sv = store.get(s.atmLoc);
-        String country = (sv != null && sv.getOwnerCountry() != null) ? sv.getOwnerCountry() : "?";
+        String country = (sv != null) ? countryDisplayName(sv.getOwnerCountry()) : null;
+        if (country == null) country = "?";
         String[] lines = new String[4];
 
         switch (s.stage) {
@@ -345,28 +346,38 @@ public final class AtmController {
                 lines[0] = trim("ATM [" + country + "]");
                 lines[1] = "";
                 lines[2] = trim(ACTION_LABELS[s.index]);
-                lines[3] = "Скролл ЛКМ=OK";
+                lines[3] = "";
             }
             case WD_KIND -> {
                 lines[0] = trim(ACTION_LABELS[indexOfAction(s.action)]);
                 lines[1] = "";
                 lines[2] = trim(s.index == 0 ? "Свой счёт" : "Казна");
-                lines[3] = "ПКМ=назад";
+                lines[3] = "";
             }
             case TARGET_MODE -> {
                 lines[0] = trim(ACTION_LABELS[indexOfAction(s.action)]);
                 lines[1] = "";
                 lines[2] = trim(s.index == 0 ? "Вручную" : "Список");
-                lines[3] = "ПКМ=назад";
+                lines[3] = "";
             }
             case TARGET_LIST -> {
                 lines[0] = trim(ACTION_LABELS[indexOfAction(s.action)]);
                 lines[1] = s.listCache.size() > 1 ? ("(" + (s.index + 1) + "/" + s.listCache.size() + ")") : "";
                 lines[2] = trim(s.listCache.isEmpty() ? "(пусто)" : s.listCache.get(s.index));
-                lines[3] = "ПКМ=назад";
+                lines[3] = "";
             }
         }
         p.sendSignChange(s.atmLoc, lines);
+    }
+
+    /** sv.getOwnerCountry() исторически хранит Countries.Id (см. UpgradeCondition.playerCountryCanonical), не имя — отображать напрямую нельзя. */
+    private static String countryDisplayName(String ownerCountryCanonical) {
+        if (ownerCountryCanonical == null || ownerCountryCanonical.isBlank()) return null;
+        try {
+            return UnityLauncher.getInstance().countryRegistryJdbc.getCountryDisplayNameForCanonical(ownerCountryCanonical);
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private static String trim(String s) {
@@ -496,7 +507,18 @@ public final class AtmController {
                 if (!stillLookingAt(p, s.atmLoc)) {
                     it.remove();
                     scroll.resumeScrolling(s.atmLoc);
+                    continue;
                 }
+                // sendSignChange is a one-off client-side override, not a
+                // sticky one — any real resync of that block (chunk resend,
+                // a nearby block update, anything) silently reverts the
+                // player's view back to the sign's actual (idle) text. That
+                // was the "confirming a choice dumps me back on 'Коснитесь'
+                // until I scroll" bug: the session WAS advancing correctly
+                // server-side, the client's view of it just kept getting
+                // clobbered. Re-asserting it on every watchdog tick (5/s)
+                // keeps it pinned regardless of what else touches the block.
+                renderBrowse(p, s);
             }
         }
 
@@ -761,7 +783,8 @@ public final class AtmController {
         }
 
         String owner = (sv != null && sv.getOwnerName() != null) ? sv.getOwnerName() : "?";
-        String country = (sv != null && sv.getOwnerCountry() != null) ? sv.getOwnerCountry() : "?";
+        String country = (sv != null) ? countryDisplayName(sv.getOwnerCountry()) : null;
+        if (country == null) country = "?";
 
         p.sendMessage(ChatColor.YELLOW + "=======[ ATM ]=======\n" +
                 ChatColor.GREEN + "Принадлежит: " + ChatColor.RESET + country + "\n" +

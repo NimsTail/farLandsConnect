@@ -39,6 +39,13 @@ public class CountryRegistryJdbc {
     private final Map<String, String> countryLowerToDisplay = new ConcurrentHashMap<>();
     // lowerCountry -> Countries.Id (стабильный ключ LuckPerms-группы страны — не зависит от транслитерации имени)
     private final Map<String, Integer> countryLowerToId = new ConcurrentHashMap<>();
+    // Countries.Id -> display name — reverse of countryLowerToId. Needed
+    // because playerCountryCanonical()/UpgradeCondition store the numeric
+    // Countries.Id as the "canonical" country everywhere permission checks
+    // touch it (see its own comment), but that leaves nothing that can turn
+    // that Id back into a name for display (see getCountryNameById / ATM
+    // "Инфо" screen, which used to print the raw Id).
+    private final Map<Integer, String> countryIdToDisplay = new ConcurrentHashMap<>();
     private final Map<String, Double> countryToTransferFeePct = new ConcurrentHashMap<>();
 
     private final Map<String, Double> countryMoney = new ConcurrentHashMap<>();
@@ -173,6 +180,36 @@ public class CountryRegistryJdbc {
         refreshCacheIfExpired();
         String lower = countryNameOrLower.toLowerCase(Locale.ROOT);
         return countryLowerToDisplay.getOrDefault(lower, countryNameOrLower);
+    }
+
+    /**
+     * Reverse of getCountryId(String) — turns the numeric Countries.Id
+     * (the "canonical" country identifier permission checks use, see
+     * UpgradeCondition.playerCountryCanonical/resolveCountryGroupId) back
+     * into a display-ready name. Returns null if that Id no longer exists
+     * (country deleted/расформирована).
+     */
+    public String getCountryNameById(Integer countryId) {
+        if (countryId == null) return null;
+        refreshCacheIfExpired();
+        return countryIdToDisplay.get(countryId);
+    }
+
+    /**
+     * Best-effort display name for whatever's stored as a sign/zone's
+     * "canonical" country — accepts either the numeric Countries.Id (what
+     * playerCountryCanonical/resolveCountryGroupId actually store) or an
+     * already-plain name, and always returns something printable.
+     */
+    public String getCountryDisplayNameForCanonical(String canonicalOrName) {
+        if (canonicalOrName == null || canonicalOrName.isBlank()) return null;
+        try {
+            String byId = getCountryNameById(Integer.valueOf(canonicalOrName));
+            if (byId != null) return byId;
+        } catch (NumberFormatException ignored) {
+            // не число — значит это уже (предположительно) обычное имя
+        }
+        return getCountryDisplayName(canonicalOrName);
     }
 
     /** Обнулить WeeklyTaxDue для страны (при выставлении недельного счёта/списании). */
@@ -468,6 +505,7 @@ public class CountryRegistryJdbc {
         Map<String, Double> newCountryWeeklyTaxDue = new HashMap<>();
         Map<String, String> newCountryLowerToDisplay = new HashMap<>();
         Map<String, Integer> newCountryLowerToId = new HashMap<>();
+        Map<Integer, String> newCountryIdToDisplay = new HashMap<>();
         Map<String, Double> newCountryArea = new HashMap<>();
         Map<String, String> newCountryPlotCapMode = new HashMap<>();
         Map<String, Double> newCountryPlotCapValue = new HashMap<>();
@@ -491,7 +529,9 @@ public class CountryRegistryJdbc {
 
                     String countryLower = countryName.toLowerCase(Locale.ROOT);
                     newCountryLowerToDisplay.put(countryLower, countryName);
-                    newCountryLowerToId.put(countryLower, rs.getInt("Id"));
+                    int countryId = rs.getInt("Id");
+                    newCountryLowerToId.put(countryLower, countryId);
+                    newCountryIdToDisplay.put(countryId, countryName);
 
                     // --- 1. распарсили роли этой страны
                     Map<Integer, RoleInfo> rolesMap = parseRoles(permsJson);
@@ -650,6 +690,9 @@ public class CountryRegistryJdbc {
 
         countryLowerToId.clear();
         countryLowerToId.putAll(newCountryLowerToId);
+
+        countryIdToDisplay.clear();
+        countryIdToDisplay.putAll(newCountryIdToDisplay);
 
         countryWeeklyTaxDue.clear();
         countryWeeklyTaxDue.putAll(newCountryWeeklyTaxDue);
