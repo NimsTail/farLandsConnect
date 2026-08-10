@@ -1299,24 +1299,15 @@ public final class ShopController {
             }
         }
 
-        // защита: открыть привязанный контейнер может только владелец source
-        // проверяем все локации (double chest)
-        for (Location l : containerLocs) {
-            Location src = store.sourceSignByContainer(l);
-            if (src == null) continue;
+        // Больше НЕ блокируем открытие привязанного контейнера не-владельцам —
+        // просмотр разрешён всем, трогать вещи можно только с включённым
+        // авто-списанием (см. AutoDebitService.onClick/onDrag, отдельные
+        // обработчики в SignManager). Раньше тут был точно такой же запрет,
+        // как в SignManager.onInventoryOpen — тот убрали, а этот, второй,
+        // пропустили, из-за чего ошибка "открывать может только владелец"
+        // продолжала появляться несмотря на удаление первого запрета.
 
-            SignVariables sv = store.get(src);
-            if (sv != null && sv.getSignCategory() == SignCategory.SHOP_SOURCE) {
-                if (p != null && !zoneManager.isPlayerOwnerOfShopZoneAt(p.getName(), src)) {
-                    e.setCancelled(true);
-                    p.sendMessage(ChatColor.RED + "Этот сундук связан с магазином. Открывать может только владелец SHOP-зоны.");
-                    return;
-                }
-
-            }
-        }
-
-        // владелец открыл => обновим списки
+        // кто угодно открыл => обновим списки (актуализирует остатки на табличках)
         try { shopLists.updateAllRelatedShopListSigns(containerLoc); } catch (Throwable ignored) {}
     }
 
