@@ -50,6 +50,14 @@ public final class SignManager implements Listener {
     private final ShopListUpdater shopLists;
     private final ShopController shop;
 
+    // Guards rebuildShopIndexAndListsNow() against running twice — once from
+    // LazyBlueMapLoader's direct call (the real "zones are actually loaded"
+    // signal) and once from the fallback poll below, in whichever order they
+    // land. See rebuildShopIndexAndListsWhenZonesReady() for why the poll
+    // exists at all instead of just always relying on the direct call.
+    private volatile boolean shopIndexBuilt = false;
+    private org.bukkit.scheduler.BukkitTask shopReadyPollTask;
+
     public SignManager(UnityLauncher plugin, File dataFolder, ZoneManager zoneManager, BlueMapIntegration blueMapIntegration) {
         this.plugin = plugin;
         this.zoneManager = zoneManager;
@@ -222,10 +230,62 @@ public final class SignManager implements Listener {
         repo.save(store, false);
     }
 
+    /**
+     * The real "zones are actually loaded" signal — call this once
+     * ZoneManager.loadZonesFromConfig() has genuinely returned (see
+     * LazyBlueMapLoader, which is the only normal-startup caller). Safe to
+     * call more than once: the first call wins, the rest are no-ops.
+     *
+     * Previously this whole rebuild only ever ran from a 20s poll
+     * (rebuildShopIndexAndListsWhenZonesReady below) that started at
+     * SignManager.enable() — i.e. right at the very start of onEnable(),
+     * well before LazyBlueMapLoader's BlueMapAPI.onEnable()-gated call to
+     * loadZonesFromConfig() had populated any zones at all. That poll's
+     * "are zones ready?" check was itself indirect (does some existing SHOP
+     * sign already resolve to a zone?), so on a slow/loaded boot — world
+     * prep + BlueMap init eating into the same 20s window — it could run
+     * out of tries before ever seeing zones loaded, and it never retried
+     * again afterward: SHOP indices/lists just stayed empty for the whole
+     * server session until someone ran /ul reload. This direct call removes
+     * the guesswork for the normal path; the poll remains only as a
+     * fallback (e.g. BlueMap disabled, so LazyBlueMapLoader never runs).
+     */
+    public void rebuildShopIndexAndListsNow() {
+        if (shopIndexBuilt) return;
+        shopIndexBuilt = true;
+        if (shopReadyPollTask != null) {
+            shopReadyPollTask.cancel();
+            shopReadyPollTask = null;
+        }
+
+        shopToListSigns.clear();
+        shopToSourceSigns.clear();
+        for (var e : store.signs().entrySet()) {
+            indexShopSign(e.getKey(), e.getValue());
+        }
+
+        repairAllShopSourcesFromWorld();
+
+        try { shopLists.rebuildAllListsLater(); }
+        catch (Throwable t) { plugin.getLogger().warning("[Signs] rebuildAllListsLater failed: " + t.getMessage()); }
+    }
+
+    /**
+     * Fallback only — see rebuildShopIndexAndListsNow(). Polls for the same
+     * "at least one SHOP sign resolves to a zone" heuristic in case nothing
+     * ever calls the direct signal (BlueMap missing/disabled leaves
+     * LazyBlueMapLoader.scheduleLazyLoad() a no-op). Keeps retrying at a
+     * slower cadence after the first 20s instead of giving up forever, so a
+     * merely-slow boot self-heals instead of needing a manual /ul reload.
+     */
     private void rebuildShopIndexAndListsWhenZonesReady() {
         final int[] tries = {0};
 
-        Bukkit.getScheduler().runTaskTimer(plugin, task -> {
+        shopReadyPollTask = Bukkit.getScheduler().runTaskTimer(plugin, task -> {
+            if (shopIndexBuilt) {
+                task.cancel();
+                return;
+            }
             tries[0]++;
 
             boolean zonesReadyForShop = false;
@@ -247,27 +307,13 @@ public final class SignManager implements Listener {
             }
 
             if (zonesReadyForShop) {
-                // 1) пересобираем shopTo* индексы НОРМАЛЬНО, когда shopKey уже не null
-                shopToListSigns.clear();
-                shopToSourceSigns.clear();
-                for (var e : store.signs().entrySet()) {
-                    indexShopSign(e.getKey(), e.getValue());
-                }
-
-                // 2) чинить source state/text (см. фикс 2 ниже)
-                repairAllShopSourcesFromWorld();
-
-                // 3) пересобрать листы магазина
-                try { shopLists.rebuildAllListsLater(); }
-                catch (Throwable t) { plugin.getLogger().warning("[Signs] rebuildAllListsLater failed: " + t.getMessage()); }
-
+                rebuildShopIndexAndListsNow();
                 task.cancel();
                 return;
             }
 
-            if (tries[0] >= 40) { // 40*10 тиков = 20 секунд
-                plugin.getLogger().warning("[Signs] SHOP zones not ready after 20s. Shop lists may stay empty.");
-                task.cancel();
+            if (tries[0] == 40) { // 40*10 тиков ≈ 20 секунд — раньше тут отменяли задачу насовсем
+                plugin.getLogger().warning("[Signs] SHOP zones not ready after 20s — still retrying (was: giving up here for the rest of the session).");
             }
         }, 10L, 10L);
     }

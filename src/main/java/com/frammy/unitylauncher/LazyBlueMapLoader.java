@@ -52,6 +52,19 @@ public record LazyBlueMapLoader(UnityLauncher plugin) {
             return;
         }
 
+        // Зоны ТОЧНО загружены прямо здесь — это настоящий сигнал готовности,
+        // в отличие от 20с-опроса в SignManager (который стартует ещё до этого
+        // метода, и раньше насовсем сдавался, если не успевал застать этот
+        // момент — SHOP-таблички оставались сломанными до /ul reload). Опрос
+        // остаётся как фоллбэк на случай, если BlueMap выключен и этот метод
+        // вообще не вызовется.
+        try {
+            plugin.getSignManager().rebuildShopIndexAndListsNow();
+        } catch (Throwable t) {
+            plugin.getLogger().severe("[LazyLoad] Ошибка rebuildShopIndexAndListsNow: " + t.getMessage());
+            t.printStackTrace();
+        }
+
         // 2) Делаем снимки коллекций, чтобы не шарить «живые» мапы в раннер
         Map<Location, SignVariables> signsSnapshot = new HashMap<>();
         var sm = plugin.getSignManager();
