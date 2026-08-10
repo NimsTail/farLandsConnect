@@ -3,6 +3,7 @@ package com.frammy.unitylauncher.signs;
 import com.frammy.unitylauncher.BlueMapIntegration;
 import com.frammy.unitylauncher.UnityLauncher;
 import com.frammy.unitylauncher.signs.features.atm.AtmController;
+import com.frammy.unitylauncher.signs.features.redstone.RedstoneController;
 import com.frammy.unitylauncher.signs.features.shop.ShopController;
 import com.frammy.unitylauncher.signs.features.shop.ShopListUpdater;
 import com.frammy.unitylauncher.signs.features.trash.TrashController;
@@ -23,6 +24,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockRedstoneEvent;
 import org.bukkit.event.block.SignChangeEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryMoveItemEvent;
@@ -45,6 +47,7 @@ public final class SignManager implements Listener {
     private final SignScrollService scroll;
     private final SignYamlRepository repo;
     private final TrashController trash;
+    private final RedstoneController redstone;
     private final ShopListUpdater shopLists;
     private final ShopController shop;
     private final com.frammy.unitylauncher.signs.features.shop.AutoDebitService autoDebit;
@@ -69,6 +72,7 @@ public final class SignManager implements Listener {
 
         this.repo = new SignYamlRepository(plugin, dataFolder, SignManager::playerCountryCanonical);
         this.trash = new TrashController(plugin);
+        this.redstone = new RedstoneController(plugin, store);
 
         MarkerService markers = new MarkerService(zoneManager);
 
@@ -346,6 +350,11 @@ public final class SignManager implements Listener {
         // индексы shopTo* НЕ строим тут (зоны могут быть не готовы)
         shopToListSigns.clear();
         shopToSourceSigns.clear();
+
+        // Рантайм-состояние REDSTONE-эмиттеров (Map в RedstoneController) не
+        // персистится — оно каждый раз пересобирается заново из уже
+        // сохранённых табличек, чтобы пережить рестарт сервера.
+        redstone.reclaimAllOnStartup();
     }
 
     public SignStore store() { return store; }
@@ -366,7 +375,7 @@ public final class SignManager implements Listener {
     private static final String SIGNS_BYPASS_PERM = "unity.signs.bypass";
 
     /** Локация блока-опоры для конкретной таблички в мире. */
-    private static Location getSupportBlockOfSign(Block signBlock) {
+    public static Location getSupportBlockOfSign(Block signBlock) {
         if (signBlock == null) return null;
 
         BlockData data = signBlock.getBlockData();
@@ -514,6 +523,10 @@ public final class SignManager implements Listener {
         }
 
         unindexShopSign(loc, sv);
+
+        if (sv.getSignCategory() == SignCategory.REDSTONE) {
+            redstone.onSignRemoved(loc);
+        }
 
         // убрать запись
         store.remove(loc);
@@ -754,6 +767,17 @@ public final class SignManager implements Listener {
             ));
 
             p.sendMessage(ChatColor.GREEN + "Табличка приёма мусора установлена. " + ChatColor.GRAY + "(" + need + "/" + allowed + ")");
+            return;
+        }
+
+        // ===== REDSTONE (GitHub issue #2, minecraftServer repo) =====
+        if (line0raw.equalsIgnoreCase("REDSTONE") || line0raw.equalsIgnoreCase("РЕДСТОУН")) {
+            if (isHanging) {
+                e.setCancelled(true);
+                p.sendMessage(ChatColor.RED + "Свисающие таблички нельзя использовать как редстоун-табличку!");
+                return;
+            }
+            redstone.onSignCreateRedstone(e);
         }
     }
 
@@ -810,6 +834,12 @@ public final class SignManager implements Listener {
         // ATM: пусть работает и с предметом в руке
         if (sv.getSignCategory() == SignCategory.ATM) {
             atm.onInteract(e, sv);
+            return;
+        }
+
+        // REDSTONE: пусть работает и с предметом в руке (как ATM)
+        if (sv.getSignCategory() == SignCategory.REDSTONE) {
+            redstone.onInteract(e, sv, loc);
             return;
         }
 
@@ -880,6 +910,14 @@ public final class SignManager implements Listener {
         if (shop.onItemHeld(e.getPlayer(), e.getPreviousSlot(), e.getNewSlot())) {
             e.setCancelled(true);
         }
+    }
+
+    // REDSTONE-табличка держит свою силу вручную (см. RedstoneController — обычный
+    // блок не умеет "просто" быть источником питания в Bukkit) — не отменяем
+    // событие, только подменяем итоговое значение для наших эмиттеров.
+    @EventHandler(ignoreCancelled = false)
+    public void onBlockRedstone(BlockRedstoneEvent e) {
+        redstone.onBlockRedstone(e);
     }
 
     public void enable() { onEnable(); }

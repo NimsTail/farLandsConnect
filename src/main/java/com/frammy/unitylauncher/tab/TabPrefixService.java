@@ -2,6 +2,7 @@ package com.frammy.unitylauncher.tab;
 
 import me.neznamy.tab.api.TabAPI;
 import me.neznamy.tab.api.TabPlayer;
+import me.neznamy.tab.api.event.player.PlayerLoadEvent;
 import me.neznamy.tab.api.nametag.NameTagManager;
 import me.neznamy.tab.api.tablist.TabListFormatManager;
 import org.bukkit.Bukkit;
@@ -30,6 +31,31 @@ public final class TabPrefixService implements Listener {
 
         Bukkit.getPluginManager().registerEvents(this, plugin);
 
+        // Раньше единственным триггером на джойне был PlayerJoinEvent + 1
+        // тик — но TAB грузит своего внутреннего TabPlayer асинхронно, и
+        // этого тика часто не хватало: NameTagManager.setPrefix/setSuffix
+        // дергались ДО TabPlayer.isLoaded(), TAB ловил у себя
+        // IllegalStateException("This player is not loaded yet") в
+        // plugins/TAB/errors.log и молча ронял именно этот вызов — префикс
+        // так и не применялся, пока не долетал следующий тик
+        // applyForAllOnlinePlayers (раз в 15с, общий таймер, не per-player).
+        // Игрок в моменте видел: сек 0-2 — что успело нарисовать само TAB
+        // (обычно ничего/старое из tablist-кэша), дальше пусто, пока не
+        // подоспеет таймер — отсюда и "старый префикс -> пропадает".
+        // TAB.PlayerLoadEvent — штатный сигнал "точно догружен", ждём его
+        // вместо угадывания задержки тиком.
+        try {
+            var bus = TabAPI.getInstance().getEventBus();
+            if (bus != null) {
+                bus.register(PlayerLoadEvent.class, e -> {
+                    Player p = Bukkit.getPlayer(e.getPlayer().getUniqueId());
+                    if (p != null) applyFromCache(p);
+                });
+            }
+        } catch (Throwable t) {
+            Bukkit.getLogger().warning("[UnityLauncher] TAB PlayerLoadEvent subscribe failed: " + t.getMessage());
+        }
+
         // таймер: периодически ре-апплаим, чтобы пережить /tab reload
         Bukkit.getScheduler().runTaskTimer(plugin, this::applyForAllOnlinePlayers, 20L * 5, 20L * 15);
     }
@@ -47,6 +73,14 @@ public final class TabPrefixService implements Listener {
             TabAPI api = TabAPI.getInstance();
             TabPlayer tp = api.getPlayer(player.getUniqueId());
             if (tp == null) return;
+            // Второй рубеж защиты помимо PlayerLoadEvent-подписки в
+            // конструкторе (applyForAllOnlinePlayers/reload могут пройти
+            // мимо неё) — nt.setPrefix/setSuffix на ещё не загруженном
+            // TabPlayer у TAB кидает исключение ВНУТРИ своей же async-задачи
+            // (см. plugins/TAB/errors.log), наш try/catch тут его не ловит,
+            // и вызов просто теряется без следа. PlayerLoadEvent потом всё
+            // равно перевызовет applyFromCache для этого игрока.
+            if (!tp.isLoaded()) return;
 
             NameTagManager nt = api.getNameTagManager();
             if (nt != null) {

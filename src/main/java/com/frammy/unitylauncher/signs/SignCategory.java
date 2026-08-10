@@ -5,5 +5,6 @@ public enum SignCategory {
     SHOP_SOURCE,
     SHOP_INFO,
     SHOP_LIST,
-    TRASH_SELL
+    TRASH_SELL,
+    REDSTONE
 }
