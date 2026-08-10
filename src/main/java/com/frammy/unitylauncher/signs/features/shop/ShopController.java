@@ -49,6 +49,7 @@ public final class ShopController {
     private final BlueMapIntegration blueMap;
     private final MarkerService markers;
     private final SignStore store;
+    private final SignRenderer renderer;
     private final SignScrollService scroll;
     private final ShopListUpdater shopLists;
     private final BiConsumer<Location, SignVariables> onStored;
@@ -56,6 +57,11 @@ public final class ShopController {
     // runtime session state
     private final Map<UUID, Location> signSelectionMap = new HashMap<>();
     private final Map<UUID, Integer> playerScrollIndex = new HashMap<>();
+    // Какой SHOP_LIST игрок сейчас "открыл" детальным просмотром товара
+    // (ЛКМ), в отличие от простого списка/скролла — второй ЛКМ по тому же
+    // списку теперь спрашивает про покупку вместо перехода к следующему
+    // товару, а ПКМ возвращает к списку. См. onInteract SHOP_LIST-ветку.
+    private final Map<UUID, Location> viewingDetailAt = new HashMap<>();
 
     // pending confirm: игрок -> (табличка, индекс, дедлайн)
     private final Map<UUID, PendingBuy> pendingBuys = new ConcurrentHashMap<>();
@@ -110,6 +116,7 @@ public final class ShopController {
         this.blueMap = blueMap;
         this.markers = markers;
         this.store = store;
+        this.renderer = renderer;
         this.scroll = scroll;
         this.shopLists = shopLists;
         this.onStored = onStored;
@@ -400,8 +407,12 @@ public final class ShopController {
             }
 
             if (sv.getSignCategory() == SignCategory.SHOP_LIST) {
+                // Покупка теперь спрашивается вторым ЛКМ (см. ниже) — ПКМ
+                // просто возвращает от детального просмотра товара обратно
+                // к обзорному списку.
                 e.setCancelled(true);
-                promptShopListBuyConfirm(p, loc);
+                viewingDetailAt.remove(p.getUniqueId());
+                restoreShopListOverview(loc);
                 return;
             }
 
@@ -513,16 +524,39 @@ public final class ShopController {
             }
         }
 
-        // ЛКМ по SHOP_LIST: инфо/переключение (как было)
+        // ЛКМ по SHOP_LIST: список -> детально -> "купить?" (ПКМ выше — назад к списку)
         if (action == Action.LEFT_CLICK_BLOCK && sv.getSignCategory() == SignCategory.SHOP_LIST) {
             e.setCancelled(true);
             e.setUseInteractedBlock(org.bukkit.event.Event.Result.DENY);
             e.setUseItemInHand(org.bukkit.event.Event.Result.DENY);
 
-            boolean backward = p.isSneaking(); // shift+ЛКМ = назад
-            handleShopListInfoClick(p, loc, backward);
+            if (p.isSneaking()) {
+                // Shift+ЛКМ — как и раньше, предыдущий товар; тоже считается "уже смотрим детально".
+                viewingDetailAt.put(p.getUniqueId(), loc);
+                handleShopListInfoClick(p, loc, true);
+                return;
+            }
+
+            boolean alreadyViewingThis = loc.equals(viewingDetailAt.get(p.getUniqueId()));
+            if (!alreadyViewingThis) {
+                // Первый ЛКМ по этому списку — открыть текущий товар детально,
+                // БЕЗ смещения индекса (иначе первый же клик перескакивал бы товар 0).
+                viewingDetailAt.put(p.getUniqueId(), loc);
+                updateShopListSignSelection(loc, playerScrollIndex.getOrDefault(p.getUniqueId(), 0));
+                return;
+            }
+
+            // Уже смотрели этот же список детально — второй ЛКМ подряд спрашивает про покупку.
+            promptShopListBuyConfirm(p, loc);
         }
 
+    }
+
+    /** Возвращает табличку SHOP_LIST от детального просмотра товара обратно к обзорному списку (ПКМ). */
+    private void restoreShopListOverview(Location loc) {
+        if (!(loc.getBlock().getState() instanceof Sign sign)) return;
+        List<String> itemLines = store.signPages().get(loc);
+        renderer.updateSignView(sign, itemLines, 0);
     }
 
     private void promptShopListBuyConfirm(Player p, Location loc) {
@@ -1311,6 +1345,7 @@ public final class ShopController {
         if (p == null) return;
         signSelectionMap.remove(p.getUniqueId());
         playerScrollIndex.remove(p.getUniqueId());
+        viewingDetailAt.remove(p.getUniqueId());
     }
 
     // ======= utils =======
