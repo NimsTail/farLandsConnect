@@ -163,10 +163,18 @@ public final class ShopController {
         Player p = e.getPlayer();
         Location signLoc = SignStore.keyLoc(e.getBlock().getLocation());
 
-        // если зоны ещё не готовы — не врём игроку "не твоя зона"
         if (zoneManager.getShopZoneAt(signLoc) == null) {
             e.setCancelled(true);
-            p.sendMessage(ChatColor.RED + "SHOP-зоны ещё не загружены. Попробуй через 5–10 секунд.");
+            // Различаем "зоны в принципе ещё не подгрузились после старта
+            // сервера" (транзиентно, реально бывает только в первые секунды)
+            // от "зон тут просто нет" (табличка стоит вне SHOP-зоны — самый
+            // частый случай) — раньше оба давали одно и то же сбивающее с
+            // толку "зоны не загружены, попробуй через 5-10с".
+            if (!zoneManager.zonesReady()) {
+                p.sendMessage(ChatColor.RED + "SHOP-зоны ещё не загружены. Попробуй через 5–10 секунд.");
+            } else {
+                p.sendMessage(ChatColor.RED + "Эту табличку можно ставить только внутри SHOP-зоны.");
+            }
             return;
         }
 
@@ -312,10 +320,12 @@ public final class ShopController {
         String title = sign.getLine(0); // у тебя скролл заголовка
         String name = ChatColor.stripColor(items.get(idx));
 
-        String line1 = ChatColor.GOLD + "▶ " + ChatColor.WHITE + name;
-        String line2 = ChatColor.YELLOW + "Кол-во: " + ChatColor.WHITE + it.dealQuantity()
-                + ChatColor.GRAY + " (всего " + it.totalQuantity() + ")";
-        String line3 = ChatColor.GREEN + "Цена: " + ChatColor.WHITE + it.dealPrice() + " Ⓕ";
+        // Только числа (кол-во/цена) окрашены — остальной текст в дефолтном
+        // цвете таблички, без искусственного WHITE поверх него.
+        String line1 = ChatColor.GOLD + "▶ " + ChatColor.RESET + name;
+        String line2 = "Кол-во: " + ChatColor.YELLOW + it.dealQuantity()
+                + ChatColor.RESET + " (всего " + it.totalQuantity() + ")";
+        String line3 = "Цена: " + ChatColor.GREEN + it.dealPrice() + ChatColor.RESET + " Ⓕ";
 
         sign.setLine(0, title);
         sign.setLine(1, line1);

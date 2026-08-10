@@ -385,6 +385,11 @@ public final class SignManager implements Listener {
         if (p == null) return false;
         if (p.isOp() || p.hasPermission(SIGNS_BYPASS_PERM)) return true;
 
+        // ATM: сознательно без приватной защиты — кто угодно может сломать
+        // опору. Ломать реальную табличку по-прежнему разрешено только
+        // тем, кто может дойти до этого места физически.
+        if (sv != null && sv.getSignCategory() == SignCategory.ATM) return true;
+
         // SHOP: истинный владелец — владелец зоны (ownerName может устареть)
         if (sv != null && (sv.getSignCategory() == SignCategory.SHOP_SOURCE || sv.getSignCategory() == SignCategory.SHOP_LIST)) {
             return zoneManager.isPlayerOwnerOfShopZoneAt(p.getName(), signLoc);

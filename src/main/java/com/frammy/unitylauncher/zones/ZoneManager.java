@@ -241,6 +241,14 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
     public Collection<ZoneInfo> getZones() { return List.copyOf(zoneList.values()); }
 
     /** Единый загрузчик из YAML + проставление владельцев табличек. */
+    // Устанавливается один раз, после первой РЕАЛЬНОЙ загрузки зон (см.
+    // LazyBlueMapLoader) — нужно, чтобы отличать "зоны ещё не подгрузились
+    // при старте, подожди" от "зоны загружены, но тут их правда нет"
+    // (например, табличка SHOP ставится вне какой-либо SHOP-зоны). До
+    // появления этого флага обе ситуации давали игроку одно и то же
+    // (неверное) сообщение "зоны не загружены".
+    private volatile boolean zonesLoadedOnce = false;
+
     public void loadZonesFromConfig() {
         lastCornersEditByMarker.clear();
 
@@ -248,7 +256,10 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
         if (needsSave) {
             zoneRepo.saveFrom(zoneList.values(), lastCornersEditByMarker);
         }
+        zonesLoadedOnce = true;
     }
+
+    public boolean zonesReady() { return zonesLoadedOnce; }
 
     public void scheduleSignOwnershipRecalc(SignManager signManager, int signsPerTick) {
         signOwnershipService.scheduleSignOwnershipRecalc(signManager, signsPerTick);

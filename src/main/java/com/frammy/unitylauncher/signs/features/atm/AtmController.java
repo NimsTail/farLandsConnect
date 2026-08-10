@@ -73,13 +73,13 @@ public final class AtmController {
     private static final long EDIT_TIMEOUT_MS = 45_000L;
 
     private static final ActionType[] ACTIONS = {
-            ActionType.WITHDRAW, ActionType.DEPOSIT, ActionType.TRANSFER_PLAYER, ActionType.TRANSFER_COUNTRY, ActionType.INFO
+            ActionType.WITHDRAW, ActionType.DEPOSIT, ActionType.TRANSFER_PLAYER, ActionType.TRANSFER_COUNTRY, ActionType.BALANCE, ActionType.INFO
     };
     // Kept short on purpose — sign lines are ~15 narrow-font characters wide
     // and Cyrillic glyphs render noticeably wider than Latin ones, so an
     // exact character budget isn't reliable blind. Tune these in-game if
     // anything clips.
-    private static final String[] ACTION_LABELS = { "Снять", "Внести", "-> Игроку", "-> Стране", "Инфо" };
+    private static final String[] ACTION_LABELS = { "Снять", "Внести", "-> Игроку", "-> Стране", "Баланс", "Инфо" };
 
     public AtmController(UnityLauncher plugin, BlueMapIntegration blueMap, SignStore store, SignScrollService scroll) {
         this.plugin = plugin;
@@ -327,6 +327,11 @@ public final class AtmController {
                 if (chosen == ActionType.INFO) {
                     endSession(p, s);
                     showInfo(p, s.atmLoc, store.get(s.atmLoc));
+                    return;
+                }
+                if (chosen == ActionType.BALANCE) {
+                    endSession(p, s);
+                    showBalance(p);
                     return;
                 }
                 if (chosen == ActionType.WITHDRAW || chosen == ActionType.DEPOSIT) {
@@ -862,6 +867,22 @@ public final class AtmController {
         );
     }
 
+    private void showBalance(Player p) {
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            Map<String, Object> map = UnityCommands.getInstance()
+                    .getJsonFieldValues("Users", "GeneralData", "Name", p.getName(), List.of("money"));
+            Double bal = map.get("money") instanceof Number ? ((Number) map.get("money")).doubleValue() : null;
+
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                if (bal == null) {
+                    p.sendMessage(ChatColor.RED + "Не удалось получить баланс.");
+                    return;
+                }
+                p.sendMessage(ChatColor.YELLOW + "Твой баланс: " + ChatColor.GREEN + round2(bal) + " Ⓕ");
+            });
+        });
+    }
+
     // ===== utils =====
 
     private double round2(double v) {
@@ -891,6 +912,7 @@ public final class AtmController {
         DEPOSIT,
         TRANSFER_PLAYER,
         TRANSFER_COUNTRY,
+        BALANCE,
         INFO
     }
 
