@@ -79,7 +79,7 @@ public class MoneyManager implements Listener {
 
             new BukkitRunnable() {
                 @Override public void run() {
-                    boolean ok = UnityCommands.getInstance().applyMoneyDelta(playerName, dbAmount(-centsToDouble(amountCents)));
+                    boolean ok = UnityCommands.getInstance().applyMoneyDelta(playerName, dbAmount(-centsToDouble(amountCents)), "Автосписание за зону");
                     if (!ok) {
                         Bukkit.getLogger().warning("[MoneyManager] withdraw failed for '" + playerName + "'");
                     }
@@ -367,7 +367,7 @@ public class MoneyManager implements Listener {
 
             new BukkitRunnable() {
                 @Override public void run() {
-                    boolean ok = UnityCommands.getInstance().applyMoneyDelta(playerName, dbAmount(-centsToDouble(amountCents)));
+                    boolean ok = UnityCommands.getInstance().applyMoneyDelta(playerName, dbAmount(-centsToDouble(amountCents)), "Списание со счёта");
                     if (cb != null) cb.accept(ok);
                 }
             }.runTaskAsynchronously(UnityLauncher.getInstance());
@@ -399,7 +399,7 @@ public class MoneyManager implements Listener {
         final double finalNet   = round2(netCashAmount);
 
         Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
-            boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), dbAmount(-centsToDouble(grossCents)));
+            boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), dbAmount(-centsToDouble(grossCents)), "Снятие наличных в банкомате");
             Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
                 if (!ok) {
                     player.sendMessage(ChatColor.RED + "Не удалось снять деньги со счёта (БД/баланс).");
@@ -453,7 +453,7 @@ public class MoneyManager implements Listener {
         final long feeCents = grossCents - finalNetCents;
 
         Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
-            boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), dbAmount(centsToDouble(finalNetCents)));
+            boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), dbAmount(centsToDouble(finalNetCents)), "Внесение наличных в банкомате");
             Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
                 if (!ok) {
                     // возврат gross наличкой

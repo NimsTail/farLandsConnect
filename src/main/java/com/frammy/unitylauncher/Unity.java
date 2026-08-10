@@ -212,7 +212,7 @@ public class Unity implements CommandExecutor {
                 return true;
             }
 
-            boolean ok = UnityCommands.getInstance().applyMoneyDelta(targetName, amount);
+            boolean ok = UnityCommands.getInstance().applyMoneyDelta(targetName, amount, "Выдача администратором" + (sender.getName() != null ? " (" + sender.getName() + ")" : ""));
             sender.sendMessage(ok
                     ? ChatColor.GREEN + "Начислено " + amount + " игроку " + targetName + "."
                     : ChatColor.RED + "Не удалось — игрок '" + targetName + "' не найден в базе.");

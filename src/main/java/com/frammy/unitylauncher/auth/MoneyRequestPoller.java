@@ -90,12 +90,12 @@ public class MoneyRequestPoller {
         double debit = req.debitAmount() != null ? req.debitAmount() : req.amount();
 
         UnityCommands cmds = UnityCommands.getInstance();
-        if (!cmds.applyMoneyDelta(req.fromUsername(), -debit)) {
+        if (!cmds.applyMoneyDelta(req.fromUsername(), -debit, "Перевод игроку " + req.toUsername())) {
             api.reportMoneyRequestResult(req.id(), false, "insufficient_funds");
             return;
         }
-        if (!cmds.applyMoneyDelta(req.toUsername(), req.amount())) {
-            cmds.applyMoneyDelta(req.fromUsername(), debit); // best-effort refund
+        if (!cmds.applyMoneyDelta(req.toUsername(), req.amount(), "Перевод от " + req.fromUsername())) {
+            cmds.applyMoneyDelta(req.fromUsername(), debit, "Возврат: перевод игроку " + req.toUsername() + " не прошёл"); // best-effort refund
             api.reportMoneyRequestResult(req.id(), false, "recipient_not_found");
             return;
         }
@@ -109,13 +109,15 @@ public class MoneyRequestPoller {
         }
 
         UnityCommands cmds = UnityCommands.getInstance();
-        if (!cmds.applyMoneyDelta(req.fromUsername(), -req.amount())) {
+        String payee = req.toUsername();
+        String payDesc = payee != null ? ("Оплата счёта игроку " + payee) : "Оплата счёта";
+        if (!cmds.applyMoneyDelta(req.fromUsername(), -req.amount(), payDesc)) {
             api.reportMoneyRequestResult(req.id(), false, "insufficient_funds");
             return;
         }
         // Server-issued invoices have no payee — the payer's debit is a pure sink.
-        if (req.toUsername() != null && !cmds.applyMoneyDelta(req.toUsername(), req.amount())) {
-            cmds.applyMoneyDelta(req.fromUsername(), req.amount()); // best-effort refund
+        if (payee != null && !cmds.applyMoneyDelta(payee, req.amount(), "Оплата счёта от " + req.fromUsername())) {
+            cmds.applyMoneyDelta(req.fromUsername(), req.amount(), "Возврат: счёт не оплачен"); // best-effort refund
             api.reportMoneyRequestResult(req.id(), false, "payee_not_found");
             return;
         }
@@ -141,7 +143,7 @@ public class MoneyRequestPoller {
             api.reportMoneyRequestResult(req.id(), false, "missing_username");
             return;
         }
-        boolean credited = UnityCommands.getInstance().applyMoneyDelta(req.toUsername(), req.amount());
+        boolean credited = UnityCommands.getInstance().applyMoneyDelta(req.toUsername(), req.amount(), "Зарплата за игру");
         api.reportMoneyRequestResult(req.id(), credited, credited ? null : "user_not_found");
     }
 }

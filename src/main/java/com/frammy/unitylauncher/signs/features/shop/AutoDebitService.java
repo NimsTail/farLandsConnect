@@ -622,24 +622,25 @@ public final class AutoDebitService {
         boolean ok = cashFirst
                 ? (plugin.moneyManager.spendCash(p, amount) || chargeBank(p, amount))
                 : (chargeBank(p, amount) || plugin.moneyManager.spendCash(p, amount));
-        if (ok) creditSeller(chestLoc, amount);
+        if (ok) creditSeller(chestLoc, amount, p.getName());
         return ok;
     }
 
     private boolean chargeBank(Player p, double amount) {
         Double bal = UnityCommands.getInstance().getBalance(p.getName());
         if (bal == null || bal < amount - 1e-9) return false;
-        plugin.moneyManager.withdraw(p.getName(), amount); // async запись — баланс уже проверен синхронно выше
+        plugin.moneyManager.withdraw(p.getName(), amount); // async запись — баланс уже проверен синхронно выше, note внутри withdraw() общий
         return true;
     }
 
     /** Зеркалит handleShopSourceBuyClick: зачисление владельцу магазина + запись транзакции (applyMoneyDelta сам её шлёт на сайт). */
-    private void creditSeller(Location chestLoc, double amount) {
+    private void creditSeller(Location chestLoc, double amount, String buyerName) {
         if (amount <= 0 || chestLoc == null) return;
         String ownerName = resolveShopOwnerName(chestLoc);
         if (ownerName == null) return;
+        String note = "Продажа в магазине" + (buyerName != null ? " игроку " + buyerName : "");
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            try { UnityCommands.getInstance().applyMoneyDelta(ownerName, amount); }
+            try { UnityCommands.getInstance().applyMoneyDelta(ownerName, amount, note); }
             catch (Throwable ignored) {}
         });
     }

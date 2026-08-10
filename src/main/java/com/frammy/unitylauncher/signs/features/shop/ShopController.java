@@ -809,7 +809,7 @@ public final class ShopController {
             Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
                 boolean deposited = true;
                 try {
-                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price);
+                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price, "Продажа в магазине: " + qty + "x " + mat.name() + " игроку " + p.getName());
                     if (!credited) {
                         Bukkit.getScheduler().runTask(plugin, () -> {
                             mm.giveCash(p, price);
@@ -837,7 +837,7 @@ public final class ShopController {
                     if (!ok) {
                         // товара нет → вернуть наличку + откатить казну best-effort
                         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                            try { UnityCommands.getInstance().applyMoneyDelta(ownerName, -price); }
+                            try { UnityCommands.getInstance().applyMoneyDelta(ownerName, -price, "Возврат: покупка отменена (товара не хватило)"); }
                             catch (Throwable ignored) {}
                         });
                         mm.giveCash(p, price);
@@ -876,7 +876,7 @@ public final class ShopController {
             }
 
             Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                boolean withdrew = UnityCommands.getInstance().applyMoneyDelta(p.getName(), -price);
+                boolean withdrew = UnityCommands.getInstance().applyMoneyDelta(p.getName(), -price, "Покупка в магазине: " + qty + "x " + mat.name());
                 if (!withdrew) {
 
                     // На случай гонки/минуса/протухшего кэша — обновим
@@ -890,9 +890,9 @@ public final class ShopController {
                 // 2) зачисляем в казну страны (async). если не удалось — вернём деньги и выйдем
                 boolean deposited = true;
                 try {
-                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price);
+                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price, "Продажа в магазине: " + qty + "x " + mat.name() + " игроку " + p.getName());
                     if (!credited) {
-                        UnityCommands.getInstance().applyMoneyDelta(p.getName(), price); // вернуть покупателю
+                        UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: продавец недоступен"); // вернуть покупателю
                         Bukkit.getScheduler().runTask(plugin, () ->
                                 p.sendMessage(ChatColor.RED + "Оплата не прошла (владелец недоступен). Деньги возвращены."));
                         return;
@@ -903,7 +903,7 @@ public final class ShopController {
                 }
 
                 if (!deposited) {
-                    UnityCommands.getInstance().applyMoneyDelta(p.getName(), price); // best-effort refund
+                    UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: ошибка казны"); // best-effort refund
                     Bukkit.getScheduler().runTask(plugin, () ->
                             p.sendMessage(ChatColor.RED + "Оплата не прошла (казна). Деньги возвращены."));
                     return;
@@ -915,9 +915,9 @@ public final class ShopController {
                     if (!ok) {
                         // товара нет → возврат денег (async) + сообщение (main)
                         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                            UnityCommands.getInstance().applyMoneyDelta(p.getName(), price);
+                            UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: товара не хватило");
                             try {
-                                UnityCommands.getInstance().applyMoneyDelta(ownerName, -price);
+                                UnityCommands.getInstance().applyMoneyDelta(ownerName, -price, "Возврат: покупка отменена (товара не хватило)");
                             } catch (Exception ignored) {}
                         });
 
@@ -1002,7 +1002,7 @@ public final class ShopController {
             Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
                 boolean deposited = true;
                 try {
-                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price);
+                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price, "Продажа в магазине: " + qty + "x " + mat.name() + " игроку " + p.getName());
                     if (!credited) {
                         Bukkit.getScheduler().runTask(plugin, () -> {
                             mm.giveCash(p, price);
@@ -1027,7 +1027,7 @@ public final class ShopController {
                     boolean ok = dispenseFromChestAtomic(chestLoc, mat, qty, p);
                     if (!ok) {
                         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                            try { UnityCommands.getInstance().applyMoneyDelta(ownerName, -price); }
+                            try { UnityCommands.getInstance().applyMoneyDelta(ownerName, -price, "Возврат: покупка отменена (товара не хватило)"); }
                             catch (Throwable ignored) {}
                         });
                         mm.giveCash(p, price);
@@ -1061,7 +1061,7 @@ public final class ShopController {
             }
 
             Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                boolean withdrew = UnityCommands.getInstance().applyMoneyDelta(p.getName(), -price);
+                boolean withdrew = UnityCommands.getInstance().applyMoneyDelta(p.getName(), -price, "Покупка в магазине: " + qty + "x " + mat.name());
                 if (!withdrew) {
                     Bukkit.getScheduler().runTask(plugin, () ->
                             p.sendMessage(ChatColor.RED + "Не удалось списать деньги (БД)."));
@@ -1070,10 +1070,10 @@ public final class ShopController {
 
                 boolean deposited = true;
                 try {
-                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price);
+                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price, "Продажа в магазине: " + qty + "x " + mat.name() + " игроку " + p.getName());
                     if (!credited) {
                         // вернуть на счёт игрока, потому что платили со счёта
-                        UnityCommands.getInstance().applyMoneyDelta(p.getName(), price);
+                        UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: продавец недоступен");
                         Bukkit.getScheduler().runTask(plugin, () ->
                                 p.sendMessage(ChatColor.RED + "Оплата не прошла (владелец недоступен). Деньги возвращены на счёт."));
                         return;
@@ -1084,7 +1084,7 @@ public final class ShopController {
                 }
 
                 if (!deposited) {
-                    UnityCommands.getInstance().applyMoneyDelta(p.getName(), price);
+                    UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: ошибка казны");
                     Bukkit.getScheduler().runTask(plugin, () ->
                             p.sendMessage(ChatColor.RED + "Оплата не прошла (казна). Деньги возвращены на счёт."));
                     return;
@@ -1094,8 +1094,8 @@ public final class ShopController {
                     boolean ok = dispenseFromChestAtomic(chestLoc, mat, qty, p);
                     if (!ok) {
                         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                            UnityCommands.getInstance().applyMoneyDelta(p.getName(), price);
-                            try { UnityCommands.getInstance().applyMoneyDelta(ownerName, -price); }
+                            UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: товара не хватило");
+                            try { UnityCommands.getInstance().applyMoneyDelta(ownerName, -price, "Возврат: покупка отменена (товара не хватило)"); }
                             catch (Throwable ignored) {}
                         });
 

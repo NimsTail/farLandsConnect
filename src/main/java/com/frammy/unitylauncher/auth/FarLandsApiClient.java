@@ -68,10 +68,26 @@ public class FarLandsApiClient {
      * amount must be positive; direction says which way it moved.
      */
     public void transaction(String username, double amount, boolean isDeposit) {
+        transaction(username, amount, isDeposit, null);
+    }
+
+    /**
+     * Same as above, plus a human-readable reason — the site's endpoint
+     * (routes/plugin.ts, /plugin/users/:username/transactions) already
+     * accepted an optional `note` in the body long before this plugin ever
+     * sent one; every in-game-originated balance change (salary, ATM ops,
+     * transfers, shop sales, admin adjustments...) showed up on the site as
+     * a bare "Пополнение (игра)"/"Списание (игра)" with nothing else to go
+     * on. Callers should pass something short and specific — see
+     * UnityCommands.applyMoneyDelta(String, double, String) for the usual
+     * entry point.
+     */
+    public void transaction(String username, double amount, boolean isDeposit, String note) {
         if (!(amount > 0)) return;
         JsonObject body = new JsonObject();
         body.addProperty("amount", amount);
         body.addProperty("direction", isDeposit ? "deposit" : "withdrawal");
+        if (note != null && !note.isBlank()) body.addProperty("note", note);
         send("POST", "/plugin/users/" + encode(username) + "/transactions", body);
     }
 

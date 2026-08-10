@@ -622,6 +622,17 @@ public class UnityCommands {
     }
 
     public boolean applyMoneyDelta(@NotNull String playerName, double delta) {
+        return applyMoneyDelta(playerName, delta, null);
+    }
+
+    /**
+     * Same as {@link #applyMoneyDelta(String, double)}, plus a human-readable
+     * reason mirrored to the site's transaction ledger (kind stays
+     * plugin_deposit/plugin_withdrawal, but the note now lets the site show
+     * something better than a bare "Пополнение (игра)"). Pass null when
+     * there's genuinely nothing more specific to say.
+     */
+    public boolean applyMoneyDelta(@NotNull String playerName, double delta, String note) {
         if (playerName.isBlank()) return false;
         if (Math.abs(delta) < 0.0000001) return true;
 
@@ -660,7 +671,7 @@ public class UnityCommands {
                 // mirror to the site's /bank transaction history (best-effort, see FarLandsApiClient)
                 UnityLauncher ul = UnityLauncher.getInstance();
                 if (ul != null && ul.getFarLandsApi() != null) {
-                    ul.getFarLandsApi().transaction(playerName, Math.abs(delta), delta > 0);
+                    ul.getFarLandsApi().transaction(playerName, Math.abs(delta), delta > 0, note);
                 }
 
                 return true;
