@@ -131,6 +131,38 @@ public final class ShopController {
             });
         }, CHEST_LOCK_CLEAN_PERIOD_TICKS, CHEST_LOCK_CLEAN_PERIOD_TICKS);
 
+        startOverviewCycler();
+    }
+
+    // ===== SHOP_LIST overview auto-cycle =====
+
+    // offset для SignRenderer.updateSignView по каждой табличке-списку —
+    // раньше он всегда звался с offset=0 (и при первой сборке, и при
+    // возврате из детального просмотра), из-за чего список НИКОГДА не
+    // листался сам: с более чем 3 товарами дальше третьего было не
+    // добраться никак. Крутим сами, как обычную бегущую строку.
+    private final Map<Location, Integer> overviewOffset = new ConcurrentHashMap<>();
+    private static final long OVERVIEW_CYCLE_TICKS = 30L; // ~1.5с
+
+    private void startOverviewCycler() {
+        Bukkit.getScheduler().runTaskTimer(plugin, this::tickOverviewCycle, OVERVIEW_CYCLE_TICKS, OVERVIEW_CYCLE_TICKS);
+    }
+
+    private void tickOverviewCycle() {
+        for (var entry : store.signs().entrySet()) {
+            Location loc = entry.getKey();
+            SignVariables sv = entry.getValue();
+            if (sv == null || sv.getSignCategory() != SignCategory.SHOP_LIST) continue;
+            if (viewingDetailAt.containsValue(loc)) continue; // кто-то сейчас смотрит товар детально — не мешаем
+
+            List<String> items = store.signPages().get(loc);
+            if (items == null || items.size() <= 3) continue; // и так целиком влезает — листать нечего
+
+            if (!(loc.getBlock().getState() instanceof Sign sign)) continue;
+
+            int offset = overviewOffset.merge(loc, 1, Integer::sum);
+            renderer.updateSignView(sign, items, offset);
+        }
     }
 
     private static final Pattern INT_ANY = Pattern.compile("-?\\d+");

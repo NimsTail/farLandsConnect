@@ -177,12 +177,13 @@ public final class AutoDebitService {
             return;
         }
 
-        // ---- Шифт-клик по СВОЕМУ инвентарю (кладёт В сундук) — только возврат уже взятого ----
+        // ---- Шифт-клик по СВОЕМУ инвентарю (кладёт В сундук) — только возврат уже взятого, и не больше, чем реально должен ----
         if (!clickedChest && (click == ClickType.SHIFT_LEFT || click == ClickType.SHIFT_RIGHT)
                 && clicked != null && !clicked.getType().isAir()) {
-            if (!isLegitReturn(id, chestLoc, clicked.getType())) {
+            if (!canReturn(id, chestLoc, clicked.getType(), clicked.getAmount())) {
                 e.setCancelled(true);
-                p.sendMessage(ChatColor.RED + "В этот сундук можно только вернуть товар, который ты только что взял оттуда.");
+                p.sendMessage(ChatColor.RED + "В этот сундук можно вернуть только то, что реально должен: "
+                        + trackedAmount(id, clicked.getType()) + "x.");
                 return;
             }
             scheduleReconcile(p, chestLoc);
@@ -197,11 +198,24 @@ public final class AutoDebitService {
             return;
         }
 
-        // ---- Клик, кладущий курсор В сундук (любой слот сундука, курсор непуст) — только возврат ----
+        // ---- Q / Ctrl+Q по товару В СУНДУКЕ: выбрасывает его на землю, минуя
+        // курсор — покупка+бросок одним действием, платно и с клэмпом ----
+        if (clickedChest && (click == ClickType.DROP || click == ClickType.CONTROL_DROP)
+                && clicked != null && !clicked.getType().isAir()) {
+            handleDropFromChest(e, p, chestLoc, topInv, clicked.getType(), pricePerUnit);
+            return;
+        }
+
+        // ---- Клик, кладущий курсор В сундук (любой слот сундука, курсор непуст) — только возврат, и не больше, чем реально должен ----
         if (clickedChest && cursor != null && !cursor.getType().isAir()) {
-            if (!isLegitReturn(id, chestLoc, cursor.getType())) {
+            // ЛКМ кладёт весь курсор, ПКМ — обычно 1 шт (или доливает существующий
+            // слот) — берём точную границу запроса, а не весь курсор с запасом,
+            // чтобы не блокировать легитимный частичный возврат по ПКМ.
+            int requesting = (click == ClickType.RIGHT) ? 1 : cursor.getAmount();
+            if (!canReturn(id, chestLoc, cursor.getType(), requesting)) {
                 e.setCancelled(true);
-                p.sendMessage(ChatColor.RED + "В этот сундук можно только вернуть товар, который ты только что взял оттуда.");
+                p.sendMessage(ChatColor.RED + "В этот сундук можно вернуть только то, что реально должен: "
+                        + trackedAmount(id, cursor.getType()) + "x.");
                 return;
             }
             scheduleReconcile(p, chestLoc);
@@ -213,6 +227,32 @@ public final class AutoDebitService {
         if (totalUnpaid(id) > 0 && chestLoc.equals(unpaidChest.get(id))) {
             scheduleReconcile(p, chestLoc);
         }
+    }
+
+    /**
+     * Q/Ctrl+Q на слот в сундуке уходит через InventoryClickEvent (ClickType
+     * DROP/CONTROL_DROP), а не через PlayerDropItemEvent — тот фиксирует
+     * дропы только когда никакой инвентарь не открыт. Без этого случая товар
+     * уходил бы на землю прямо из сундука бесплатно, минуя весь учёт.
+     */
+    private void handleDropFromChest(InventoryClickEvent e, Player p, Location chestLoc, Inventory topInv, Material material, double pricePerUnit) {
+        e.setCancelled(true);
+        ItemStack clicked = e.getCurrentItem();
+        int wouldTake = (e.getClick() == ClickType.CONTROL_DROP) ? clicked.getAmount() : 1;
+        int affordable = maxAffordable(p, pricePerUnit);
+        int take = Math.min(wouldTake, affordable);
+        if (take <= 0) {
+            p.sendMessage(ChatColor.RED + "Недостаточно средств.");
+            return;
+        }
+        double cost = round2(take * pricePerUnit);
+        if (!charge(p, cost, priorityCache.getOrDefault(p.getUniqueId(), "CASH"), chestLoc)) {
+            p.sendMessage(ChatColor.RED + "Недостаточно средств.");
+            return;
+        }
+        removeMaterialFromChest(topInv, material, take);
+        p.getWorld().dropItemNaturally(p.getLocation(), new ItemStack(material, take));
+        p.sendMessage(ChatColor.GRAY + "Куплено и выброшено: " + ChatColor.YELLOW + take + "x" + ChatColor.GRAY + " за " + ChatColor.GREEN + cost + " Ⓕ");
     }
 
     private void handleShiftFromChest(InventoryClickEvent e, Player p, Location chestLoc, Inventory topInv, Material material, double pricePerUnit) {
@@ -227,7 +267,7 @@ public final class AutoDebitService {
             return;
         }
         double cost = round2(take * pricePerUnit);
-        if (!charge(p, cost, priorityCache.getOrDefault(p.getUniqueId(), "CASH"))) {
+        if (!charge(p, cost, priorityCache.getOrDefault(p.getUniqueId(), "CASH"), chestLoc)) {
             p.sendMessage(ChatColor.RED + "Недостаточно средств.");
             return;
         }
@@ -354,9 +394,10 @@ public final class AutoDebitService {
 
         if (intoChest == 0 && intoInv == 0) return;
 
-        if (intoChest > 0 && !isLegitReturn(id, chestLoc, dragMat)) {
+        if (intoChest > 0 && !canReturn(id, chestLoc, dragMat, intoChest)) {
             e.setCancelled(true);
-            p.sendMessage(ChatColor.RED + "В этот сундук можно только вернуть товар, который ты только что взял оттуда.");
+            p.sendMessage(ChatColor.RED + "В этот сундук можно вернуть только то, что реально должен: "
+                    + trackedAmount(id, dragMat) + "x.");
             return;
         }
 
@@ -369,7 +410,7 @@ public final class AutoDebitService {
             }
             double cost = round2(intoInv * pricePerUnit);
             String priority = priorityCache.getOrDefault(id, "CASH");
-            if (!charge(p, cost, priority)) {
+            if (!charge(p, cost, priority, chestLoc)) {
                 e.setCancelled(true);
                 p.sendMessage(ChatColor.RED + "Недостаточно средств.");
                 return;
@@ -400,11 +441,12 @@ public final class AutoDebitService {
         if (chargeable <= 0) return;
 
         Double ppu = unpaidPricePerUnit.get(id);
-        if (ppu == null) return;
+        Location chestLoc = unpaidChest.get(id);
+        if (ppu == null || chestLoc == null) return;
         double cost = round2(chargeable * ppu);
         String priority = priorityCache.getOrDefault(id, "CASH");
 
-        if (!charge(p, cost, priority)) {
+        if (!charge(p, cost, priority, chestLoc)) {
             p.sendMessage(ChatColor.RED + "Не удалось списать за выброшенный товар (" + chargeable + "x) — недостаточно средств.");
         } else {
             p.sendMessage(ChatColor.GRAY + "Списано за выброшенный товар: " + ChatColor.YELLOW + chargeable + "x"
@@ -462,7 +504,7 @@ public final class AutoDebitService {
 
             double cost = round2(committed * ppu);
             String priority = priorityCache.getOrDefault(id, "CASH");
-            if (charge(p, cost, priority)) {
+            if (charge(p, cost, priority, chestLoc)) {
                 p.sendMessage(ChatColor.GRAY + "Куплено: " + ChatColor.YELLOW + committed + "x" + ChatColor.GRAY + " за " + ChatColor.GREEN + cost + " Ⓕ");
             } else {
                 p.sendMessage(ChatColor.RED + "Не удалось списать за товар (" + committed + "x) — недостаточно средств.");
@@ -481,14 +523,15 @@ public final class AutoDebitService {
 
         Map<Material, Integer> tracked = unpaidByMaterial.get(id);
         Double ppu = unpaidPricePerUnit.get(id);
-        if (tracked == null || tracked.isEmpty() || ppu == null) { clearTracking(id); return; }
+        Location chestLoc = unpaidChest.get(id);
+        if (tracked == null || tracked.isEmpty() || ppu == null || chestLoc == null) { clearTracking(id); return; }
 
         String priority = priorityCache.getOrDefault(id, "CASH");
         for (var entry : Map.copyOf(tracked).entrySet()) {
             int unpaid = entry.getValue();
             if (unpaid <= 0) continue;
             double cost = round2(unpaid * ppu);
-            boolean ok = charge(p, cost, priority);
+            boolean ok = charge(p, cost, priority, chestLoc);
             if (p.isOnline()) {
                 if (ok) {
                     p.sendMessage(ChatColor.GRAY + "Списано за товар при закрытии: " + ChatColor.YELLOW + unpaid + "x"
@@ -538,10 +581,23 @@ public final class AutoDebitService {
     }
 
     /** true если этот материал у игрока сейчас числится неоплаченным взятым из этого же сундука — только такое разрешаем класть обратно. */
-    private boolean isLegitReturn(UUID id, Location chestLoc, Material material) {
+    /**
+     * true только если amount (не просто "хоть сколько-то") этого материала
+     * реально числится неоплаченным взятым игроком из этого же сундука.
+     * Без учёта точного количества игрок мог собрать двойным кликом стак из
+     * "своего + из сундука" и одним действием сдать ВЕСЬ стак обратно —
+     * зачлось бы как возврат, и его собственные (уже принадлежавшие ему)
+     * единицы молча оседали бы в чужом сундуке без всякой компенсации.
+     */
+    private boolean canReturn(UUID id, Location chestLoc, Material material, int amount) {
+        if (amount <= 0) return true;
         if (!chestLoc.equals(unpaidChest.get(id))) return false;
+        return trackedAmount(id, material) >= amount;
+    }
+
+    private int trackedAmount(UUID id, Material material) {
         Map<Material, Integer> tracked = unpaidByMaterial.get(id);
-        return tracked != null && tracked.getOrDefault(material, 0) > 0;
+        return tracked != null ? tracked.getOrDefault(material, 0) : 0;
     }
 
     // ===== payment =====
@@ -554,16 +610,20 @@ public final class AutoDebitService {
         return (int) Math.floor(total / pricePerUnit + 1e-9);
     }
 
-    private boolean charge(Player p, double amount, String priority) {
+    /**
+     * Списывает у покупателя И зачисляет продавцу — раньше зачисления не
+     * было вовсе (в отличие от покупки через табличку, где applyMoneyDelta
+     * вызывается на обе стороны сделки): деньги покупателя просто исчезали,
+     * владелец магазина ничего не получал.
+     */
+    private boolean charge(Player p, double amount, String priority, Location chestLoc) {
         if (amount <= 0) return true;
         boolean cashFirst = !"BANK".equalsIgnoreCase(priority);
-        if (cashFirst) {
-            if (plugin.moneyManager.spendCash(p, amount)) return true;
-            return chargeBank(p, amount);
-        } else {
-            if (chargeBank(p, amount)) return true;
-            return plugin.moneyManager.spendCash(p, amount);
-        }
+        boolean ok = cashFirst
+                ? (plugin.moneyManager.spendCash(p, amount) || chargeBank(p, amount))
+                : (chargeBank(p, amount) || plugin.moneyManager.spendCash(p, amount));
+        if (ok) creditSeller(chestLoc, amount);
+        return ok;
     }
 
     private boolean chargeBank(Player p, double amount) {
@@ -571,6 +631,41 @@ public final class AutoDebitService {
         if (bal == null || bal < amount - 1e-9) return false;
         plugin.moneyManager.withdraw(p.getName(), amount); // async запись — баланс уже проверен синхронно выше
         return true;
+    }
+
+    /** Зеркалит handleShopSourceBuyClick: зачисление владельцу магазина + запись транзакции (applyMoneyDelta сам её шлёт на сайт). */
+    private void creditSeller(Location chestLoc, double amount) {
+        if (amount <= 0 || chestLoc == null) return;
+        String ownerName = resolveShopOwnerName(chestLoc);
+        if (ownerName == null) return;
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            try { UnityCommands.getInstance().applyMoneyDelta(ownerName, amount); }
+            catch (Throwable ignored) {}
+        });
+    }
+
+    private String resolveShopOwnerName(Location chestLoc) {
+        Location sourceLoc = store.sourceSignByContainer(chestLoc);
+        if (sourceLoc == null) return null;
+        SignVariables sv = store.get(sourceLoc);
+        if (sv == null) return null;
+
+        String owner = sv.getOwnerName();
+        if (owner != null && !owner.isBlank()) return owner;
+
+        try {
+            Object zone = zoneManager.getShopZoneAt(chestLoc);
+            if (zone != null) {
+                for (String mName : new String[]{"getOwnerName", "getOwner", "ownerName", "owner"}) {
+                    try {
+                        var m = zone.getClass().getMethod(mName);
+                        Object v = m.invoke(zone);
+                        if (v instanceof String s && !s.isBlank()) return s;
+                    } catch (NoSuchMethodException ignored) {}
+                }
+            }
+        } catch (Throwable ignored) {}
+        return null;
     }
 
     // ===== inventory/material helpers =====
