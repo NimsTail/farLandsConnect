@@ -19,8 +19,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-import static com.frammy.unitylauncher.UnityCommands.calculateSurfaceArea;
-
 public final class ZoneBlueMapService {
 
     private final BlueMapIntegration blueMapIntegration;
@@ -31,69 +29,91 @@ public final class ZoneBlueMapService {
         this.zoneLimits = zoneLimits;
     }
 
-    /** Вставить/обновить маркер зоны в BlueMap. */
+    /** ID маркера для фигуры зоны: основная (индекс 0) сохраняет "голый" markerID для полной обратной совместимости. */
+    private static String markerIdFor(ZoneInfo z, int shapeIndex) {
+        return shapeIndex == 0 ? z.getMarkerID() : (z.getMarkerID() + "_" + shapeIndex);
+    }
+
+    /** Вставить/обновить маркеры зоны в BlueMap — по одному ExtrudeMarker на каждую фигуру (мульти-полигон). */
     public void upsert(ZoneInfo z, org.bukkit.Color bukkitColor) {
         if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
-        if (z == null || z.getCorners() == null || z.getCorners().isEmpty()) return;
-        if (z.getCorners().getFirst().getWorld() == null) return;
+        if (z == null) return;
+        List<List<Location>> shapes = z.getShapes();
+        if (shapes.isEmpty() || shapes.get(0).isEmpty()) return;
+        if (shapes.get(0).getFirst().getWorld() == null) return;
 
         BlueMapAPI.getInstance()
-                .flatMap(api -> api.getMap(z.getCorners().getFirst().getWorld().getName()))
+                .flatMap(api -> api.getMap(shapes.get(0).getFirst().getWorld().getName()))
                 .ifPresent(map -> {
 
                     String setId = setId(z.getType());
                     MarkerSet set = map.getMarkerSets().computeIfAbsent(setId, MarkerSet::new);
                     set.setLabel("Zones: " + setLabel(z.getType(), zoneLimits));
 
-                    Shape shape = shapeFromCorners(z.getCorners());
-                    if (shape == null) return;
-
-                    Marker existing = set.getMarkers().get(z.getMarkerID());
-
                     boolean parent = (z.getType() == ZoneType.COUNTRY || z.getType() == ZoneType.COLONY);
-
                     org.bukkit.Color base = (bukkitColor != null ? bukkitColor : org.bukkit.Color.fromRGB(255, 0, 0));
-
                     Color fill = toBlueMapColor(base, parent ? 0.0f : 0.35f);
                     Color line = toBlueMapColor(base, 1.0f);
-
                     float minY = -64f;
                     float maxY = 255f;
+                    String detail = detailHtml(z);
+                    String label = shapes.size() > 1 ? (z.getName() + " (частей: " + shapes.size() + ")") : z.getName();
 
-                    if (existing instanceof ExtrudeMarker em) {
-                        em.setLabel(z.getName());
-                        em.setShape(shape, minY, maxY);
-                        em.setFillColor(fill);
-                        em.setLineColor(line);
-                        em.setDetail(detailHtml(z));
-                    } else {
-                        ExtrudeMarker built = ExtrudeMarker.builder()
-                                .label(z.getName())
-                                .shape(shape, minY, maxY)
-                                .detail(detailHtml(z))
-                                .build();
-                        built.setFillColor(fill);
-                        built.setLineColor(line);
-                        set.getMarkers().put(z.getMarkerID(), built);
+                    for (int i = 0; i < shapes.size(); i++) {
+                        List<Location> corners = shapes.get(i);
+                        if (corners == null || corners.size() < 3 || corners.getFirst().getWorld() == null) continue;
+
+                        Shape shape = shapeFromCorners(corners);
+                        if (shape == null) continue;
+
+                        String markerId = markerIdFor(z, i);
+                        Marker existing = set.getMarkers().get(markerId);
+
+                        if (existing instanceof ExtrudeMarker em) {
+                            em.setLabel(label);
+                            em.setShape(shape, minY, maxY);
+                            em.setFillColor(fill);
+                            em.setLineColor(line);
+                            em.setDetail(detail);
+                        } else {
+                            ExtrudeMarker built = ExtrudeMarker.builder()
+                                    .label(label)
+                                    .shape(shape, minY, maxY)
+                                    .detail(detail)
+                                    .build();
+                            built.setFillColor(fill);
+                            built.setLineColor(line);
+                            set.getMarkers().put(markerId, built);
+                        }
                     }
+
+                    // подчистить "хвостовые" маркеры фигур, которых больше нет (зона стала меньше фигур, чем раньше)
+                    int idx = shapes.size();
+                    while (set.getMarkers().remove(markerIdFor(z, idx)) != null) idx++;
 
                     if (blueMapIntegration != null) blueMapIntegration.saveBlueMapMarkers(setId);
                 });
     }
 
-    /** Удалить маркер зоны (и marker set, если он пуст). */
+    /** Удалить ВСЕ маркеры зоны (все фигуры), и marker set, если он опустел. */
     public void remove(ZoneInfo z) {
         if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
-        if (z == null || z.getCorners() == null || z.getCorners().isEmpty()) return;
-        if (z.getCorners().getFirst().getWorld() == null) return;
+        if (z == null) return;
+        List<List<Location>> shapes = z.getShapes();
+        if (shapes.isEmpty() || shapes.get(0).isEmpty()) return;
+        if (shapes.get(0).getFirst().getWorld() == null) return;
 
         BlueMapAPI.getInstance()
-                .flatMap(api -> api.getMap(z.getCorners().getFirst().getWorld().getName()))
+                .flatMap(api -> api.getMap(shapes.get(0).getFirst().getWorld().getName()))
                 .ifPresent(map -> {
                     String setId = setId(z.getType());
                     MarkerSet set = map.getMarkerSets().get(setId);
                     if (set != null) {
-                        set.getMarkers().remove(z.getMarkerID());
+                        // удаляем основную + все возможные доп.-фигурные маркеры (индекс не ограничен shapes.size(),
+                        // т.к. это могло быть вызвано ПОСЛЕ уменьшения кол-ва фигур)
+                        set.getMarkers().remove(markerIdFor(z, 0));
+                        int idx = 1;
+                        while (set.getMarkers().remove(markerIdFor(z, idx)) != null) idx++;
                         if (set.getMarkers().isEmpty()) {
                             map.getMarkerSets().remove(setId);
                         }
@@ -139,12 +159,15 @@ public final class ZoneBlueMapService {
         String country = z.getCountryName() != null ? z.getCountryName() : "—";
         ZoneTypeData ztd = (zoneLimits != null) ? zoneLimits.get(z.getType()) : null;
         String typeName = (ztd != null ? ztd.displayName() : z.getType().name());
-        double area = calculateSurfaceArea(z.getCorners());
+        double area = com.frammy.unitylauncher.zones.geom.ZoneGeometry.totalArea(z.getShapes());
+        String areaLabel = z.getShapeCount() > 1
+                ? String.format(Locale.US, "%.2f", area) + " блоков² (" + z.getShapeCount() + " фигур)"
+                : String.format(Locale.US, "%.2f", area) + " блоков²";
 
         return "<b>" + typeName + " «" + z.getName() + "»</b>"
                 + "<br><br><b>Владелец:</b> " + owner
                 + "<br><b>Страна:</b> " + country
-                + "<br><b>Площадь:</b> " + String.format(Locale.US, "%.2f", area) + " блоков²";
+                + "<br><b>Площадь:</b> " + areaLabel;
     }
 
     private static Color toBlueMapColor(org.bukkit.Color c, float a) {

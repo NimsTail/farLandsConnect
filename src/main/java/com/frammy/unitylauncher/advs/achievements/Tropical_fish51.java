@@ -17,7 +17,7 @@ public class Tropical_fish51 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 62;
 
 @Override
 protected int getFrameId() {

@@ -10,6 +10,8 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.block.BlockRedstoneEvent;
 import org.bukkit.event.entity.CreatureSpawnEvent;
 import org.bukkit.event.entity.ItemSpawnEvent;
@@ -53,6 +55,20 @@ public class ChunkActivityEventsListener implements Listener {
     private static Chunk chunkOf(Location loc) {
         if (loc == null || loc.getWorld() == null) return null;
         return loc.getChunk();
+    }
+
+    /* ===================== BLOCKS (раньше нигде не считались!) ===================== */
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
+    public void onBlockPlace(BlockPlaceEvent e) {
+        Chunk ch = e.getBlock().getChunk();
+        tracker.incBlocksPlaced(ch, e.getBlock().getType(), 1);
+    }
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
+    public void onBlockBreak(BlockBreakEvent e) {
+        Chunk ch = e.getBlock().getChunk();
+        tracker.incBlocksBroken(ch, e.getBlock().getType(), 1);
     }
 
     /* ===================== ITEM DROPS ===================== */

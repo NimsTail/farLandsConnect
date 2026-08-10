@@ -16,12 +16,15 @@ public class Sculk68 extends FrameRewardAdvancement  {
             "sculk68"
     );
 
-    
-private static final int FRAME_ID = 8;
+    // Grants two distinct frames (was "×2 of the same one" — frames aren't
+    // stackable/counted on the site, so that would've been a no-op the
+    // second time; split into Глубинный Сланец + Укреплённый Глубинный
+    // Сланец per infra/frames-catalog.md §6).
+    private static final int[] FRAME_IDS = { 58, 64 };
 
 @Override
-protected int getFrameId() {
-    return FRAME_ID;
+protected int[] getFrameIds() {
+    return FRAME_IDS;
 }public Sculk68(Advancement parent) {
         super(
                 KEY.getKey(),
@@ -36,7 +39,7 @@ protected int getFrameId() {
                         "",
                         "Уничтожь 1000 скалковых блоков",
                         "",
-                        "Награда: 2 Рамки §bУкреплённый Глубинный Сланец"
+                        "Награда: рамки §bГлубинный Сланец §fи §bУкреплённый Глубинный Сланец"
                 ),
                 parent,
                 1

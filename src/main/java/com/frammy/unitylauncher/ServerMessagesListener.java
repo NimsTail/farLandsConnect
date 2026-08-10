@@ -4,6 +4,8 @@ import io.papermc.paper.advancement.AdvancementDisplay;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
+import org.bukkit.GameRule;
+import org.bukkit.World;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -14,6 +16,7 @@ import org.bukkit.event.player.PlayerAdvancementDoneEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.weather.ThunderChangeEvent;
+import org.bukkit.event.world.WorldLoadEvent;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -155,6 +158,15 @@ public final class ServerMessagesListener implements Listener {
 
         plugin.saveConfig();
 
+        // Vanilla itself also broadcasts "%player% has made the advancement
+        // [%title%]" to chat whenever announceAdvancements is on (default)
+        // — for genuine vanilla advancements (not our custom
+        // UltimateAdvancementAPI ones, which don't fire this gamerule's
+        // broadcast at all) that meant BOTH vanilla's own line and ours
+        // below showed up. Our line is the only one meant to exist, so mute
+        // vanilla's when ours is doing the announcing.
+        syncAnnounceAdvancementsGameRule();
+
         if (DEBUG) {
             plugin.getLogger().info("[UL] ServerMessagesListener config reloaded:");
             plugin.getLogger().info("  join       enabled=" + JOIN_ENABLED      + " templates=" + JOIN_TEMPLATES.size());
@@ -165,6 +177,19 @@ public final class ServerMessagesListener implements Listener {
             plugin.getLogger().info("  thunder    enabled=" + THUNDER_ENABLED   + " templates=" + THUNDER_TEMPLATES.size()
                     + " chance=" + THUNDER_CHANCE);
         }
+    }
+
+    private static void syncAnnounceAdvancementsGameRule() {
+        for (World w : Bukkit.getWorlds()) {
+            w.setGameRule(GameRule.ANNOUNCE_ADVANCEMENTS, !ADV_ENABLED);
+        }
+    }
+
+    // A world that finishes loading after reloadMessages() already ran
+    // (e.g. a dimension mounted later) wouldn't otherwise pick up the rule.
+    @EventHandler
+    public void onWorldLoad(WorldLoadEvent event) {
+        event.getWorld().setGameRule(GameRule.ANNOUNCE_ADVANCEMENTS, !ADV_ENABLED);
     }
 
     private static boolean getBooleanWithDefault(FileConfiguration c, String path) {

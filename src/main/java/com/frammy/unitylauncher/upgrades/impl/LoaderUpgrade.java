@@ -142,7 +142,7 @@ public final class LoaderUpgrade extends BaseUpgrade implements Listener {
         if (ips100 <= 0) return;
 
         // country owner (deep) + canonicalize
-        String country = UpgradeCondition.normalizeCountry(UpgradeCondition.locationCountryOwnerDeep(loc));
+        String country = UpgradeCondition.locationCountryOwnerDeep(loc);
         if (country == null || country.isBlank()) return;
 
         // permission level

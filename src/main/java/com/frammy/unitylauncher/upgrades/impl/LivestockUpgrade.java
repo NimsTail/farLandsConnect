@@ -39,7 +39,7 @@ public final class LivestockUpgrade extends BaseUpgrade implements Listener {
         if (!UpgradeCondition.isInsideZoneTypeRaw(loc, ZoneType.GREENHOUSE)) return;
 
         // Страна-владелец берётся "глубоко" (COUNTRY сначала, потом COLONY), чтобы greenhouse мог быть внутри.
-        String country = UpgradeCondition.normalizeCountry(UpgradeCondition.locationCountryOwner(loc));
+        String country = UpgradeCondition.locationCountryOwner(loc);
         if (country == null || country.isBlank()) return;
 
         var cfg = C().country().livestock();

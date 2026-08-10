@@ -17,7 +17,7 @@ public class Shield66 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 59;
 
 @Override
 protected int getFrameId() {

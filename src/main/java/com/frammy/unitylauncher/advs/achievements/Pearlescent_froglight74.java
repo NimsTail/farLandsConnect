@@ -17,7 +17,7 @@ public class Pearlescent_froglight74 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 56;
 
 @Override
 protected int getFrameId() {

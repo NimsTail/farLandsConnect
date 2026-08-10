@@ -187,7 +187,7 @@ public class UnityCommands {
             return;
         }
 
-        // строим: UPDATE Users SET col = JSON_SET(JSON_REMOVE(col,'$.a','$.b'), '$.c', CAST(? AS JSON), '$.d', CAST(? AS JSON)) WHERE Name=?
+        // строим: UPDATE Users SET col = JSON_SET(JSON_REMOVE(col,'$.a','$.b'), '$.c', JSON_EXTRACT(?, '$'), '$.d', JSON_EXTRACT(?, '$')) WHERE Name=?
         java.util.List<String> removePaths = new java.util.ArrayList<>();
         java.util.List<String> setPaths = new java.util.ArrayList<>();
         java.util.List<Object> setValues = new java.util.ArrayList<>();
@@ -203,7 +203,7 @@ public class UnityCommands {
                 removePaths.add(path);
             } else {
                 setPaths.add(path);
-                // значение как JSON-строка, которую MySQL распарсит через CAST(? AS JSON)
+                // значение как JSON-строка, которую распарсит JSON_EXTRACT(?, '$')
                 setValues.add(gson.toJsonTree(val).toString());
             }
         }
@@ -243,7 +243,11 @@ public class UnityCommands {
             }
 
             sql.append("UPDATE Users SET ").append(column).append(" = JSON_SET(").append(baseExpr);
-            sql.repeat(", ?, CAST(? AS JSON)", setPaths.size());
+            // MariaDB не поддерживает CAST(x AS JSON) (нет типа JSON — только
+            // LONGTEXT + CHECK(json_valid())). JSON_EXTRACT(?, '$') — рабочий
+            // аналог: парсит JSON-текст параметра и отдаёт его JSON_SET уже
+            // правильно типизированным значением, без лишнего кавычения.
+            sql.repeat(", ?, JSON_EXTRACT(?, '$')", setPaths.size());
             sql.append(") WHERE Name = ?");
         } else {
             // только удаления
@@ -653,6 +657,12 @@ public class UnityCommands {
                     upsertCacheAfterUpdate(playerName, "GeneralData", newGen);
                 }
 
+                // mirror to the site's /bank transaction history (best-effort, see FarLandsApiClient)
+                UnityLauncher ul = UnityLauncher.getInstance();
+                if (ul != null && ul.getFarLandsApi() != null) {
+                    ul.getFarLandsApi().transaction(playerName, Math.abs(delta), delta > 0);
+                }
+
                 return true;
 
             } catch (Exception e) {
@@ -671,6 +681,48 @@ public class UnityCommands {
     public boolean addMoneyToPlayer(@NotNull String playerName, double delta) {
         if (!(delta > 0.0)) return false;
         return applyMoneyDelta(playerName, delta);
+    }
+
+    /**
+     * Plain read of the real current balance (no lock, no mutation) — used to
+     * reconcile the site's mirrored Account.balance with the ground truth on
+     * demand (see auth.MoneyRequestPoller, kind "balance_sync"), rather than
+     * relying purely on the balance having been touched by some prior event.
+     * Returns null if the player isn't found.
+     */
+    public Double getBalance(@NotNull String playerName) {
+        try (Connection con = DBConnect()) {
+            if (con == null) return null;
+            UserJsonRow row = lockAndReadUserMoney(con, playerName);
+            return row != null ? (row.money != null ? row.money : 0.0) : null;
+        } catch (Exception e) {
+            Bukkit.getLogger().warning("[UnityCommands] getBalance failed: " + e);
+            return null;
+        }
+    }
+
+    /**
+     * Writes Users.GeneralData.dayDealCode directly — used to confirm a deal
+     * chosen on the site (see auth.MoneyRequestPoller, kind "daydeal_confirm").
+     * `raw` must already be in the "code;item;qty;price;rerolls" format
+     * parseDayDeal expects. Returns false if the player isn't found in MySQL.
+     */
+    public boolean setDayDealRaw(@NotNull String playerName, @NotNull String raw) {
+        if (getBalance(playerName) == null) return false; // existence check — mergeAndUpdatePlayerData is silent on a missing row
+        mergeAndUpdatePlayerData(playerName, "GeneralData", java.util.Map.of("dayDealCode", raw));
+        return true;
+    }
+
+    /**
+     * Plain read of Users.GeneralData.dayDealCode ("0" if never generated or
+     * reset today) — used by the site to reconcile its own DailyDeal state
+     * against the plugin on every page view (see auth.MoneyRequestPoller,
+     * kind "daydeal_status"). MySQL is the source of truth; if the site
+     * thinks a deal is chosen but this comes back bare "0", the site rolls
+     * its own state back.
+     */
+    public String getDayDealRaw(@NotNull String playerName) {
+        return getDayDealRawFromCacheOrDB(playerName);
     }
 
     // ==== AUTH ====

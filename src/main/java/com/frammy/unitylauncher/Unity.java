@@ -183,6 +183,77 @@ public class Unity implements CommandExecutor {
             return true;
         }
 
+        // ===================== /ul money give <player> <amount> =====================
+        // Admin utility — no in-game shop/zone flow grants money outside a country
+        // context yet, so this is also the only way to test the site's balance
+        // mirror without one. Goes through the same applyMoneyDelta as every other
+        // real economy action, so it mirrors to the site exactly like a real one.
+        if (args.length >= 2 && args[0].equalsIgnoreCase("money") && args[1].equalsIgnoreCase("give")) {
+            boolean allowed = !(sender instanceof Player) || sender.isOp() || sender.hasPermission("unitylauncher.money.give");
+            if (!allowed) {
+                sender.sendMessage(ChatColor.RED + "Нет прав: unitylauncher.money.give");
+                return true;
+            }
+            if (args.length != 4) {
+                sender.sendMessage(ChatColor.YELLOW + "Используй: /ul money give <ник> <сумма>");
+                return true;
+            }
+
+            String targetName = args[2];
+            double amount;
+            try {
+                amount = Double.parseDouble(args[3].replace(',', '.'));
+            } catch (NumberFormatException ex) {
+                sender.sendMessage(ChatColor.RED + "Сумма должна быть числом.");
+                return true;
+            }
+            if (!(amount > 0)) {
+                sender.sendMessage(ChatColor.RED + "Сумма должна быть положительной.");
+                return true;
+            }
+
+            boolean ok = UnityCommands.getInstance().applyMoneyDelta(targetName, amount);
+            sender.sendMessage(ok
+                    ? ChatColor.GREEN + "Начислено " + amount + " игроку " + targetName + "."
+                    : ChatColor.RED + "Не удалось — игрок '" + targetName + "' не найден в базе.");
+            return true;
+        }
+
+        // ===================== /ul frame give <player> <frameId> =====================
+        // Рамки "за победу в событии" / "за особые достижения" (Алмазная id 5,
+        // Незеритовая id 13, infra/frames-catalog.md) не имеют автоматического
+        // условия — по решению, выдаются админом вручную этой командой.
+        // Идёт тем же путём, что и достижения (FramesDao -> POST
+        // /plugin/.../frames/:frameId/grant), так что сайт увидит рамку сразу.
+        if (args.length >= 2 && args[0].equalsIgnoreCase("frame") && args[1].equalsIgnoreCase("give")) {
+            boolean allowed = !(sender instanceof Player) || sender.isOp() || sender.hasPermission("unitylauncher.frame.give");
+            if (!allowed) {
+                sender.sendMessage(ChatColor.RED + "Нет прав: unitylauncher.frame.give");
+                return true;
+            }
+            if (args.length != 4) {
+                sender.sendMessage(ChatColor.YELLOW + "Используй: /ul frame give <ник> <id рамки>");
+                return true;
+            }
+
+            String targetName = args[2];
+            int frameId;
+            try {
+                frameId = Integer.parseInt(args[3]);
+            } catch (NumberFormatException ex) {
+                sender.sendMessage(ChatColor.RED + "ID рамки должен быть числом.");
+                return true;
+            }
+            if (frameId <= 0) {
+                sender.sendMessage(ChatColor.RED + "ID рамки должен быть положительным.");
+                return true;
+            }
+
+            com.frammy.unitylauncher.advs.FramesDao.addUserToFrame(frameId, targetName);
+            sender.sendMessage(ChatColor.GREEN + "Рамка #" + frameId + " отправлена игроку " + targetName + " (запрос на сайт ушёл, но проверить владение можно только на самом сайте — команда не подтверждает, что ник существует).");
+            return true;
+        }
+
         // дальше — только игрок
         if (!(sender instanceof Player p)) {
             sender.sendMessage(ChatColor.RED + "Эта команда доступна только игрокам.");

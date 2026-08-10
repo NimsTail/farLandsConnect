@@ -17,7 +17,7 @@ public class Tnt54 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 61;
 
 @Override
 protected int getFrameId() {

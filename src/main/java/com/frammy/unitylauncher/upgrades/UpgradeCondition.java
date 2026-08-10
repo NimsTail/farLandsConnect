@@ -49,7 +49,14 @@ public final class UpgradeCondition {
             return cc != null ? cc.canonical : null; // мягкий fallback, чтобы не ронять гейтинг
         }
 
-        String canon = (c == null || c.isBlank()) ? null : normalizeCountry(c);
+        // "канонический" идентификатор страны для прав — это Countries.Id, а не транслитерированное
+        // имя: имя LuckPerms-группы не должно зависеть от алфавита/регистра названия страны (см.
+        // resolveCountryGroupId/getCountryId).
+        String canon = null;
+        if (c != null && !c.isBlank()) {
+            Integer id = UnityLauncher.getInstance().countryRegistryJdbc.getCountryId(c);
+            canon = (id != null) ? String.valueOf(id) : null;
+        }
         if (PLAYER_COUNTRY_CACHE.size() > 50_000) PLAYER_COUNTRY_CACHE.clear();
         PLAYER_COUNTRY_CACHE.put(playerName, new CachedCountry(canon, now));
         d("playerCountryCanonical: player=" + playerName + " raw=" + c + " canon=" + canon);
@@ -148,12 +155,11 @@ public final class UpgradeCondition {
        НОРМАЛИЗАЦИЯ СТРАНЫ
        ===================== */
 
-    // каноническое имя страны = имя LP-группы
-    public static String normalizeCountry(String raw) {
-        if (raw == null) return null;
-        String t = raw.trim().toLowerCase(java.util.Locale.ROOT);
-        t = t.replace(' ', '_');
-        return t.replaceAll("[^a-z0-9_\\-.]", "");
+    /** Countries.Id страны по её (сырому) имени, как строка — или null, если такой страны нет. */
+    public static String resolveCountryGroupId(String rawCountryName) {
+        if (rawCountryName == null || rawCountryName.isBlank()) return null;
+        Integer id = UnityLauncher.getInstance().countryRegistryJdbc.getCountryId(rawCountryName);
+        return id != null ? String.valueOf(id) : null;
     }
 
     // для зоны
@@ -161,20 +167,23 @@ public final class UpgradeCondition {
         if (z == null) return null;
         String cn = z.getCountryName();
         if (cn == null || cn.isBlank()) return null;
-        return normalizeCountry(cn);
+        return resolveCountryGroupId(cn);
     }
 
     public static String countryCanonicalAt(org.bukkit.Location loc) {
         if (loc == null) return null;
         var ul = com.frammy.unitylauncher.UnityLauncher.getInstance();
         if (ul == null || ul.getZoneManager() == null) return null;
-        return ul.getZoneManager().getCountryCanonicalAt(loc);
+        String rawName = ul.getZoneManager().getCountryAt(loc);
+        return resolveCountryGroupId(rawName);
     }
 
     /* =====================
        ДОСТУП К ГРУППЕ СТРАНЫ
        ===================== */
 
+    // ВАЖНО: canonicalCountry — это теперь Countries.Id (см. resolveCountryGroupId/getCountryId),
+    // а не транслитерированное имя. Имя LP-группы страны — "country_<id>" (см. addCountry.php).
     private static Group getCountryGroup(String canonicalCountry) {
         if (canonicalCountry == null || canonicalCountry.isBlank()) return null;
 
@@ -182,9 +191,10 @@ public final class UpgradeCondition {
         if (lp == null) return null;
 
         try {
-            Group g = lp.getGroupManager().getGroup(canonicalCountry);
-            d("getCountryGroup: lookup name=" + canonicalCountry + " -> " + (g != null ? "FOUND" : "NULL"));
-            if (g == null) d("getCountryGroup: group not found -> " + canonicalCountry);
+            String lpGroupName = "country_" + canonicalCountry;
+            Group g = lp.getGroupManager().getGroup(lpGroupName);
+            d("getCountryGroup: lookup name=" + lpGroupName + " -> " + (g != null ? "FOUND" : "NULL"));
+            if (g == null) d("getCountryGroup: group not found -> " + lpGroupName);
             return g;
 
         } catch (Throwable t) {
@@ -348,9 +358,8 @@ public final class UpgradeCondition {
             }
 
             // ZoneManager уже умеет "глубоко" резолвить страну через родителя
-            String canon = zm.getCountryCanonicalAt(loc);
-            if (canon == null || canon.isBlank()) return null;
-            return canon;
+            String rawName = zm.getCountryAt(loc);
+            return resolveCountryGroupId(rawName);
         } catch (Throwable t) {
             d("locationCountryOwner EX " + t);
             return null;
@@ -401,13 +410,13 @@ public final class UpgradeCondition {
         // 1) COUNTRY
         for (ZoneInfo z : zm.getAllZonesSnapshot()) {
             if (z.getType() != ZoneType.COUNTRY) continue;
-            if (z.contains2D(loc)) return z.getCountryName();
+            if (z.contains2D(loc)) return resolveCountryGroupId(z.getCountryName());
         }
 
         // 2) COLONY
         for (ZoneInfo z : zm.getAllZonesSnapshot()) {
             if (z.getType() != ZoneType.COLONY) continue;
-            if (z.contains2D(loc)) return z.getCountryName();
+            if (z.contains2D(loc)) return resolveCountryGroupId(z.getCountryName());
         }
 
         return null;

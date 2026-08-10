@@ -56,48 +56,56 @@ public class BlueMapIntegration {
         });
     }
 
-    /** Применяет зону как EXTRUDE-маркер. Использует готовые углы зоны (никаких тяжёлых расчётов). */
+    /**
+     * Применяет зону как EXTRUDE-маркер(ы). Использует готовые углы зоны (никаких тяжёлых расчётов).
+     * Мульти-полигон: по одному маркеру на КАЖДУЮ фигуру зоны — id основной фигуры
+     * остаётся "голым" markerID (обратная совместимость), доп. фигуры получают
+     * суффикс "_1", "_2" ... — та же схема, что и в ZoneBlueMapService.upsert().
+     */
     public void applyZoneMarker(ZoneInfo z) {
         if (z == null) return;
-        List<Location> corners = z.getCorners();
-        if (corners == null || corners.size() < 3) return;
-
-        Location base = corners.getFirst();
-        if (base == null || base.getWorld() == null) return;
-
-        List<Vector3d> extrude = new ArrayList<>(corners.size());
-        for (Location c : corners) {
-            if (c != null) extrude.add(new Vector3d(c.getX(), c.getY(), c.getZ()));
-        }
-        if (extrude.size() < 3) return;
+        List<List<Location>> shapes = z.getShapes();
+        if (shapes.isEmpty()) return;
 
         String name = ChatColor.stripColor(safe(z.getName())).trim();
         String typeName = (z.getType() != null ? z.getType().name() : "ZONE");
         String setIdByType = "zones_" + typeName.toLowerCase(Locale.ROOT);
+        String baseTitle = !name.isEmpty() ? name : (typeName + " #" + shortId(z.getID()));
+        final String title = shapes.size() > 1 ? (baseTitle + " (частей: " + shapes.size() + ")") : baseTitle;
 
-        // красивый заголовок маркера
-        String title = !name.isEmpty()
-                ? name
-                : (typeName + " #" + shortId(z.getID()));
+        for (int i = 0; i < shapes.size(); i++) {
+            List<Location> corners = shapes.get(i);
+            if (corners == null || corners.size() < 3) continue;
 
-        // описание при клике (BlueMap показывает detail)
-        String detail =
-                "<b>" + escapeHtml(title) + "</b><br>" +
-                        "<b>Type:</b> " + escapeHtml(typeName) + "<br>" +
-                        "<b>ID:</b> " + escapeHtml(z.getID()) + "<br>" +
-                        "<b>World:</b> " + escapeHtml(base.getWorld().getName()) + "<br>" +
-                        "<b>Points:</b> " + extrude.size();
+            Location base = corners.getFirst();
+            if (base == null || base.getWorld() == null) continue;
 
-        addBlueMapMarker(z.getMarkerID(), base, setIdByType, title, "extrude", extrude, null);
-
-        BlueMapAPI.getInstance().flatMap(api -> api.getMap(base.getWorld().getName())).ifPresent(map -> {
-            MarkerSet set = map.getMarkerSets().get(setIdByType);
-            if (set == null) return;
-            Marker m = set.getMarkers().get(z.getMarkerID());
-            if (m instanceof ExtrudeMarker em) {
-                em.setDetail(detail);
+            List<Vector3d> extrude = new ArrayList<>(corners.size());
+            for (Location c : corners) {
+                if (c != null) extrude.add(new Vector3d(c.getX(), c.getY(), c.getZ()));
             }
-        });
+            if (extrude.size() < 3) continue;
+
+            String markerId = (i == 0) ? z.getMarkerID() : (z.getMarkerID() + "_" + i);
+
+            String detail =
+                    "<b>" + escapeHtml(title) + "</b><br>" +
+                            "<b>Type:</b> " + escapeHtml(typeName) + "<br>" +
+                            "<b>ID:</b> " + escapeHtml(z.getID()) + "<br>" +
+                            "<b>World:</b> " + escapeHtml(base.getWorld().getName()) + "<br>" +
+                            "<b>Points:</b> " + extrude.size();
+
+            addBlueMapMarker(markerId, base, setIdByType, title, "extrude", extrude, null, z.getFillColor());
+
+            BlueMapAPI.getInstance().flatMap(api -> api.getMap(base.getWorld().getName())).ifPresent(map -> {
+                MarkerSet set = map.getMarkerSets().get(setIdByType);
+                if (set == null) return;
+                Marker m = set.getMarkers().get(markerId);
+                if (m instanceof ExtrudeMarker em) {
+                    em.setDetail(detail);
+                }
+            });
+        }
     }
 
     /** Ставит простой POI-маркер для таблички в отдельном наборе. Совместим с текущей сигнатурой POIMarker. */
@@ -129,6 +137,19 @@ public class BlueMapIntegration {
     /** Обновлённая функция с проверкой пересечений (XZ + Y-overlap) и фолбэком по высоте. */
     public void addBlueMapMarker(String id, Location location, String setID, String setLabel, String markerType,
                                  List<Vector3d> extrudePoints, Player p) {
+        addBlueMapMarker(id, location, setID, setLabel, markerType, extrudePoints, p, null);
+    }
+
+    /**
+     * Тот же метод, но для "extrude"-маркеров зон позволяет передать реальный
+     * цвет зоны (zi.getFillColor()) вместо generic-цвета по типу
+     * (colorsForZoneSetId) — без этого applyZoneMarker() красил все зоны
+     * одного типа одинаково, а не в выбранный игроком цвет, и после
+     * следующего ZoneManager-апдейта (blueMapService.upsert, который цвет
+     * учитывает всегда) маркер визуально перекрашивался.
+     */
+    public void addBlueMapMarker(String id, Location location, String setID, String setLabel, String markerType,
+                                 List<Vector3d> extrudePoints, Player p, org.bukkit.Color realZoneColor) {
         if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
 
         BlueMapAPI.getInstance().flatMap(blueMapAPI -> blueMapAPI.getMap(location.getWorld().getName())).ifPresent(map -> {
@@ -161,11 +182,16 @@ public class BlueMapIntegration {
                         return;
                     }
 
-                    // Высоты Y (умолчания как в зонах): -64..255
-                    double minY = extrudePoints.stream().mapToDouble(Vector3d::getY).min().orElse(-64);
-                    double maxY = extrudePoints.stream().mapToDouble(Vector3d::getY).max().orElse(255);
-
-                    if (minY > maxY) { double t = minY; minY = maxY; maxY = t; }
+                    // Зона — плоский XZ-контур, а не 3D-объём: Y у самих
+                    // угловых точек случаен (высота игрока в момент клика,
+                    // дефолт с сайта и т.п.), поэтому вместо min/max из
+                    // extrudePoints всегда берём реальные границы мира —
+                    // иначе при minY≈maxY около потолка маркер визуально
+                    // "тянется вверх до лимита" сразу после создания, а
+                    // после перезагрузки (когда маркеры собираются заново)
+                    // получает нормальный диапазон.
+                    double minY = location.getWorld().getMinHeight();
+                    double maxY = location.getWorld().getMaxHeight();
 
                     // Добавляем новый полигон
                     ExtrudeMarker extrudeMarker = new ExtrudeMarker(id, newShape, (float) minY, (float) maxY);
@@ -185,8 +211,10 @@ public class BlueMapIntegration {
 
                     extrudeMarker.setDetail(detail);
 
-                    // цвета по типу зоны (берём из setID вида zones_<type>)
-                    ZoneColors colors = colorsForZoneSetId(setID);
+                    // Реальный цвет зоны, если передан, иначе fallback по типу.
+                    ZoneColors colors = (realZoneColor != null)
+                            ? new ZoneColors(toBlueMapColor(realZoneColor, 0.22f), toBlueMapColor(realZoneColor, 0.95f))
+                            : colorsForZoneSetId(setID);
                     extrudeMarker.setFillColor(colors.fill());
                     extrudeMarker.setLineColor(colors.line());
 
@@ -333,6 +361,10 @@ public class BlueMapIntegration {
     /* ===================== ПРОЧНЫЕ ХЕЛПЕРЫ ДЛЯ ПЕРЕСЕЧЕНИЙ ===================== */
 
     private record ZoneColors(Color fill, Color line) {}
+
+    private static Color toBlueMapColor(org.bukkit.Color c, float a) {
+        return new Color(c.getRed(), c.getGreen(), c.getBlue(), a);
+    }
 
     private static ZoneColors colorsForZoneSetId(String setID) {
         // setID ожидается вида "zones_industrial", "zones_country", ...

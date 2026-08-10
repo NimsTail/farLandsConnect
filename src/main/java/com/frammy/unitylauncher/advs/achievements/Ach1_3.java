@@ -17,7 +17,7 @@ public class Ach1_3 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 21;
 
 @Override
 protected int getFrameId() {
@@ -34,7 +34,7 @@ protected int getFrameId() {
                         1f,
                         4f,
                         "",
-                        "Сделать стак печенья",
+                        "Проползти по лианам суммарно 5 км",
                         "",
                         "Награда: Рамка §bДжунгли"
                 ),

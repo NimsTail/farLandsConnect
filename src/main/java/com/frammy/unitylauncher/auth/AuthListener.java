@@ -69,6 +69,14 @@ public class AuthListener implements Listener {
     public void onQuit(PlayerQuitEvent e) {
         UUID id = e.getPlayer().getUniqueId();
         if (bossbars != null) bossbars.stopTimer(e.getPlayer());
+        // Only report last-seen for players who actually authenticated this session —
+        // an unregistered/never-logged-in player has no matching User row on the backend.
+        if (isAuthenticated(e.getPlayer())) {
+            UnityLauncher plugin = UnityLauncher.getInstance();
+            if (plugin != null && plugin.getFarLandsApi() != null) {
+                plugin.getFarLandsApi().lastSeen(e.getPlayer().getName());
+            }
+        }
         needLogin.remove(id);
         needRegister.remove(id);
         joinIp.remove(id);

@@ -16,13 +16,12 @@ public class Glowstone59 extends FrameRewardAdvancement  {
             "glowstone59"
     );
 
-    
-private static final int FRAME_ID = 8;
+    // Used to duplicate Ach1_2_1's "Синий Коралл" reward (copy-paste bug,
+    // see infra/frames-catalog.md §3 item 1) — removed per decision to just
+    // drop it rather than invent a new reward. No frame, getFrameId()
+    // defaults to 0.
 
-@Override
-protected int getFrameId() {
-    return FRAME_ID;
-}public Glowstone59(Advancement parent) {
+    public Glowstone59(Advancement parent) {
         super(
                 KEY.getKey(),
                 new FancyAdvancementDisplay(
@@ -36,8 +35,7 @@ protected int getFrameId() {
                         "",
                         "Создать якорь возрождения и ",
                         "улучшить до 4 уровня",
-                        "",
-                        "Награда: Рамка §6Синий Коралл"
+                        ""
                 ),
                 parent,
                 1

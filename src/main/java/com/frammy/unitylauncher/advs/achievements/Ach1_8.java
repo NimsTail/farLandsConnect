@@ -17,7 +17,7 @@ public class Ach1_8 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 26;
 
 @Override
 protected int getFrameId() {
@@ -34,7 +34,8 @@ protected int getFrameId() {
                         1f,
                         3f,
                         "",
-                        "Покрасить кожаный шлем в зелёный",
+                        "Проносить полный сет зелёной кожаной",
+                        "брони весь игровой день",
                         "",
                         "Награда: Рамка §bКактус"
                 ),

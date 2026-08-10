@@ -17,7 +17,7 @@ public class Obsidian60 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 55;
 
 @Override
 protected int getFrameId() {

@@ -17,7 +17,7 @@ public class Gilded_blackstone57 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 32;
 
 @Override
 protected int getFrameId() {

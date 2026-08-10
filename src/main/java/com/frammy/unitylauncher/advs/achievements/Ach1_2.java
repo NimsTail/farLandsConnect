@@ -17,7 +17,7 @@ public class Ach1_2 extends FrameRewardAdvancement  {
             "ach1_2"
     );
     
-    private static final int FRAME_ID = 8;
+    private static final int FRAME_ID = 17;
 
     @Override
     protected int getFrameId() {

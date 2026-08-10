@@ -17,7 +17,7 @@ public class Ach1_2_2 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 19;
 
 @Override
 protected int getFrameId() {
@@ -34,8 +34,8 @@ protected int getFrameId() {
                         3f,
                         2f,
                         "",
-                        "Добыть все виды красного коралла",
-                        "",
+                        "Держать одновременно все варианты",
+                        "красного коралла в одном сундуке",
                         "Награда: Рамка §6Красный Коралл"
                 ),
                 parent,

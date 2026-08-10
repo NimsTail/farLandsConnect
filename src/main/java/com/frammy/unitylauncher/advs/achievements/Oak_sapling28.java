@@ -17,7 +17,7 @@ public class Oak_sapling28 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 35;
 
 @Override
 protected int getFrameId() {
@@ -34,8 +34,8 @@ protected int getFrameId() {
                         2f,
                         4f,
                         "",
-                        "Поставить 32 верстака",
-                        "",
+                        "Скрафтить суммарно 500 предметов",
+                        "на верстаке",
                         "Награда: Рамка §6Верстак"
                 ),
                 parent,

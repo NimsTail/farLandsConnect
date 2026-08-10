@@ -17,7 +17,7 @@ public class Raw_gold_block46 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 57;
 
 @Override
 protected int getFrameId() {

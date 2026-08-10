@@ -17,7 +17,7 @@ public class Verdant_froglight73 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 63;
 
 @Override
 protected int getFrameId() {

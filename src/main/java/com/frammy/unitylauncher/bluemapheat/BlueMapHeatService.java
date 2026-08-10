@@ -3,7 +3,6 @@ package com.frammy.unitylauncher.bluemapheat;
 import com.frammy.unitylauncher.UnityLauncher;
 import com.frammy.unitylauncher.chunkactivity.ActivityWeights;
 import com.frammy.unitylauncher.chunkactivity.ChunkStats;
-import com.frammy.unitylauncher.zones.ZoneInfo;
 import com.frammy.unitylauncher.zones.ZoneManager;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
@@ -14,7 +13,6 @@ import org.bukkit.scheduler.BukkitTask;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
-import java.util.concurrent.atomic.AtomicReference;
 
 public final class BlueMapHeatService {
 
@@ -24,10 +22,6 @@ public final class BlueMapHeatService {
     private BukkitTask flushTask;
 
     private final int maxRegionsPerFlush = 20;
-
-    private final AtomicReference<Map<String, Double>> taxByChunkRef =
-            new AtomicReference<>(Map.of()); // key "world:cx,cz" -> tax
-    private BukkitTask taxRebuildTask;
 
     public BlueMapHeatService(UnityLauncher plugin) {
         this.plugin = Objects.requireNonNull(plugin);
@@ -43,13 +37,17 @@ public final class BlueMapHeatService {
         String override = plugin.getConfig().getString("bluemapheat.webRootOverride", "").trim();
 
         Path bluemapWebRoot;
+        plugin.getLogger().info("Working dir: " + System.getProperty("user.dir"));
+        plugin.getLogger().info("Override: " + override);
         if (!override.isEmpty()) {
             bluemapWebRoot = Paths.get(override);
+            plugin.getLogger().info("Override absolute: " + bluemapWebRoot.toAbsolutePath().normalize());
         } else {
             bluemapWebRoot = blueMap.getDataFolder().toPath().resolve("web");
         }
 
-        plugin.getLogger().info("[BlueMapHeat] Started. WebRoot=" + bluemapWebRoot);
+        plugin.getLogger().info("BlueMap data folder: " + blueMap.getDataFolder().getAbsolutePath());
+        plugin.getLogger().info("WebRoot: " + bluemapWebRoot.toAbsolutePath().normalize());
 
         WebappAssetDeployer.deploy(plugin, bluemapWebRoot);
 
@@ -73,16 +71,6 @@ public final class BlueMapHeatService {
             }
         }, flushPeriodTicks, flushPeriodTicks);
 
-        // пересчитываем "налог по чанкам" (ASYNC)
-        long taxRebuildPeriodTicks = 20L * 60L * 5L;
-        this.taxRebuildTask = Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, () -> {
-            try {
-                rebuildTaxByChunkCache();
-            } catch (Throwable t) {
-                plugin.getLogger().warning("[BlueMapHeat] rebuildTaxByChunkCache failed: " + t.getMessage());
-            }
-        }, 40L, taxRebuildPeriodTicks);
-
         plugin.getLogger().info("[BlueMapHeat] Started. WebRoot=" + bluemapWebRoot);
     }
 
@@ -90,69 +78,7 @@ public final class BlueMapHeatService {
         if (flushTask != null) flushTask.cancel();
         flushTask = null;
 
-        if (taxRebuildTask != null) taxRebuildTask.cancel();
-        taxRebuildTask = null;
-
         writer = null;
-        taxByChunkRef.set(Map.of());
-    }
-
-    private void rebuildTaxByChunkCache() {
-        ZoneManager zm = plugin.getZoneManager();
-        if (zm == null || zm.activityTracker == null) {
-            taxByChunkRef.set(Map.of());
-            return;
-        }
-
-        // снапшоты
-        Map<String, ChunkStats> chunkStats = zm.activityTracker.getChunkStatsMap();
-        ActivityWeights weights = zm.activityTracker.getWeights();
-
-        // считаем в локальную мапу и в конце atomically swap
-        Map<String, Double> out = new HashMap<>(64_000);
-
-        for (ZoneInfo zone : zm.getAllZonesSnapshot()) {
-            if (zone == null) continue;
-
-            // если зона без страны — можно либо пропускать, либо всё равно показывать "стоимость"
-            // Тут логично показывать налог только если привязана к стране
-            if (!zone.hasCountry()) continue;
-
-            String world = (zone.getWorld() != null ? zone.getWorld().getName() : null);
-            if (world == null) continue;
-
-            // стоимость зоны за день (у вас уже кешируется внутри ZoneActivityCalculations)
-            double zoneDailyCost = plugin.getZoneActivityCalculations()
-                    .calculateZoneDailyCostCached(zone, chunkStats, weights);
-
-            if (zoneDailyCost <= 0.0) continue;
-
-            // доли чанков
-            List<Location> corners = zone.getCorners();
-            if (corners == null || corners.size() < 3) continue;
-
-            Map<String, Double> fractions = plugin.getZoneActivityCalculations()
-                    .getChunkFractionsForCorners(world, new ArrayList<>(corners)); // копия списка
-
-            if (fractions.isEmpty()) continue;
-
-            double sumFrac = 0.0;
-            for (double f : fractions.values()) sumFrac += f;
-            if (sumFrac <= 0.0) continue;
-
-            // распределяем стоимость зоны по чанкам
-            for (Map.Entry<String, Double> e : fractions.entrySet()) {
-                double f = e.getValue();
-                if (f <= 0.0) continue;
-
-                double add = zoneDailyCost * (f / sumFrac);
-                if (add <= 0.0) continue;
-
-                out.merge(e.getKey(), add, Double::sum);
-            }
-        }
-
-        taxByChunkRef.set(out);
     }
 
     public void onPlayerEnteredChunk(Player p, int chunkX, int chunkZ) {
@@ -188,13 +114,24 @@ public final class BlueMapHeatService {
         }
     }
 
+    /**
+     * "Ценность земли" для тепловой карты — раньше здесь была цена ЗОНЫ
+     * (calculateZoneDailyCostCached), размазанная по чанкам пропорционально
+     * площади — эта величина НИКОГДА не совпадала с тем, что реально
+     * биллится (calculateDailyCostSnapshot в ZoneActivityCalculations).
+     * Теперь считаем то же самое, что реально влияет на due_cost: прямое
+     * значение LandValueWeights по чанку — без зон, без кэша, без
+     * периодического пересчёта (это дёшево вычислять на лету).
+     */
     long getTaxValue(String world, int cx, int cz) {
         try {
-            Map<String, Double> m = taxByChunkRef.get();
-            Double v = m.get(world + ":" + cx + "," + cz);
-            if (v == null || v <= 0.0) return 0L;
+            ZoneManager zm = plugin.getZoneManager();
+            if (zm == null || zm.activityTracker == null) return 0L;
 
-            // *100 чтобы в UI был "целый" long (копейки)
+            ChunkStats st = zm.activityTracker.getChunkStatsMap().get(world + ":" + cx + "," + cz);
+            if (st == null) return 0L;
+
+            double v = zm.activityTracker.getLandValueWeights().calculateValue(st);
             return Math.max(0L, Math.round(v * 100.0));
         } catch (Throwable t) {
             return 0L;

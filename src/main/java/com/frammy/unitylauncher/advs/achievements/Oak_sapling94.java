@@ -18,7 +18,7 @@ public class Oak_sapling94 extends FrameRewardAdvancement implements HiddenVisib
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 0;
 
 @Override
 protected int getFrameId() {

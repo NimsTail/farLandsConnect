@@ -56,11 +56,14 @@ public final class ZoneSignOwnershipService {
         // Кэш полигонов по миру
         Map<String, List<ZonePoly>> worldZones = new HashMap<>();
         for (ZoneInfo z : zonesView.getAllZonesSnapshot()) {
-            var cs = z.getCorners();
-            if (cs == null || cs.isEmpty() || cs.getFirst().getWorld() == null) continue;
-            String w = cs.getFirst().getWorld().getName();
-            worldZones.computeIfAbsent(w, k -> new ArrayList<>())
-                    .add(new ZonePoly(z.getOwner(), z.getType(), ZoneGeometry.poly2D(cs)));
+            // мульти-полигон: одна запись ZonePoly на КАЖДУЮ фигуру зоны, иначе
+            // таблички в доп. фигурах не получили бы владельца
+            for (var cs : z.getShapes()) {
+                if (cs == null || cs.isEmpty() || cs.getFirst().getWorld() == null) continue;
+                String w = cs.getFirst().getWorld().getName();
+                worldZones.computeIfAbsent(w, k -> new ArrayList<>())
+                        .add(new ZonePoly(z.getOwner(), z.getType(), ZoneGeometry.poly2D(cs)));
+            }
         }
 
         final int total = allSigns.size();

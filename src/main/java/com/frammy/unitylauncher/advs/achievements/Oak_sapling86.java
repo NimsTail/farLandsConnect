@@ -17,7 +17,7 @@ public class Oak_sapling86 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 52;
 
 @Override
 protected int getFrameId() {
@@ -34,7 +34,7 @@ protected int getFrameId() {
                         3f,
                         21f,
                         "",
-                        "Скрафтить пурпурный кирпич",
+                        "Победить 5 шалкеров",
                         "",
                         "Награда: Рамка §6Пурпурный Кирпич"
                 ),

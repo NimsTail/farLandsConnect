@@ -43,6 +43,12 @@ permissions:
   unitylauncher.reload:
     description: Reload UnityLauncher configs and upgrades
     default: op
+  unitylauncher.money.give:
+    description: Credit a player's real balance directly (/ul money give)
+    default: op
+  unitylauncher.frame.give:
+    description: Grant a profile-wall frame directly (/ul frame give)
+    default: op
   unitylauncher.auth.register:
     default: true
   unitylauncher.auth.login:

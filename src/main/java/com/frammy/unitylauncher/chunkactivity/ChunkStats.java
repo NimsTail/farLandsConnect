@@ -1,7 +1,14 @@
 package com.frammy.unitylauncher.chunkactivity;
 
+import org.bukkit.Material;
+
 import java.util.ArrayDeque;
+import java.util.Collections;
 import java.util.Deque;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class ChunkStats {
     public long timeSpent = 0;
@@ -16,6 +23,78 @@ public class ChunkStats {
     public double structureBonus = 0.0;
 
     public long lastUpdated = System.currentTimeMillis();
+
+    // ===== "Ценность земли" — намеренно НЕ угасают и не сбрасываются часовым
+    // срезом, в отличие от полей выше. Это отдельный от "активности" сигнал:
+    // сколько сюда реально вложено (стройка) и насколько это место посещаемо
+    // (трафик чужих игроков), а не сколько лично играл владелец сегодня. =====
+
+    // Накопительный ВЗВЕШЕННЫЙ чистый объём стройки (поставлено-сломано),
+    // никогда не угасает. Взвешенный — потому что дешёвые сырые материалы
+    // (BuildMaterialWeights) считаются по низкому весу, иначе тупая закладка
+    // диртом/камнем накручивала бы это так же дёшево, как настоящая стройка.
+    public double netBuildVolume = 0.0;
+
+    // Разные материалы, которые тут когда-либо клали — используется для
+    // штрафа за "один и тот же блок подряд" (см. LandValueWeights).
+    private final Set<Material> materialsPlaced = ConcurrentHashMap.newKeySet();
+
+    // Уникальные посетители за текущее окно (сбрасывается раз в неделю
+    // ActivityTracker'ом) — трафик места, а не время владельца. Вес визита
+    // обычно 1.0, но для владельца/гражданина страны ЭТОЙ ЖЕ зоны — сильно
+    // ниже (см. ActivityTracker.computeVisitorWeight): иначе налог на землю
+    // растёт от собственной же игры хозяина, а не от реального чужого трафика.
+    private final Map<UUID, Double> visitorWeights = new ConcurrentHashMap<>();
+
+    public void addBuildVolume(double placedWeighted, double brokenWeighted) {
+        netBuildVolume = Math.max(0.0, netBuildVolume + placedWeighted - brokenWeighted);
+    }
+
+    public void recordMaterialPlaced(Material material) {
+        if (material != null) materialsPlaced.add(material);
+    }
+
+    public int getDistinctMaterialCount() {
+        return materialsPlaced.size();
+    }
+
+    public Set<Material> getMaterialsPlaced() {
+        return Collections.unmodifiableSet(materialsPlaced);
+    }
+
+    /** Старый вызов без веса — вес по умолчанию (обычный посторонний визит). Используется при загрузке старых данных. */
+    public void addVisitor(UUID uuid) {
+        addVisitor(uuid, 1.0);
+    }
+
+    /** Перезаписывает вес визита этим uuid текущим (последний визит определяет вес — статус владения меняется редко). */
+    public void addVisitor(UUID uuid, double weight) {
+        if (uuid != null) visitorWeights.put(uuid, weight);
+    }
+
+    /** Сырое кол-во уникальных посетителей БЕЗ учёта веса — для информации/отладки. Для налога используйте getVisitorTrafficScore(). */
+    public int getUniqueVisitorCount() {
+        return visitorWeights.size();
+    }
+
+    /** Взвешенная сумма трафика — то, что реально используется в LandValueWeights. */
+    public double getVisitorTrafficScore() {
+        double sum = 0.0;
+        for (double w : visitorWeights.values()) sum += w;
+        return sum;
+    }
+
+    public Set<UUID> getUniqueVisitors() {
+        return Collections.unmodifiableSet(visitorWeights.keySet());
+    }
+
+    public Map<UUID, Double> getVisitorWeights() {
+        return Collections.unmodifiableMap(visitorWeights);
+    }
+
+    public void resetVisitorWindow() {
+        visitorWeights.clear();
+    }
 
     // Храним последние 24 часовых среза
     public final Deque<Double> hourlySamples = new ArrayDeque<>(24);
@@ -103,6 +182,9 @@ public class ChunkStats {
         c.lastUpdated = this.lastUpdated;
         c.hourlySamples.clear();
         c.hourlySamples.addAll(this.hourlySamples);
+        c.netBuildVolume = this.netBuildVolume;
+        c.materialsPlaced.addAll(this.materialsPlaced);
+        c.visitorWeights.putAll(this.visitorWeights);
         return c;
     }
 

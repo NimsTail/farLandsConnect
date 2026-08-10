@@ -1,5 +1,6 @@
 package com.frammy.unitylauncher.chunkactivity;
 
+import org.bukkit.Material;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 
@@ -42,6 +43,19 @@ public class ChunkActivityStorage {
             config.set(path + ".structureBonus", s.structureBonus);
 
             config.set(path + ".hourlySamples", new ArrayList<>(s.hourlySamples));
+
+            config.set(path + ".netBuildVolume", s.netBuildVolume);
+            // "uuid:weight" — вес визита (владелец/гражданин зоны считается ниже 1.0,
+            // см. ActivityTracker.computeVisitorWeight) тоже должен переживать рестарт
+            List<String> visitorStrs = new ArrayList<>(s.getVisitorWeights().size());
+            for (Map.Entry<java.util.UUID, Double> e : s.getVisitorWeights().entrySet()) {
+                visitorStrs.add(e.getKey() + ":" + e.getValue());
+            }
+            config.set(path + ".uniqueVisitors", visitorStrs);
+
+            List<String> materialStrs = new ArrayList<>(s.getMaterialsPlaced().size());
+            for (Material m : s.getMaterialsPlaced()) materialStrs.add(m.name());
+            config.set(path + ".materialsPlaced", materialStrs);
         }
 
         try {
@@ -95,6 +109,24 @@ public class ChunkActivityStorage {
             if (d != null) s.hourlySamples.addLast(d);
         }
         while (s.hourlySamples.size() > 24) s.hourlySamples.removeFirst();
+
+        s.netBuildVolume = config.getDouble(path + ".netBuildVolume", 0.0);
+        for (String vs : config.getStringList(path + ".uniqueVisitors")) {
+            try {
+                // новый формат "uuid:weight"; старый формат — голый uuid (вес по умолчанию 1.0)
+                int sep = vs.lastIndexOf(':');
+                if (sep > 0) {
+                    java.util.UUID id = java.util.UUID.fromString(vs.substring(0, sep));
+                    double w = Double.parseDouble(vs.substring(sep + 1));
+                    s.addVisitor(id, w);
+                } else {
+                    s.addVisitor(java.util.UUID.fromString(vs));
+                }
+            } catch (Exception ignored) {}
+        }
+        for (String ms : config.getStringList(path + ".materialsPlaced")) {
+            try { s.recordMaterialPlaced(Material.valueOf(ms)); } catch (IllegalArgumentException ignored) {}
+        }
 
         return s;
     }

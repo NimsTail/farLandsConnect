@@ -141,7 +141,7 @@ public final class WeeklyCountryInvoiceService {
             SET CountryInfo = JSON_SET(
                 COALESCE(CountryInfo, JSON_OBJECT()),
                 '$.WeeklyTaxDue',
-                CAST('0' AS JSON)
+                0
             )
             WHERE Name = ?
             """;

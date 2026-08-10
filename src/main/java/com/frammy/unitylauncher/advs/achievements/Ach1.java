@@ -19,7 +19,7 @@ public class Ach1 extends FrameRewardAdvancement {
             AdvancementTabNamespaces.achievements_NAMESPACE,
             "ach1"
     );
-    private static final int FRAME_ID = 8;
+    private static final int FRAME_ID = 14;
 
     @Override
     protected int getFrameId() {

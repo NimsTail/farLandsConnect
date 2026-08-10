@@ -4,202 +4,162 @@ import com.frammy.unitylauncher.UnityLauncher;
 import com.frammy.unitylauncher.advs.achievements.Ach1_2_1;
 import com.frammy.unitylauncher.advs.achievements.Ach1_2_2;
 import com.frammy.unitylauncher.advs.achievements.Ach1_2_3;
-import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
-import org.bukkit.block.Block;
-import org.bukkit.entity.Entity;
-import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
-import org.bukkit.event.block.BlockPlaceEvent;
-import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.EntityPickupItemEvent;
+import org.bukkit.event.inventory.InventoryCloseEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryHolder;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.PlayerInventory;
+import org.bukkit.loot.LootTables;
+import org.bukkit.event.world.LootGenerateEvent;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 
-import java.util.EnumMap;
-import java.util.Map;
+import java.util.HashSet;
 import java.util.Set;
 
+/**
+ * Ach1_2_1/2/3 conditions were redefined per infra/frames-catalog.md §6 —
+ * this replaces the old "kill on land" / "obtain" / "dolphin drop" checks.
+ */
 public class CoralAdvancementsListener implements Listener {
 
-    private final UnityLauncher plugin;
+    private final Ach1_2_1 achBlueHold;
+    private final Ach1_2_2 achRedChest;
+    private final Ach1_2_3 achPurpleShipwrecks;
 
-    private final Ach1_2_1 achBlueKill;   // убить на суше синий (tube)
-    private final Ach1_2_2 achRedObtain;  // добыть красный (fire)
-    private final Ach1_2_3 achPurpleDolphin; // поднять фиолетовый коралл, выброшенный дельфином
-
-    private final NamespacedKey blueMaskKey, blueDoneKey;
-    private final NamespacedKey redMaskKey, redDoneKey;
+    private final NamespacedKey blueDoneKey;
+    private final NamespacedKey redDoneKey;
+    private final NamespacedKey shipwreckLocsKey;
     private final NamespacedKey purpleDoneKey;
 
-    private static final int ALL4 = 0b1111;
-
-    // ---- BLUE (TUBE) kill-on-land ----
-    private static final Map<Material, Integer> BLUE_LIVE_BITS = new EnumMap<>(Material.class);
-    private static final Map<Material, Material> BLUE_LIVE_TO_DEAD = new EnumMap<>(Material.class);
-
-    // ---- RED (FIRE) obtain ----
-    private static final Map<Material, Integer> RED_BITS = new EnumMap<>(Material.class);
-
-    static {
-        // BLUE live -> bit
-        BLUE_LIVE_BITS.put(Material.TUBE_CORAL_BLOCK, 1 << 0);
-        BLUE_LIVE_BITS.put(Material.TUBE_CORAL, 1 << 1);
-        BLUE_LIVE_BITS.put(Material.TUBE_CORAL_FAN, 1 << 2);
-        BLUE_LIVE_BITS.put(Material.TUBE_CORAL_WALL_FAN, 1 << 3);
-
-        // BLUE live -> dead
-        BLUE_LIVE_TO_DEAD.put(Material.TUBE_CORAL_BLOCK, Material.DEAD_TUBE_CORAL_BLOCK);
-        BLUE_LIVE_TO_DEAD.put(Material.TUBE_CORAL, Material.DEAD_TUBE_CORAL);
-        BLUE_LIVE_TO_DEAD.put(Material.TUBE_CORAL_FAN, Material.DEAD_TUBE_CORAL_FAN);
-        BLUE_LIVE_TO_DEAD.put(Material.TUBE_CORAL_WALL_FAN, Material.DEAD_TUBE_CORAL_WALL_FAN);
-
-        // RED obtain (по форме 4) — живой + мёртвый
-        RED_BITS.put(Material.FIRE_CORAL_BLOCK, 1 << 0);
-        RED_BITS.put(Material.DEAD_FIRE_CORAL_BLOCK, 1 << 0);
-
-        RED_BITS.put(Material.FIRE_CORAL, 1 << 1);
-        RED_BITS.put(Material.DEAD_FIRE_CORAL, 1 << 1);
-
-        RED_BITS.put(Material.FIRE_CORAL_FAN, 1 << 2);
-        RED_BITS.put(Material.DEAD_FIRE_CORAL_FAN, 1 << 2);
-
-        RED_BITS.put(Material.FIRE_CORAL_WALL_FAN, 1 << 3);
-        RED_BITS.put(Material.DEAD_FIRE_CORAL_WALL_FAN, 1 << 3);
-    }
-
-    // ---- PURPLE коралл (ты выбрал Bubble как “фиолетовый”) ----
-    private static final Set<Material> PURPLE_CORAL_ITEMS = Set.of(
-            Material.BUBBLE_CORAL,
-            Material.BUBBLE_CORAL_FAN,
-            Material.BUBBLE_CORAL_BLOCK,
-            Material.DEAD_BUBBLE_CORAL,
-            Material.DEAD_BUBBLE_CORAL_FAN,
-            Material.DEAD_BUBBLE_CORAL_BLOCK
+    // Ach1_2_1: держать одновременно (блок + коралл + веер) — только "живые".
+    private static final Set<Material> BLUE_REQUIRED = Set.of(
+            Material.TUBE_CORAL_BLOCK,
+            Material.TUBE_CORAL,
+            Material.TUBE_CORAL_FAN
     );
 
-    // метка на Item entity (чтобы засчитывалось только с дельфина)
-    private static final String DOLPHIN_TAG = "fl_dolphin_purple_coral";
+    // Ach1_2_2: держать одновременно в одном сундуке (форма может быть живой
+    // или мёртвой — считаем как один и тот же "вариант").
+    private static final Set<Material> RED_SHAPE_BLOCK = Set.of(Material.FIRE_CORAL_BLOCK, Material.DEAD_FIRE_CORAL_BLOCK);
+    private static final Set<Material> RED_SHAPE_CORAL = Set.of(Material.FIRE_CORAL, Material.DEAD_FIRE_CORAL);
+    private static final Set<Material> RED_SHAPE_FAN = Set.of(Material.FIRE_CORAL_FAN, Material.DEAD_FIRE_CORAL_FAN);
+
+    // Ach1_2_3: 25 разных кораблекрушений/руин океана.
+    private static final Set<NamespacedKey> SHIPWRECK_LOOT_TABLES = Set.of(
+            LootTables.SHIPWRECK_SUPPLY.getKey(),
+            LootTables.SHIPWRECK_MAP.getKey(),
+            LootTables.SHIPWRECK_TREASURE.getKey(),
+            LootTables.UNDERWATER_RUIN_SMALL.getKey(),
+            LootTables.UNDERWATER_RUIN_BIG.getKey()
+    );
 
     public CoralAdvancementsListener(UnityLauncher plugin,
-                                     Ach1_2_1 achBlueKill,
-                                     Ach1_2_2 achRedObtain,
-                                     Ach1_2_3 achPurpleDolphin) {
-        this.plugin = plugin;
-        this.achBlueKill = achBlueKill;
-        this.achRedObtain = achRedObtain;
-        this.achPurpleDolphin = achPurpleDolphin;
+                                      Ach1_2_1 achBlueHold,
+                                      Ach1_2_2 achRedChest,
+                                      Ach1_2_3 achPurpleShipwrecks) {
+        this.achBlueHold = achBlueHold;
+        this.achRedChest = achRedChest;
+        this.achPurpleShipwrecks = achPurpleShipwrecks;
 
-        this.blueMaskKey = new NamespacedKey(plugin, "ach1_2_1_blue_mask");
         this.blueDoneKey = new NamespacedKey(plugin, "ach1_2_1_done");
-
-        this.redMaskKey = new NamespacedKey(plugin, "ach1_2_2_red_mask");
         this.redDoneKey = new NamespacedKey(plugin, "ach1_2_2_done");
-
+        this.shipwreckLocsKey = new NamespacedKey(plugin, "ach1_2_3_locs");
         this.purpleDoneKey = new NamespacedKey(plugin, "ach1_2_3_done");
     }
 
-    // --------------- Ach1_2_1: "убить на суше" (BlockPlace + delayed check) ---------------
+    // --------------- Ach1_2_1: все варианты синего коралла в инвентаре разом ---------------
     @EventHandler(ignoreCancelled = true)
-    public void onPlace(BlockPlaceEvent e) {
-        Player p = e.getPlayer();
-        if (p.getPersistentDataContainer().has(blueDoneKey, PersistentDataType.BYTE)) return;
-
-        Block placed = e.getBlockPlaced();
-        Material live = placed.getType();
-
-        Integer bit = BLUE_LIVE_BITS.get(live);
-        if (bit == null) return;
-
-        Material expectedDead = BLUE_LIVE_TO_DEAD.get(live);
-
-        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-            if (!p.isOnline()) return;
-
-            // блок мог пропасть/сломаться
-            if (placed.getType() != expectedDead) return;
-
-            PersistentDataContainer pdc = p.getPersistentDataContainer();
-            if (pdc.has(blueDoneKey, PersistentDataType.BYTE)) return;
-
-            int mask = pdc.getOrDefault(blueMaskKey, PersistentDataType.INTEGER, 0);
-            int newMask = mask | bit;
-
-            if (newMask != mask) pdc.set(blueMaskKey, PersistentDataType.INTEGER, newMask);
-
-            if (newMask == ALL4) {
-                achBlueKill.grant(p);
-                pdc.set(blueDoneKey, PersistentDataType.BYTE, (byte) 1);
-            }
-        }, 60L);
+    public void onPickupBlue(EntityPickupItemEvent e) {
+        if (!(e.getEntity() instanceof Player p)) return;
+        checkBlueCoral(p);
     }
 
-    // --------------- Ach1_2_2 + Ach1_2_3: pickup ---------------
+    @EventHandler
+    public void onJoinCheckBlue(PlayerJoinEvent e) {
+        checkBlueCoral(e.getPlayer());
+    }
+
+    private void checkBlueCoral(Player p) {
+        PersistentDataContainer pdc = p.getPersistentDataContainer();
+        if (pdc.has(blueDoneKey, PersistentDataType.BYTE)) return;
+
+        PlayerInventory inv = p.getInventory();
+        boolean hasAll = BLUE_REQUIRED.stream().allMatch(inv::contains);
+        if (hasAll) {
+            achBlueHold.grant(p);
+            pdc.set(blueDoneKey, PersistentDataType.BYTE, (byte) 1);
+        }
+    }
+
+    // --------------- Ach1_2_2: все варианты красного коралла в одном сундуке ---------------
     @EventHandler(ignoreCancelled = true)
-    public void onPickup(EntityPickupItemEvent e) {
-        if (!(e.getEntity() instanceof Player p)) return;
+    public void onContainerClose(InventoryCloseEvent e) {
+        if (!(e.getPlayer() instanceof Player p)) return;
 
         PersistentDataContainer pdc = p.getPersistentDataContainer();
-        org.bukkit.entity.Item itemEnt = e.getItem();
-        Material mat = itemEnt.getItemStack().getType();
+        if (pdc.has(redDoneKey, PersistentDataType.BYTE)) return;
 
-        // ---- Ach1_2_2: "добыть" красный коралл (по форме 4) ----
-        if (!pdc.has(redDoneKey, PersistentDataType.BYTE)) {
-            Integer bit = RED_BITS.get(mat);
-            if (bit != null) {
-                int mask = pdc.getOrDefault(redMaskKey, PersistentDataType.INTEGER, 0);
-                int newMask = mask | bit;
+        Inventory inv = e.getInventory();
+        InventoryHolder holder = inv.getHolder();
+        // Любой контейнер-хранилище (сундук/бочка/сдвоенный сундук и т.п.),
+        // не мерчант/крафт/прочий служебный инвентарь.
+        if (!(holder instanceof org.bukkit.block.Chest || holder instanceof org.bukkit.block.DoubleChest
+                || holder instanceof org.bukkit.block.Barrel)) return;
 
-                if (newMask != mask) pdc.set(redMaskKey, PersistentDataType.INTEGER, newMask);
+        boolean hasBlock = containsAny(inv, RED_SHAPE_BLOCK);
+        boolean hasCoral = containsAny(inv, RED_SHAPE_CORAL);
+        boolean hasFan = containsAny(inv, RED_SHAPE_FAN);
 
-                if (newMask == ALL4) {
-                    achRedObtain.grant(p);
-                    pdc.set(redDoneKey, PersistentDataType.BYTE, (byte) 1);
-                }
-            }
-        }
-
-        // ---- Ach1_2_3: поднять фиолетовый коралл, выброшенный дельфином ----
-        if (!pdc.has(purpleDoneKey, PersistentDataType.BYTE)) {
-            if (PURPLE_CORAL_ITEMS.contains(mat) && itemEnt.getScoreboardTags().contains(DOLPHIN_TAG)) {
-                achPurpleDolphin.grant(p);
-                pdc.set(purpleDoneKey, PersistentDataType.BYTE, (byte) 1);
-
-                // на всякий случай уберём метку
-                itemEnt.removeScoreboardTag(DOLPHIN_TAG);
-            }
+        if (hasBlock && hasCoral && hasFan) {
+            achRedChest.grant(p);
+            pdc.set(redDoneKey, PersistentDataType.BYTE, (byte) 1);
         }
     }
 
-    // --------------- Помечаем дропы дельфина ---------------
+    private boolean containsAny(Inventory inv, Set<Material> options) {
+        for (ItemStack stack : inv.getContents()) {
+            if (stack != null && options.contains(stack.getType())) return true;
+        }
+        return false;
+    }
+
+    // --------------- Ach1_2_3: 25 разных кораблекрушений/руин океана ---------------
     @EventHandler(ignoreCancelled = true)
-    public void onDolphinDeath(EntityDeathEvent e) {
-        if (e.getEntityType() != EntityType.DOLPHIN) return;
+    public void onLootGenerate(LootGenerateEvent e) {
+        if (!(e.getEntity() instanceof Player p)) return;
+        if (!SHIPWRECK_LOOT_TABLES.contains(e.getLootTable().getKey())) return;
 
-        // если в дропах нет нужного коралла — выходим
-        boolean hasPurple = e.getDrops().stream().anyMatch(it -> PURPLE_CORAL_ITEMS.contains(it.getType()));
-        if (!hasPurple) return;
+        PersistentDataContainer pdc = p.getPersistentDataContainer();
+        if (pdc.has(purpleDoneKey, PersistentDataType.BYTE)) return;
 
-        // Через 1 тик найдём Item-entity рядом и пометим их
-        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
-            Location loc = e.getEntity().getLocation();
-            for (Entity ent : loc.getWorld().getNearbyEntities(loc, 2.0, 2.0, 2.0)) { // чуть меньше радиус
-                if (!(ent instanceof org.bukkit.entity.Item itemEnt)) continue;
+        org.bukkit.Location loc = e.getInventoryHolder() != null
+                ? e.getInventoryHolder().getInventory().getLocation()
+                : null;
+        if (loc == null || loc.getWorld() == null) return;
 
-                Material t = itemEnt.getItemStack().getType();
-                if (!PURPLE_CORAL_ITEMS.contains(t)) continue;
+        String locKey = loc.getWorld().getName() + ":" + loc.getBlockX() + ":" + loc.getBlockY() + ":" + loc.getBlockZ();
 
-                itemEnt.addScoreboardTag(DOLPHIN_TAG);
+        String stored = pdc.get(shipwreckLocsKey, PersistentDataType.STRING);
+        Set<String> visited = new HashSet<>();
+        if (stored != null && !stored.isBlank()) {
+            visited.addAll(Set.of(stored.split(",")));
+        }
+        if (!visited.add(locKey)) return; // уже считали этот сундук
 
-                // снять метку через минуту
-                plugin.getServer().getScheduler().runTaskLater(plugin,
-                        () -> itemEnt.removeScoreboardTag(DOLPHIN_TAG),
-                        20L * 60
-                );
-            }
-        }, 1L);
+        pdc.set(shipwreckLocsKey, PersistentDataType.STRING, String.join(",", visited));
+
+        if (visited.size() >= 25) {
+            achPurpleShipwrecks.grant(p);
+            pdc.set(purpleDoneKey, PersistentDataType.BYTE, (byte) 1);
+            pdc.remove(shipwreckLocsKey);
+        }
     }
 }

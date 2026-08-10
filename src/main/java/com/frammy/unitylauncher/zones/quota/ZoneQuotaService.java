@@ -1,5 +1,6 @@
 package com.frammy.unitylauncher.zones.quota;
-
+import net.luckperms.api.model.user.User;
+import java.util.UUID;
 import com.frammy.unitylauncher.zones.ZoneInfo;
 import com.frammy.unitylauncher.zones.ZoneType;
 import net.luckperms.api.LuckPerms;
@@ -11,7 +12,6 @@ import org.bukkit.ChatColor;
 import org.bukkit.entity.Player;
 
 import java.util.Collection;
-import java.util.Locale;
 import java.util.Objects;
 
 public final class ZoneQuotaService {
@@ -98,6 +98,7 @@ public final class ZoneQuotaService {
             case COLONY -> "colony";
             case COUNTRY -> "country";
             case SHOP -> "shop";
+            case PLOT -> "plot";
         };
     }
 
@@ -110,16 +111,15 @@ public final class ZoneQuotaService {
         }
     }
 
+    // ВАЖНО: имя LP-группы страны — "country_<Countries.Id>" (см. addCountry.php), а не
+    // транслитерированное имя — иначе имя группы зависело бы от алфавита названия страны.
     private Group resolveCountryGroup(LuckPerms lp, String countryName) {
         if (lp == null || countryName == null || countryName.isBlank()) return null;
 
-        String canon = normCountry(countryName);
-        if (canon == null || canon.isBlank()) return null;
+        String id = com.frammy.unitylauncher.upgrades.UpgradeCondition.resolveCountryGroupId(countryName);
+        if (id == null) return null;
 
-        Group g = lp.getGroupManager().getGroup(canon);
-        if (g != null) return g;
-
-        return lp.getGroupManager().getGroup("country_" + canon);
+        return lp.getGroupManager().getGroup("country_" + id);
     }
 
     /** Читаем лимит из пермишенов страны: unity.zone.<type>.<N> */
@@ -180,6 +180,14 @@ public final class ZoneQuotaService {
         return getCountryQuotaFromLuckPerms(countryName, type);
     }
 
+    /** How many more zones of this type the country can still create right now. */
+    public int getAvailableCountryQuota(String countryName, ZoneType type) {
+        if (type == ZoneType.SHOP) return Integer.MAX_VALUE;
+        int quota = getEffectiveCountryQuota(countryName, type);
+        int owned = countCountryZones(countryName, type);
+        return Math.max(0, quota - owned);
+    }
+
     public boolean checkCountryZoneQuota(Player p, String countryName, ZoneType type) {
         if (type == ZoneType.SHOP) return true;
 
@@ -204,13 +212,77 @@ public final class ZoneQuotaService {
     // ------------------- tiny utils -------------------
 
     private static String normCountry(String s) {
-        if (s == null) return null;
-        String t = s.trim().toLowerCase(Locale.ROOT);
-        t = t.replace(' ', '_');
-        return t.replaceAll("[^a-z0-9_\\-.]", "");
+        return com.frammy.unitylauncher.zones.CountryNameUtil.normalizeCountry(s);
     }
 
     private static boolean eqCi(String a, String b) {
         return a != null && a.equalsIgnoreCase(b);
+    }
+
+    public enum QuotaCheck { ALLOWED, DENIED, PENDING }
+
+    public record QuotaOutcome(QuotaCheck check, String message) {
+        public static QuotaOutcome allowed() { return new QuotaOutcome(QuotaCheck.ALLOWED, null); }
+        public static QuotaOutcome denied(String msg) { return new QuotaOutcome(QuotaCheck.DENIED, msg); }
+        public static QuotaOutcome pending() { return new QuotaOutcome(QuotaCheck.PENDING, null); }
+    }
+
+    /** Не блокирует поток. Если LuckPerms ещё не закешировал игрока - просит подождать. */
+    public QuotaOutcome checkPersonalShopQuotaSafe(UUID uuid, String playerName) {
+        LuckPerms lp = getLuckPerms();
+        if (lp == null) return QuotaOutcome.denied("LuckPerms недоступен.");
+
+        User user = lp.getUserManager().getUser(uuid); // не блокирует, просто читает кеш
+        if (user == null) {
+            lp.getUserManager().loadUser(uuid); // fire-and-forget, прогреет кеш к следующей попытке
+            return QuotaOutcome.pending();
+        }
+
+        int allowed = extractShopQuota(user);
+        int have = countOwnedZones(playerName, ZoneType.SHOP);
+
+        if (allowed <= 0) return QuotaOutcome.denied("У вас нет разрешения на создание магазинов (unity.shop.<N>).");
+        if (have >= allowed) return QuotaOutcome.denied("Лимит личных магазинов достигнут: " + have + "/" + allowed + ".");
+        return QuotaOutcome.allowed();
+    }
+
+    private int extractShopQuota(User user) {
+        int max = 0;
+        for (var e : user.getCachedData().getPermissionData().getPermissionMap().entrySet()) {
+            if (!e.getValue()) continue;
+            String perm = e.getKey();
+            if (!perm.startsWith(SHOP_PERM_PREFIX)) continue;
+            try {
+                int n = Integer.parseInt(perm.substring(SHOP_PERM_PREFIX.length()).trim());
+                if (n > max) max = n;
+            } catch (NumberFormatException ignored) {}
+        }
+        return max;
+    }
+
+    /** countCountryZones/resolveCountryGroup работают по имени страны, а не по игроку - тут блокировки нет вообще. */
+    public QuotaOutcome checkCountryZoneQuotaSafe(String countryName, ZoneType type) {
+        if (type == ZoneType.SHOP) return QuotaOutcome.allowed();
+        int quota = getEffectiveCountryQuota(countryName, type);
+        if (quota <= 0) {
+            return QuotaOutcome.denied("У вашей страны нет разрешения на создание зон типа " + type + ".");
+        }
+        int owned = countCountryZones(countryName, type);
+        if (owned >= quota) {
+            return QuotaOutcome.denied("Лимит страны на зоны типа " + type + " достигнут: " + quota + ". Уже создано: " + owned + ".");
+        }
+        return QuotaOutcome.allowed();
+    }
+
+    /** Перегрузка по имени владельца - без Player, нужна и старым, и новым методам. */
+    public int countOwnedZones(String ownerName, ZoneType type) {
+        if (ownerName == null || type == null) return 0;
+        int count = 0;
+        for (ZoneInfo z : snapshot.allZones()) {
+            if (z.getType() != type) continue;
+            if (!eqCi(z.getOwner(), ownerName)) continue;
+            count++;
+        }
+        return count;
     }
 }

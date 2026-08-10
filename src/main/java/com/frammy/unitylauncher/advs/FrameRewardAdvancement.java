@@ -8,7 +8,20 @@ import org.bukkit.entity.Player;
 
 public abstract class FrameRewardAdvancement extends BaseAdvancement {
 
-    protected abstract int getFrameId();
+    /** Single-frame achievements only need to override this. */
+    protected int getFrameId() {
+        return 0;
+    }
+
+    /**
+     * Override instead of {@link #getFrameId()} for an achievement that grants
+     * more than one frame at once (e.g. a whole tier of a chain resolving into
+     * a single trigger). Defaults to wrapping {@link #getFrameId()}.
+     */
+    protected int[] getFrameIds() {
+        int single = getFrameId();
+        return single > 0 ? new int[] { single } : new int[0];
+    }
 
     protected FrameRewardAdvancement(
             String key,
@@ -23,12 +36,16 @@ public abstract class FrameRewardAdvancement extends BaseAdvancement {
     public final void giveReward(Player player) {
         super.giveReward(player);
 
-        int frameId = getFrameId();
-        if (frameId <= 0) return;
+        int[] frameIds = getFrameIds();
+        if (frameIds.length == 0) return;
 
         Bukkit.getScheduler().runTaskAsynchronously(
                 UnityLauncher.getInstance(),
-                () -> FramesDao.addUserToFrame(frameId, player.getName())
+                () -> {
+                    for (int frameId : frameIds) {
+                        FramesDao.addUserToFrame(frameId, player.getName());
+                    }
+                }
         );
     }
 }

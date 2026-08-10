@@ -157,7 +157,10 @@ public final class AdvancementsManager implements Listener {
 
         Bukkit.getPluginManager().registerEvents(this, plugin);
         Bukkit.getPluginManager().registerEvents(new BlockBreakAdvancementsListener(ach1), plugin);
-        Bukkit.getPluginManager().registerEvents(new CraftAdvancementsListener(plugin, ach1_1), plugin);
+        // CraftAdvancementsListener (старое условие Ach1_1 — "скрафтить все
+        // вишнёвые предметы") больше не регистрируем: условие поменяли на
+        // ковёр из лепестков (см. infra/frames-catalog.md §6),
+        // PinkPetalCarpetListener ниже — актуальный слушатель.
 
         BiomeTimeAdvancements cherry5Days = new BiomeTimeAdvancements(plugin, ach1_1_1);
         Bukkit.getPluginManager().registerEvents(cherry5Days, plugin);
@@ -171,9 +174,91 @@ public final class AdvancementsManager implements Listener {
                 plugin
         );
 
+        // Волна 2A: простые одноразовые/легко агрегируемые условия — см.
+        // infra/frames-catalog.md §6. CoralAdvancementsListener выше всё ещё
+        // проверяет СТАРЫЕ условия Ach1_2_1/2/3 (текст уже обновлён на новые,
+        // детект — нет), обновление — отдельным заходом.
+        Bukkit.getPluginManager().registerEvents(new VoidElytraDeathListener(dragon_head85), plugin);
+        Bukkit.getPluginManager().registerEvents(new FallDeathListener(feather62), plugin);
+        Bukkit.getPluginManager().registerEvents(new CreeperTntKillListener(tnt54), plugin);
+        Bukkit.getPluginManager().registerEvents(new DragonKillListener(oak_sapling84), plugin);
+        Bukkit.getPluginManager().registerEvents(new RevengeKillListener(diamond_sword64), plugin);
+        Bukkit.getPluginManager().registerEvents(new SamePlaceDeathListener(shield66), plugin);
+        Bukkit.getPluginManager().registerEvents(new GoldAboveGroundListener(raw_gold_block46), plugin);
+        Bukkit.getPluginManager().registerEvents(new EnchantingBookshelfListener(oak_sapling71), plugin);
+        Bukkit.getPluginManager().registerEvents(new MossSpreadListener(plugin, mossy_cobblestone37), plugin);
+        Bukkit.getPluginManager().registerEvents(new ShulkerKillListener(plugin, oak_sapling86), plugin);
 
+        // Волна 2B
+        Bukkit.getPluginManager().registerEvents(new BiomeSleepListener(plugin, obsidian60), plugin);
+        Bukkit.getPluginManager().registerEvents(new TropicalFishCatchListener(plugin, tropical_fish51), plugin);
+        Bukkit.getPluginManager().registerEvents(new WheatTradeListener(plugin, ach1_7), plugin);
+        Bukkit.getPluginManager().registerEvents(new RawIronMiningListener(plugin, oak_sapling45), plugin);
+        Bukkit.getPluginManager().registerEvents(new CraftingTableListener(plugin, oak_sapling28), plugin);
+        Bukkit.getPluginManager().registerEvents(new GuardianKillListener(plugin, oak_sapling87), plugin);
 
+        // Волна 3: "весь игровой день" (опрашиваемые, не событийные) + ещё
+        // событийные. Diamond79/Oak_sapling78 (маркетплейс) и Oak_sapling81
+        // (банкрот) сюда не входят — требуют работы на стороне сайта/
+        // углублённого разбора экономики плагина, отдельным заходом.
+        new ContinuousConditionListener(new GreenArmorCondition(), ach1_8).start(plugin);
+        new ContinuousConditionListener(new SingleItemInventoryCondition(), verdant_froglight73).start(plugin);
+        new UniqueInventoryChecker(plugin, oak_sapling72).start(plugin);
+        Bukkit.getPluginManager().registerEvents(new LonelyFroglightListener(pearlescent_froglight74), plugin);
+        Bukkit.getPluginManager().registerEvents(new VineClimbListener(plugin, ach1_3), plugin);
+        Bukkit.getPluginManager().registerEvents(new GlowBerryHarvestListener(plugin, oak_sapling32), plugin);
+        Bukkit.getPluginManager().registerEvents(new PinkPetalCarpetListener(plugin, ach1_1), plugin);
 
+        // "Не дошли руки" (простые пропущенные условия из ревью прогресса) +
+        // /ul frame give — Алмазная/Незеритовая выдаются вручную админом.
+        Bukkit.getPluginManager().registerEvents(new ConsumeCounterListener(plugin, "driedkelp35", Material.DRIED_KELP, 2000, dried_kelp35), plugin);
+        Bukkit.getPluginManager().registerEvents(new ConsumeCounterListener(plugin, "oaksapling34", Material.ROTTEN_FLESH, 500, oak_sapling34), plugin);
+        Bukkit.getPluginManager().registerEvents(new ChorusHighAltitudeListener(oak_sapling33), plugin);
+        Bukkit.getPluginManager().registerEvents(new BeeBreedListener(plugin, oak_sapling31), plugin);
+        Bukkit.getPluginManager().registerEvents(new GildedBlackstoneBarterListener(gilded_blackstone57), plugin);
+        Bukkit.getPluginManager().registerEvents(new ScaffoldingMaxHeightListener(oak_sapling52), plugin);
+        Bukkit.getPluginManager().registerEvents(new SculkDestroyListener(plugin, sculk68), plugin);
+        Bukkit.getPluginManager().registerEvents(new ShroomlightNetherWalkListener(plugin, shroomlight58), plugin);
+
+        PersistentTimeConditionListener cherry15Days = new PersistentTimeConditionListener(
+                plugin, "oaksapling30_cherry",
+                pp -> pp.getWorld().getBiome(pp.getLocation()) == org.bukkit.block.Biome.CHERRY_GROVE,
+                oak_sapling30, 18000);
+        Bukkit.getPluginManager().registerEvents(cherry15Days, plugin);
+        cherry15Days.start();
+
+        PersistentTimeConditionListener below0For5Days = new PersistentTimeConditionListener(
+                plugin, "oaksapling47_belowzero",
+                pp -> pp.getLocation().getY() < 0,
+                oak_sapling47, 6000);
+        Bukkit.getPluginManager().registerEvents(below0For5Days, plugin);
+        below0For5Days.start();
+
+        PersistentTimeConditionListener online4h = new PersistentTimeConditionListener(
+                plugin, "oaksapling70_online",
+                pp -> true,
+                oak_sapling70, 14400);
+        Bukkit.getPluginManager().registerEvents(online4h, plugin);
+        online4h.start();
+
+        PersistentTimeConditionListener staringFroglight = new PersistentTimeConditionListener(
+                plugin, "oaksapling77_staring",
+                new StaringAtFroglightCondition(),
+                oak_sapling77, 1200);
+        Bukkit.getPluginManager().registerEvents(staringFroglight, plugin);
+        staringFroglight.start();
+
+        PersistentTimeConditionListener underwater15Min = new PersistentTimeConditionListener(
+                plugin, "oaksapling88_underwater",
+                pp -> pp.getEyeLocation().getBlock().getType() == Material.WATER,
+                oak_sapling88, 900);
+        Bukkit.getPluginManager().registerEvents(underwater15Min, plugin);
+        underwater15Min.start();
+
+        // Гранит/Диорит/Андезит и Поршень — последние два чисто плагинных
+        // условия из infra/frames-catalog.md §11.
+        new CountryCitizenshipListener(ach1_6).register();
+        Bukkit.getPluginManager().registerEvents(new LeverPistonListener(plugin, oak_sapling53), plugin);
 
 
         plugin.getLogger().info("[Advancements] Таб '" +

@@ -17,7 +17,7 @@ public class Mossy_cobblestone37 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 34;
 
 @Override
 protected int getFrameId() {
@@ -34,8 +34,8 @@ protected int getFrameId() {
                         1f,
                         10f,
                         "",
-                        "Создать кузнечный шаблон из ",
-                        "замшелого булыжника",
+                        "Заразить мхом (костной мукой) 1000 ",
+                        "блоков рядом с мховым блоком",
                         "",
                         "Награда: Рамка §6Замшелый булыжник"
                 ),

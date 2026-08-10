@@ -17,7 +17,7 @@ public class Diamond79 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 27;
 
 @Override
 protected int getFrameId() {

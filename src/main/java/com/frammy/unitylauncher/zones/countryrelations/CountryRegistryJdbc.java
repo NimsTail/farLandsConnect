@@ -37,10 +37,17 @@ public class CountryRegistryJdbc {
     private final Map<String, String> countryToLeader = new ConcurrentHashMap<>();
     // lowerCountry -> display name as stored in DB (original casing)
     private final Map<String, String> countryLowerToDisplay = new ConcurrentHashMap<>();
+    // lowerCountry -> Countries.Id (стабильный ключ LuckPerms-группы страны — не зависит от транслитерации имени)
+    private final Map<String, Integer> countryLowerToId = new ConcurrentHashMap<>();
     private final Map<String, Double> countryToTransferFeePct = new ConcurrentHashMap<>();
 
     private final Map<String, Double> countryMoney = new ConcurrentHashMap<>();
     private final Map<String, Double> countryWeeklyTaxDue = new ConcurrentHashMap<>();
+    private final Map<String, Double> countryArea = new ConcurrentHashMap<>();
+    // общестрановой лимит площади под участки (PLOT), настраивается лидером на country.html:
+    // mode "none" (по умолчанию, не ограничено) | "percent" (доля от countryArea) | "blocks" (абсолютное число)
+    private final Map<String, String> countryPlotCapMode = new ConcurrentHashMap<>();
+    private final Map<String, Double> countryPlotCapValue = new ConcurrentHashMap<>();
 
     private final JavaPlugin plugin;
 
@@ -64,13 +71,34 @@ public class CountryRegistryJdbc {
     /**
      * @param prefix как "§o§d❉Президент" или "&f"
      */ // простая структура одной роли
-        public record RoleInfo(int id, String name, String prefix, int index) {}
+        public record RoleInfo(int id, String name, String prefix, int index, boolean buildZones, int zoneLimit) {}
 
     /** Комиссия страны (проценты, напр. 1.25 = 1.25%). Если нет — вернёт fallbackPct. */
     public double getCountryTransferFeePctOr(String countryName, double fallbackPct) {
         if (countryName == null || countryName.isBlank()) return fallbackPct;
         refreshCacheIfExpired();
         return countryToTransferFeePct.getOrDefault(countryName.toLowerCase(Locale.ROOT), fallbackPct);
+    }
+
+    /** Площадь территории страны (CountryInfo.Area, блоков²) — 0, если неизвестна. */
+    public double getCountryArea(String countryName) {
+        if (countryName == null || countryName.isBlank()) return 0;
+        refreshCacheIfExpired();
+        return countryArea.getOrDefault(countryName.toLowerCase(Locale.ROOT), 0.0);
+    }
+
+    /** Режим общестранового лимита площади под участки: "none" | "percent" | "blocks". */
+    public String getPlotAreaCapMode(String countryName) {
+        if (countryName == null || countryName.isBlank()) return "none";
+        refreshCacheIfExpired();
+        return countryPlotCapMode.getOrDefault(countryName.toLowerCase(Locale.ROOT), "none");
+    }
+
+    /** Значение лимита: проценты (0..100) при mode="percent", либо блоки² при mode="blocks". */
+    public double getPlotAreaCapValue(String countryName) {
+        if (countryName == null || countryName.isBlank()) return 0;
+        refreshCacheIfExpired();
+        return countryPlotCapValue.getOrDefault(countryName.toLowerCase(Locale.ROOT), 0.0);
     }
 
     /* ===================== ПУБЛИЧНОЕ API ===================== */
@@ -81,6 +109,18 @@ public class CountryRegistryJdbc {
         List<String> out = new ArrayList<>(countryLowerToDisplay.values());
         out.sort(String.CASE_INSENSITIVE_ORDER);
         return out;
+    }
+
+    /**
+     * Стабильный ID страны (Countries.Id) — используется как ключ LuckPerms-группы страны
+     * ВМЕСТО транслитерированного имени, чтобы имя LP-группы не зависело от алфавита/регистра
+     * названия и не могло коллизировать между двумя разными странами.
+     * Возвращает null, если страны с таким именем сейчас нет (например, только что расформирована).
+     */
+    public Integer getCountryId(String countryName) {
+        if (countryName == null || countryName.isBlank()) return null;
+        refreshCacheIfExpired();
+        return countryLowerToId.get(countryName.trim().toLowerCase(Locale.ROOT));
     }
 
     /** Накопленный недельный налог (CountryInfo.WeeklyTaxDue), если нет — 0.0. */
@@ -108,9 +148,7 @@ public class CountryRegistryJdbc {
                 SET CountryInfo = JSON_SET(
                     COALESCE(CountryInfo, JSON_OBJECT()),
                     '$.WeeklyTaxDue',
-                    CAST(
-                        (COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(CountryInfo,'$.WeeklyTaxDue')) AS DECIMAL(20,3)), 0) + ?) AS JSON
-                    )
+                    COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(CountryInfo,'$.WeeklyTaxDue')) AS DECIMAL(20,3)), 0) + ?
                 )
                 WHERE Name = ?
                 """;
@@ -147,7 +185,7 @@ public class CountryRegistryJdbc {
                 SET CountryInfo = JSON_SET(
                     COALESCE(CountryInfo, JSON_OBJECT()),
                     '$.WeeklyTaxDue',
-                    CAST('0' AS JSON)
+                    0
                 )
                 WHERE Name = ?
                 """;
@@ -356,7 +394,43 @@ public class CountryRegistryJdbc {
         return raw;
     }
 
+    /** Право роли игрока строить участки (PLOT) на территории своей страны + лимит участков на игрока этой роли. */
+    public record ZoneBuildPermission(boolean allowed, int limit) {
+        public static final ZoneBuildPermission DENIED = new ZoneBuildPermission(false, 0);
+    }
+
+    /** Право+лимит строительства участков для роли ИГРОКА В ЕГО СОБСТВЕННОЙ стране (не для произвольной страны). */
+    public ZoneBuildPermission getPlayerZoneBuildPermission(String playerName) {
+        if (playerName == null || playerName.isBlank()) return ZoneBuildPermission.DENIED;
+        refreshCacheIfExpired();
+
+        String countryName = playerToCountry.get(playerName.toLowerCase(Locale.ROOT));
+        if (countryName == null || countryName.isBlank()) return ZoneBuildPermission.DENIED;
+
+        Integer rid = playerToRoleId.get(playerName.toLowerCase(Locale.ROOT));
+        if (rid == null) return ZoneBuildPermission.DENIED;
+
+        Map<Integer, RoleInfo> roles = countryRoleMeta.get(countryName.toLowerCase(Locale.ROOT));
+        if (roles == null) return ZoneBuildPermission.DENIED;
+
+        RoleInfo ri = roles.get(rid);
+        if (ri == null || !ri.buildZones()) return ZoneBuildPermission.DENIED;
+        return new ZoneBuildPermission(true, ri.zoneLimit());
+    }
+
     /* ===================== КЭШ СТРАН ===================== */
+
+    /**
+     * Принудительный СИНХРОННЫЙ (блокирующий) рефреш кэша, игнорируя TTL.
+     * Только для редких одноразовых действий, где нельзя ждать асинхронного
+     * обновления — например, разметка территории Государства сразу после
+     * создания страны через сайт (страна только что появилась в БД, а
+     * обычный refreshCacheIfExpired() на главном потоке вернул бы старый
+     * кэш и запустил обновление в фоне, не дождавшись его).
+     */
+    public void forceRefreshBlocking() {
+        refreshCacheNowBlocking_();
+    }
 
     private void refreshCacheIfExpired() {
         Instant now = Instant.now();
@@ -393,6 +467,10 @@ public class CountryRegistryJdbc {
         Map<String, Double> newCountryMoney = new HashMap<>();
         Map<String, Double> newCountryWeeklyTaxDue = new HashMap<>();
         Map<String, String> newCountryLowerToDisplay = new HashMap<>();
+        Map<String, Integer> newCountryLowerToId = new HashMap<>();
+        Map<String, Double> newCountryArea = new HashMap<>();
+        Map<String, String> newCountryPlotCapMode = new HashMap<>();
+        Map<String, Double> newCountryPlotCapValue = new HashMap<>();
 
         try (Connection con = DBConnect()) {
             if (con == null) {
@@ -400,7 +478,7 @@ public class CountryRegistryJdbc {
                 return;
             }
 
-            String sql = "SELECT Name, Players, Permissions, CountryInfo FROM Countries";
+            String sql = "SELECT Id, Name, Players, Permissions, CountryInfo FROM Countries";
             try (PreparedStatement ps = con.prepareStatement(sql);
                  ResultSet rs = ps.executeQuery()) {
 
@@ -413,6 +491,7 @@ public class CountryRegistryJdbc {
 
                     String countryLower = countryName.toLowerCase(Locale.ROOT);
                     newCountryLowerToDisplay.put(countryLower, countryName);
+                    newCountryLowerToId.put(countryLower, rs.getInt("Id"));
 
                     // --- 1. распарсили роли этой страны
                     Map<Integer, RoleInfo> rolesMap = parseRoles(permsJson);
@@ -500,6 +579,43 @@ public class CountryRegistryJdbc {
                                     } catch (Exception ignored) {}
                                     if (taxVal != null) newCountryWeeklyTaxDue.put(countryLower, taxVal);
                                 }
+
+                                // Area (площадь территории страны, блоков²)
+                                if (ci.has("Area") && !ci.get("Area").isJsonNull()) {
+                                    Double areaVal = null;
+                                    try {
+                                        JsonElement aEl = ci.get("Area");
+                                        if (aEl.isJsonPrimitive() && aEl.getAsJsonPrimitive().isNumber()) {
+                                            areaVal = aEl.getAsDouble();
+                                        } else if (aEl.isJsonPrimitive() && aEl.getAsJsonPrimitive().isString()) {
+                                            areaVal = Double.parseDouble(aEl.getAsString().trim());
+                                        }
+                                    } catch (Exception ignored) {}
+                                    if (areaVal != null) newCountryArea.put(countryLower, areaVal);
+                                }
+
+                                // PlotAreaCapMode/PlotAreaCapValue — общестрановой лимит площади под
+                                // участки (PLOT), настраивается лидером на country.html
+                                if (ci.has("PlotAreaCapMode") && !ci.get("PlotAreaCapMode").isJsonNull()) {
+                                    try {
+                                        String modeVal = ci.get("PlotAreaCapMode").getAsString().trim().toLowerCase(Locale.ROOT);
+                                        if (modeVal.equals("percent") || modeVal.equals("blocks") || modeVal.equals("none")) {
+                                            newCountryPlotCapMode.put(countryLower, modeVal);
+                                        }
+                                    } catch (Exception ignored) {}
+                                }
+                                if (ci.has("PlotAreaCapValue") && !ci.get("PlotAreaCapValue").isJsonNull()) {
+                                    Double capVal = null;
+                                    try {
+                                        JsonElement cEl = ci.get("PlotAreaCapValue");
+                                        if (cEl.isJsonPrimitive() && cEl.getAsJsonPrimitive().isNumber()) {
+                                            capVal = cEl.getAsDouble();
+                                        } else if (cEl.isJsonPrimitive() && cEl.getAsJsonPrimitive().isString()) {
+                                            capVal = Double.parseDouble(cEl.getAsString().trim());
+                                        }
+                                    } catch (Exception ignored) {}
+                                    if (capVal != null && capVal >= 0) newCountryPlotCapValue.put(countryLower, capVal);
+                                }
                             }
                         }
                     } catch (Throwable ignored) {}
@@ -532,8 +648,20 @@ public class CountryRegistryJdbc {
         countryLowerToDisplay.clear();
         countryLowerToDisplay.putAll(newCountryLowerToDisplay);
 
+        countryLowerToId.clear();
+        countryLowerToId.putAll(newCountryLowerToId);
+
         countryWeeklyTaxDue.clear();
         countryWeeklyTaxDue.putAll(newCountryWeeklyTaxDue);
+
+        countryArea.clear();
+        countryArea.putAll(newCountryArea);
+
+        countryPlotCapMode.clear();
+        countryPlotCapMode.putAll(newCountryPlotCapMode);
+
+        countryPlotCapValue.clear();
+        countryPlotCapValue.putAll(newCountryPlotCapValue);
 
         cacheLoadedOnce = true;
         lastRefresh = Instant.now();
@@ -697,8 +825,37 @@ public class CountryRegistryJdbc {
             }
         } catch (Exception ignored) {}
 
+        // Permissions.buildZones (bool, вложенный объект, как invite/players/settings/upgrades/permissions)
+        // — право строить личные участки (PLOT) на территории страны
+        boolean buildZones = false;
+        try {
+            if (o.has("Permissions") && o.get("Permissions").isJsonObject()) {
+                JsonObject perms = o.getAsJsonObject("Permissions");
+                if (perms.has("buildZones") && !perms.get("buildZones").isJsonNull()) {
+                    JsonElement el = perms.get("buildZones");
+                    if (el.isJsonPrimitive()) {
+                        var prim = el.getAsJsonPrimitive();
+                        buildZones = prim.isBoolean() ? prim.getAsBoolean() : Boolean.parseBoolean(prim.getAsString());
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
+        // ZoneLimit — верхнеуровневое поле роли (не внутри Permissions, т.к. это число, а не флаг)
+        // — максимум участков (PLOT) на игрока этой роли внутри территории страны
+        int zoneLimit = 0;
+        try {
+            if (o.has("ZoneLimit") && !o.get("ZoneLimit").isJsonNull()) {
+                JsonElement el = o.get("ZoneLimit");
+                if (el.isJsonPrimitive()) {
+                    if (el.getAsJsonPrimitive().isNumber()) zoneLimit = el.getAsInt();
+                    else if (el.getAsJsonPrimitive().isString()) zoneLimit = Integer.parseInt(el.getAsString().trim());
+                }
+            }
+        } catch (Exception ignored) {}
+
         if (id == null) return null;
-        return new RoleInfo(id, name, prefix, idx);
+        return new RoleInfo(id, name, prefix, idx, buildZones, zoneLimit);
     }
 
     public int getPlayerRoleIndex(String playerName) {
@@ -761,8 +918,8 @@ public class CountryRegistryJdbc {
             UPDATE Countries
             SET CountryInfo = JSON_SET(
                 COALESCE(CountryInfo, JSON_OBJECT()),
-                '$.Area',  CAST(? AS JSON),
-                '$.Money', COALESCE(JSON_EXTRACT(CountryInfo,'$.Money'), CAST('0' AS JSON))
+                '$.Area',  ?,
+                '$.Money', COALESCE(JSON_EXTRACT(CountryInfo,'$.Money'), 0)
             )
             WHERE Name = ?
             """;
@@ -788,9 +945,9 @@ public class CountryRegistryJdbc {
                 SET CountryInfo = JSON_SET(
                     COALESCE(CountryInfo, JSON_OBJECT()),
                     '$.Area',
-                    CAST( (COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(CountryInfo,'$.Area')) AS DECIMAL(20,3)), 0) + ?) AS JSON ),
+                    COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(CountryInfo,'$.Area')) AS DECIMAL(20,3)), 0) + ?,
                     '$.Money',
-                    COALESCE(JSON_EXTRACT(CountryInfo,'$.Money'), CAST('0' AS JSON))
+                    COALESCE(JSON_EXTRACT(CountryInfo,'$.Money'), 0)
                 )
                 WHERE Name = ?
                 """;
@@ -828,14 +985,10 @@ public class CountryRegistryJdbc {
                 SET CountryInfo = JSON_SET(
                     COALESCE(CountryInfo, JSON_OBJECT()),
                     '$.Taxes',
-                    CAST(
-                        (
-                            COALESCE(
-                                CAST(JSON_UNQUOTE(JSON_EXTRACT(CountryInfo,'$.Taxes')) AS DECIMAL(20,3)),
-                                0
-                            ) + ?
-                        ) AS JSON
-                    )
+                    COALESCE(
+                        CAST(JSON_UNQUOTE(JSON_EXTRACT(CountryInfo,'$.Taxes')) AS DECIMAL(20,3)),
+                        0
+                    ) + ?
                 )
                 WHERE Name = ?
                 """;

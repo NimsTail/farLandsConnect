@@ -24,6 +24,14 @@ public class AuthService {
     private final ConcurrentHashMap<String, AuthRecord> authCache = new ConcurrentHashMap<>();
     private final AtomicBoolean preloadDone = new AtomicBoolean(false);
 
+    // Best-effort mirror to the new farlandsconnect backend — never authoritative,
+    // never blocks local auth. See FarLandsApiClient for details.
+    private final FarLandsApiClient api;
+
+    public AuthService(FarLandsApiClient api) {
+        this.api = api;
+    }
+
     // 24 часа жива сессия (можно менять)
     public static final long AUTH_TTL_MS = UnityLauncher.getAuthTtlMs();
 
@@ -163,6 +171,8 @@ public class AuthService {
             updateCacheAfterPasswordSet(player, enc);
             // сессия дальше выставится через AuthListener.completeRegister() -> auth.markSession()
 
+            if (api != null) api.upsertUser(player, new String(password));
+
             return true;
         } catch (Exception e) {
             Bukkit.getLogger().warning("[Auth] registerNewUser: " + e.getMessage());
@@ -272,7 +282,10 @@ public class AuthService {
                 ps.setString(1, enc);
                 ps.setString(2, player);
                 boolean ok = ps.executeUpdate() > 0;
-                if (ok) updateCacheAfterPasswordSet(player, enc);
+                if (ok) {
+                    updateCacheAfterPasswordSet(player, enc);
+                    if (api != null) api.changePassword(player, new String(newPass));
+                }
                 return ok;
             }
         } catch (Exception e) {

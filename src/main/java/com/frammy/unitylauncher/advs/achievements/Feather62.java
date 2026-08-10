@@ -17,7 +17,7 @@ public class Feather62 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 31;
 
 @Override
 protected int getFrameId() {

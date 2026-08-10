@@ -17,7 +17,7 @@ public final class ZoneCommands {
 
     public void handle(Player p, String[] args) {
         if (args == null || args.length < 1) {
-            p.sendMessage(ChatColor.RED + "Использование: /ul zone <addcorner|removecorner|build|update|price|remove|confirmremove|cancelremove>");
+            p.sendMessage(ChatColor.RED + "Использование: /ul zone <addcorner|removecorner|build|update|price|remove|confirmremove|cancelremove|addmember|removemember|transferowner>");
             return;
         }
 
@@ -99,6 +99,21 @@ public final class ZoneCommands {
             case "confirmremove" -> zones.confirmRemoveZone(p);
 
             case "cancelremove" -> zones.cancelRemoveZone(p);
+
+            case "addmember" -> {
+                if (args.length != 2) { p.sendMessage(ChatColor.RED + "Использование: /ul zone addmember <ник>"); return; }
+                zones.addMemberCmd(p, args[1]);
+            }
+
+            case "removemember" -> {
+                if (args.length != 2) { p.sendMessage(ChatColor.RED + "Использование: /ul zone removemember <ник>"); return; }
+                zones.removeMemberCmd(p, args[1]);
+            }
+
+            case "transferowner" -> {
+                if (args.length != 2) { p.sendMessage(ChatColor.RED + "Использование: /ul zone transferowner <ник>"); return; }
+                zones.transferOwnerCmd(p, args[1]);
+            }
 
             default -> p.sendMessage(ChatColor.RED + "Неизвестная команда!");
         }

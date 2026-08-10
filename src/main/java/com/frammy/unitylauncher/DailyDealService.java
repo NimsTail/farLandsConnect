@@ -45,7 +45,7 @@ public final class DailyDealService {
         }
 
         plugin.getLogger().warning("[DailyDeal] day changed " + last + " -> " + today
-                + ", resetting Users.GeneralData.dayDealCode=\"0\" and dayDealRerollsLeft=2");
+                + ", resetting Users.GeneralData.dayDealCode=\"0\" and dayDealRerollsLeft=3");
 
         // делаем апдейт асинхронно, чтобы не блокировать старт
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
@@ -54,7 +54,7 @@ public final class DailyDealService {
                 SET GeneralData = JSON_SET(
                     COALESCE(GeneralData, JSON_OBJECT()),
                     '$.dayDealCode', '0',
-                    '$.dayDealRerollsLeft', 2
+                    '$.dayDealRerollsLeft', 3
                 )
                 """;
 

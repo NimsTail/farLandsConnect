@@ -17,7 +17,7 @@ public class Oak_sapling45 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 41;
 
 @Override
 protected int getFrameId() {
@@ -34,7 +34,7 @@ protected int getFrameId() {
                         1f,
                         11f,
                         "",
-                        "Сделать блок рудного железа",
+                        "Добыть суммарно 500 рудного железа",
                         "",
                         "Награда: Рамка §bРудное Железо"
                 ),

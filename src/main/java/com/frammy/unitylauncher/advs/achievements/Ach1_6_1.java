@@ -16,13 +16,11 @@ public class Ach1_6_1 extends FrameRewardAdvancement  {
             "ach1_6_1"
     );
 
-    
-private static final int FRAME_ID = 8;
+    // No frame reward of its own — Ach1_6 grants all three (Гранит/Диорит/
+    // Андезит) at once now, see infra/frames-catalog.md §3 item 2. Left
+    // registered for the tree's visual chain; getFrameId() defaults to 0.
 
-@Override
-protected int getFrameId() {
-    return FRAME_ID;
-}public Ach1_6_1(Advancement parent) {
+    public Ach1_6_1(Advancement parent) {
         super(
                 KEY.getKey(),
                 new FancyAdvancementDisplay(
@@ -35,8 +33,7 @@ protected int getFrameId() {
                         7f,
                         "",
                         "Стать гражданином любой из стран",
-                        "",
-                        "Награда: Рамка §bДиорит"
+                        ""
                 ),
                 parent,
                 1

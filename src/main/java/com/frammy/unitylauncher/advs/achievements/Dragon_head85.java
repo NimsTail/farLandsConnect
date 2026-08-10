@@ -17,7 +17,7 @@ public class Dragon_head85 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 29;
 
 @Override
 protected int getFrameId() {

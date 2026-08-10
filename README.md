@@ -539,6 +539,37 @@ tolls:
 
 ## 🔗 Интеграция
 
+### Мост с сайтом farlandsconnect (`auth/FarLandsApiClient.java`)
+
+Плагин — единственный источник правды для всей игровой экономики/зон/апгрейдов
+(своя MySQL). Сайт (`farlands.in`) — отдельная система с собственной Postgres,
+которой для входа игроков и части UI (баланс, задания, last-seen) нужна
+**копия**, а не прямой доступ к MySQL. `FarLandsApiClient` — fire-and-forget
+HTTP-клиент (Java 21 `HttpClient`, без внешних зависимостей), который после
+локальной мутации в MySQL дублирует событие на бэкенд сайта через `/plugin/*`
+(контракт — `infra/auth-api-contract.md` в репозитории `farlandsconnect`).
+
+Важно: это **зеркало, не источник истины**. Если бэкенд сайта недоступен —
+ошибка логируется (`[FarLandsApi] ... failed: ...`) и локальная логика
+(регистрация/логин/экономика) работает как ни в чём не бывало.
+
+Сейчас замирроренa только авторизация:
+
+| Локальное событие | Хук | Эндпоинт сайта |
+|---|---|---|
+| `AuthService.registerNewUser()` | после успешной вставки в `Users` | `POST /plugin/users` |
+| `AuthService.setNewPassword()` | после успешного `UPDATE Users SET Password` | `POST /plugin/users/:username/password` |
+| `AuthListener.onQuit()` (если игрок был аутентифицирован) | при выходе | `POST /plugin/users/:username/last-seen` |
+
+Конфиг — `plugins/UnityLauncher/secrets.properties` (не в git, runtime-файл,
+не бейкается в jar — специально, чтобы один и тот же jar работал и на dev,
+и на проде с разными значениями):
+```properties
+backend.apiBaseUrl=https://farlands.frammy.lat
+backend.apiToken=<PLUGIN_API_TOKEN из backend/.env на VPS>
+```
+Пустые значения — мост выключен, `FarLandsApiClient.isEnabled() == false`.
+
 ### Интеграция с системой магазинов (SignManager)
 
 ```java

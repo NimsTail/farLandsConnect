@@ -17,7 +17,7 @@ public class Oak_sapling36 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 0;
 
 @Override
 protected int getFrameId() {

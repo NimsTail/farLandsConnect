@@ -8,20 +8,47 @@ import org.bukkit.util.BoundingBox;
 import java.time.LocalDate;
 import java.util.*;
 
-/** Минимальная и удобная модель зоны. */
+/**
+ * Минимальная и удобная модель зоны.
+ *
+ * ===== Мульти-полигон =====
+ * Зона может состоять из НЕСКОЛЬКИХ отдельных фигур ("shapes") — например,
+ * магазин с двумя отдельными участками застройки. Первая фигура (shapes[0])
+ * называется "основной" и остаётся полностью эквивалентна старому полю
+ * corners — весь код, написанный ДО введения мульти-полигонов и работающий
+ * через getCorners()/setCorners(), продолжает работать без изменений (для
+ * подавляющего большинства зон, у которых ровно одна фигура, поведение
+ * идентично старому). Доп. фигуры добавляются только через addShape()/
+ * ZoneManager.ADD_SHAPE и учитываются явно в тех местах, где это важно для
+ * геймплея/биллинга (контейнмент, пересечения, площадь, BlueMap-маркеры).
+ *
+ * COLONY принципиально ОДНОполигональна (фундаментальный контейнер, для
+ * неё мульти-полигон не поддерживается). COUNTRY, наоборот, поддерживает
+ * несколько отдельных эксклавов территории — см. ZoneManager.buildZoneCountryCore
+ * и ZoneOverlapRules (containment проверяется по ОБЪЕДИНЕНИЮ всех фигур).
+ */
 public class ZoneInfo {
 
     // ===== Core =====
-    private final ZoneType type;
+    private ZoneType type;
     private final String id;
     private String name;
     private final String markerID;
     private String owner;                 // текстовый владелец (игрок/страна по старой логике)
-    private final List<Location> corners; // ЖИВОЙ список (можно изменять)
+    /** shapes.get(0) — основная фигура (= старое поле corners), shapes.size() всегда >= 1. */
+    private final List<List<Location>> shapes;
     private Color fillColor;
 
     /** Нормализованное имя страны-владельца (LuckPerms-группа). */
     private String ownerCountry;
+
+    /**
+     * Участники личной зоны (плоский список ников, без иерархии/ролей) —
+     * только для PLOT/обычных зон, НЕ для COUNTRY/COLONY (у них своя система
+     * прав через Countries.Players/Permissions). Реестр — на игровые права
+     * (строительство и т.п.) сейчас не влияет.
+     */
+    private final Set<String> members = new LinkedHashSet<>();
 
     // ===== Billing (последние 14 дней) =====
     public record DailyEntry(LocalDate date, double cost) {}
@@ -36,28 +63,103 @@ public class ZoneInfo {
         this.id = Objects.requireNonNull(id, "id");
         this.name = name != null ? name : "";
         this.markerID = Objects.requireNonNull(markerID, "markerID");
-        this.corners = (corners != null) ? new ArrayList<>(corners) : new ArrayList<>();
+        this.shapes = new ArrayList<>();
+        this.shapes.add((corners != null) ? new ArrayList<>(corners) : new ArrayList<>());
         this.owner = owner;
         this.fillColor = fillColor;
     }
 
     // ===== Getters / setters (только нужные) =====
     public ZoneType getType()           { return type; }
+    /** Смена типа зоны — только для повышения PLOT ("Участок") до целевого типа (ZoneManager.upgradeTypeCore). */
+    public void setType(ZoneType type)  { this.type = Objects.requireNonNull(type, "type"); }
     public String getID()               { return id; }
     public String getName()             { return name; }
     public void setName(String name)    { this.name = name != null ? name : ""; }
 
     public String getMarkerID()         { return markerID; }
 
-    /** Возвращает ЖИВОЙ список углов (можно add/remove). */
-    public List<Location> getCorners()  { return corners; }
+    /** Возвращает ЖИВОЙ список углов ОСНОВНОЙ фигуры (можно add/remove). Для многофигурных зон — только shapes[0]. */
+    public List<Location> getCorners()  { return shapes.get(0); }
     public void setCorners(List<Location> pts) {
-        this.corners.clear();
-        if (pts != null) this.corners.addAll(pts);
+        setShapeAt(0, pts);
+    }
+
+    /** Как getCorners(), но для ЛЮБОЙ фигуры зоны по индексу (0 = основная). */
+    public List<Location> getShapeAt(int index) {
+        if (index < 0 || index >= shapes.size()) return getCorners();
+        return shapes.get(index);
+    }
+
+    /** Как setCorners(), но для ЛЮБОЙ фигуры зоны по индексу (0 = основная). */
+    public void setShapeAt(int index, List<Location> pts) {
+        if (index < 0 || index >= shapes.size()) index = 0;
+        List<Location> target = shapes.get(index);
+        target.clear();
+        if (pts != null) target.addAll(pts);
+    }
+
+    /** Неизменяемый снимок ВСЕХ фигур зоны (всегда >= 1 элемент). */
+    public List<List<Location>> getShapes() {
+        List<List<Location>> copy = new ArrayList<>(shapes.size());
+        for (List<Location> s : shapes) copy.add(List.copyOf(s));
+        return List.copyOf(copy);
+    }
+
+    public int getShapeCount() { return shapes.size(); }
+
+    /** Полностью заменяет набор фигур (используется при создании многофигурной зоны). */
+    public void setShapes(List<List<Location>> newShapes) {
+        if (newShapes == null || newShapes.isEmpty()) {
+            throw new IllegalArgumentException("У зоны должна быть хотя бы одна фигура.");
+        }
+        shapes.clear();
+        for (List<Location> s : newShapes) shapes.add(new ArrayList<>(s));
+    }
+
+    /** Добавляет ещё одну (доп.) фигуру к зоне — см. ZoneManager.addShapeCore. */
+    public void addShape(List<Location> pts) {
+        Objects.requireNonNull(pts, "pts");
+        shapes.add(new ArrayList<>(pts));
     }
 
     public String getOwner()            { return owner; }
     public void setOwner(String owner)  { this.owner = owner; }
+
+    // ===== Участники (реестр, без игровых прав) =====
+    /** Неизменяемый снимок ников участников (владелец в список не входит). */
+    public Set<String> getMembers() { return Set.copyOf(members); }
+
+    public boolean isMember(String playerName) {
+        if (playerName == null) return false;
+        for (String m : members) if (m.equalsIgnoreCase(playerName)) return true;
+        return false;
+    }
+
+    /** @return true если реально добавлен (false — если уже был участником или совпал с owner) */
+    public boolean addMember(String playerName) {
+        if (playerName == null || playerName.isBlank()) return false;
+        if (playerName.equalsIgnoreCase(owner)) return false;
+        if (isMember(playerName)) return false;
+        members.add(playerName);
+        return true;
+    }
+
+    /** @return true если реально удалён */
+    public boolean removeMember(String playerName) {
+        if (playerName == null) return false;
+        return members.removeIf(m -> m.equalsIgnoreCase(playerName));
+    }
+
+    /** Полностью заменяет список участников (используется при загрузке из БД). */
+    public void setMembers(Collection<String> names) {
+        members.clear();
+        if (names != null) {
+            for (String n : names) {
+                if (n != null && !n.isBlank() && !n.equalsIgnoreCase(owner)) members.add(n);
+            }
+        }
+    }
 
     public Color getFillColor()         { return fillColor; }
     public void setFillColor(Color c)   { this.fillColor = c; }
@@ -72,25 +174,32 @@ public class ZoneInfo {
 
     public boolean hasCountry() { return notBlank(ownerCountry); }
 
-    /** Мир зоны по первому углу (или null). */
+    /** Мир зоны по первому непустому углу любой из фигур (или null). */
     public World getWorld() {
-        if (corners.isEmpty()) return null;
-        for (Location l : corners) {
-            if (l != null && l.getWorld() != null) return l.getWorld();
+        for (List<Location> shape : shapes) {
+            for (Location l : shape) {
+                if (l != null && l.getWorld() != null) return l.getWorld();
+            }
         }
         return null;
     }
 
-    /** Проверка попадания точки внутрь полигона зоны (XZ), с проверкой мира. */
+    /** Проверка попадания точки внутрь ЛЮБОЙ из фигур зоны (XZ), с проверкой мира. */
     public boolean contains2D(Location loc) {
-        if (loc == null || corners.size() < 3) return false;
-        World w = getWorld();
-        if (w == null || loc.getWorld() == null || !w.getUID().equals(loc.getWorld().getUID())) return false;
+        if (loc == null || loc.getWorld() == null) return false;
+        for (List<Location> shape : shapes) {
+            if (shape.size() < 3) continue;
+            World w = shape.getFirst().getWorld();
+            if (w == null || !w.getUID().equals(loc.getWorld().getUID())) continue;
+            if (pointInRing(shape, loc.getX(), loc.getZ())) return true;
+        }
+        return false;
+    }
 
-        double x = loc.getX(), z = loc.getZ();
+    private static boolean pointInRing(List<Location> ring, double x, double z) {
         boolean inside = false;
-        for (int i = 0, j = corners.size() - 1; i < corners.size(); j = i++) {
-            Location a = corners.get(i), b = corners.get(j);
+        for (int i = 0, j = ring.size() - 1; i < ring.size(); j = i++) {
+            Location a = ring.get(i), b = ring.get(j);
             double xi = a.getX(), zi = a.getZ();
             double xj = b.getX(), zj = b.getZ();
             boolean inter = ((zi > z) != (zj > z)) &&
@@ -148,34 +257,32 @@ public class ZoneInfo {
     private static boolean notBlank(String s) { return s != null && !s.isBlank(); }
 
     @Override public String toString() {
+        int totalPoints = 0;
+        for (List<Location> s : shapes) totalPoints += s.size();
         return "ZoneInfo{type=" + type + ", id='" + id + "', name='" + name +
                 "', owner='" + owner + "', country='" + ownerCountry +
-                "', corners=" + corners.size() + '}';
+                "', shapes=" + shapes.size() + ", points=" + totalPoints + '}';
     }
 
-    // Быстрый AABB по XZ для текущих углов зоны.
+    // Быстрый AABB по XZ по ВСЕМ фигурам зоны.
     public BoundingBox getBoundingBoxXZ() {
-        if (corners.isEmpty()) {
-            // пустая зона — нулевая рамка
-            return new BoundingBox(0, 0, 0, 0, 0, 0);
-        }
-
         double minX = Double.POSITIVE_INFINITY, minZ = Double.POSITIVE_INFINITY;
         double maxX = Double.NEGATIVE_INFINITY, maxZ = Double.NEGATIVE_INFINITY;
         World w = null;
 
-        for (Location loc : corners) {
-            if (loc == null) continue;
-            if (w == null) w = loc.getWorld();
-            double x = loc.getX();
-            double z = loc.getZ();
-            if (x < minX) minX = x;
-            if (x > maxX) maxX = x;
-            if (z < minZ) minZ = z;
-            if (z > maxZ) maxZ = z;
+        for (List<Location> shape : shapes) {
+            for (Location loc : shape) {
+                if (loc == null) continue;
+                if (w == null) w = loc.getWorld();
+                double x = loc.getX();
+                double z = loc.getZ();
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (z < minZ) minZ = z;
+                if (z > maxZ) maxZ = z;
+            }
         }
 
-        // если вдруг все loc == null
         if (Double.isInfinite(minX) || Double.isInfinite(minZ)) {
             return new BoundingBox(0, 0, 0, 0, 0, 0);
         }
@@ -184,7 +291,7 @@ public class ZoneInfo {
         return new BoundingBox(minX, 0, minZ, maxX, maxY, maxZ);
     }
 
-    /** Центр зоны (примерно): центр AABB по XZ + y по highestBlock. */
+    /** Центр зоны (примерно): центр AABB по XZ (по всем фигурам) + y по highestBlock. */
     public Location getCenter() {
         World w = getWorld();
         if (w == null) return null;

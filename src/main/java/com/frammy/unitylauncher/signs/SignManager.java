@@ -114,20 +114,21 @@ public final class SignManager implements Listener {
 
     // ======= helpers (оставляем тут, чтобы не плодить util пока) =======
 
+    // ВАЖНО: раньше тут было просто trim+lowercase БЕЗ транслитерации/резолва по ID — это была
+    // третья, отдельная от UpgradeCondition схема канонизации страны, из-за которой лимиты
+    // ATM/TRASH по правам могли смотреть не в ту LuckPerms-группу. Теперь делегируем в
+    // UpgradeCondition, чтобы везде использовался один и тот же ключ (Countries.Id).
     private static String playerCountryCanonical(String playerName) {
-        if (playerName == null || playerName.isBlank()) return null;
-
-        String c = UnityLauncher.getInstance().countryRegistryJdbc.getCountryOfPlayer(playerName);
-        if (c == null || c.isBlank()) return null;
-
-        return c.trim().toLowerCase(Locale.ROOT);
+        return com.frammy.unitylauncher.upgrades.UpgradeCondition.playerCountryCanonical(playerName);
     }
 
     private static String signCountryCanonical(SignVariables sv) {
         if (sv == null) return null;
 
         String c = sv.getOwnerCountry();
-        if (c != null && !c.isBlank()) return c.trim().toLowerCase(Locale.ROOT);
+        if (c != null && !c.isBlank()) {
+            return com.frammy.unitylauncher.upgrades.UpgradeCondition.resolveCountryGroupId(c);
+        }
 
         String owner = sv.getOwnerName();
         return playerCountryCanonical(owner);

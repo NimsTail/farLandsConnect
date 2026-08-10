@@ -18,7 +18,13 @@ public record CountryCfg(
         LivestockCfg livestock,
         NetheriteBeaconGatingCfg netheriteBeaconGating,
         RedstoneGatingCfg redstoneGating,
-        TntQuarryCfg tntQuarry
+        TntQuarryCfg tntQuarry,
+        EnergySavingCfg energySaving,
+        FestivalOfLightsCfg festivalOfLights,
+        TruePondsAndFlowerbedsCfg truePondsAndFlowerbeds,
+        ReturnOfTheSparkCfg returnOfTheSpark,
+        HolyAuraCfg holyAura,
+        CitizenBenefitsCfg citizenBenefits
 ) {
     public static CountryCfg defaults() {
         return new CountryCfg(
@@ -31,7 +37,13 @@ public record CountryCfg(
                 LivestockCfg.defaults(),
                 NetheriteBeaconGatingCfg.defaults(),
                 RedstoneGatingCfg.defaults(),
-                TntQuarryCfg.defaults()
+                TntQuarryCfg.defaults(),
+                EnergySavingCfg.defaults(),
+                FestivalOfLightsCfg.defaults(),
+                TruePondsAndFlowerbedsCfg.defaults(),
+                ReturnOfTheSparkCfg.defaults(),
+                HolyAuraCfg.defaults(),
+                CitizenBenefitsCfg.defaults()
         );
     }
 
@@ -132,6 +144,40 @@ public record CountryCfg(
         dirty |= def(c, "country.tntQuarry.licenseOres", tq.licenseOres());
         dirty |= def(c, "country.tntQuarry.licenseMaxExtra", tq.licenseMaxExtra());
         dirty |= def(c, "country.tntQuarry.licenseChancePerExtra", tq.licenseChancePerExtra());
+
+        var es = EnergySavingCfg.defaults();
+        dirty |= def(c, "country.energySaving.enabled", es.enabled());
+        dirty |= def(c, "country.energySaving.permBase", es.permBase());
+        dirty |= def(c, "country.energySaving.reductionPercent", es.reductionPercent());
+
+        var fol = FestivalOfLightsCfg.defaults();
+        dirty |= def(c, "country.festivalOfLights.enabled", fol.enabled());
+        dirty |= def(c, "country.festivalOfLights.permBase", fol.permBase());
+        dirty |= def(c, "country.festivalOfLights.periodTicks", fol.periodTicks());
+        dirty |= def(c, "country.festivalOfLights.buffDurationTicks", fol.buffDurationTicks());
+
+        var pfb = TruePondsAndFlowerbedsCfg.defaults();
+        dirty |= def(c, "country.truePondsAndFlowerbeds.enabled", pfb.enabled());
+        dirty |= def(c, "country.truePondsAndFlowerbeds.permBase", pfb.permBase());
+        dirty |= def(c, "country.truePondsAndFlowerbeds.periodTicks", pfb.periodTicks());
+        dirty |= def(c, "country.truePondsAndFlowerbeds.buffDurationTicks", pfb.buffDurationTicks());
+        dirty |= def(c, "country.truePondsAndFlowerbeds.waterRadius", pfb.waterRadius());
+
+        var rots = ReturnOfTheSparkCfg.defaults();
+        dirty |= def(c, "country.returnOfTheSpark.enabled", rots.enabled());
+        dirty |= def(c, "country.returnOfTheSpark.permBase", rots.permBase());
+        dirty |= def(c, "country.returnOfTheSpark.buffDurationTicks", rots.buffDurationTicks());
+
+        var ha = HolyAuraCfg.defaults();
+        dirty |= def(c, "country.holyAura.enabled", ha.enabled());
+        dirty |= def(c, "country.holyAura.permBase", ha.permBase());
+        dirty |= def(c, "country.holyAura.periodTicks", ha.periodTicks());
+
+        var cb = CitizenBenefitsCfg.defaults();
+        dirty |= def(c, "country.citizenBenefits.enabled", cb.enabled());
+        dirty |= def(c, "country.citizenBenefits.permBase", cb.permBase());
+        dirty |= def(c, "country.citizenBenefits.periodTicks", cb.periodTicks());
+        dirty |= def(c, "country.citizenBenefits.saturationAmount", cb.saturationAmount());
 
         return dirty;
     }
@@ -272,7 +318,54 @@ public record CountryCfg(
                 c.getDouble("country.tntQuarry.licenseChancePerExtra", tqD.licenseChancePerExtra())
         );
 
-        return new CountryCfg(antiPhantom, effects, church, farmland, foodRation, gf, livestock, nb, rs, tq);
+        var esD = EnergySavingCfg.defaults();
+        var es = new EnergySavingCfg(
+                c.getBoolean("country.energySaving.enabled", esD.enabled()),
+                str(c, "country.energySaving.permBase", esD.permBase()),
+                c.getDouble("country.energySaving.reductionPercent", esD.reductionPercent())
+        );
+
+        var folD = FestivalOfLightsCfg.defaults();
+        var fol = new FestivalOfLightsCfg(
+                c.getBoolean("country.festivalOfLights.enabled", folD.enabled()),
+                str(c, "country.festivalOfLights.permBase", folD.permBase()),
+                c.getLong("country.festivalOfLights.periodTicks", folD.periodTicks()),
+                c.getInt("country.festivalOfLights.buffDurationTicks", folD.buffDurationTicks())
+        );
+
+        var pfbD = TruePondsAndFlowerbedsCfg.defaults();
+        var pfb = new TruePondsAndFlowerbedsCfg(
+                c.getBoolean("country.truePondsAndFlowerbeds.enabled", pfbD.enabled()),
+                str(c, "country.truePondsAndFlowerbeds.permBase", pfbD.permBase()),
+                c.getLong("country.truePondsAndFlowerbeds.periodTicks", pfbD.periodTicks()),
+                c.getInt("country.truePondsAndFlowerbeds.buffDurationTicks", pfbD.buffDurationTicks()),
+                c.getInt("country.truePondsAndFlowerbeds.waterRadius", pfbD.waterRadius())
+        );
+
+        var rotsD = ReturnOfTheSparkCfg.defaults();
+        var rots = new ReturnOfTheSparkCfg(
+                c.getBoolean("country.returnOfTheSpark.enabled", rotsD.enabled()),
+                str(c, "country.returnOfTheSpark.permBase", rotsD.permBase()),
+                c.getInt("country.returnOfTheSpark.buffDurationTicks", rotsD.buffDurationTicks())
+        );
+
+        var haD = HolyAuraCfg.defaults();
+        var ha = new HolyAuraCfg(
+                c.getBoolean("country.holyAura.enabled", haD.enabled()),
+                str(c, "country.holyAura.permBase", haD.permBase()),
+                c.getLong("country.holyAura.periodTicks", haD.periodTicks())
+        );
+
+        var cbD = CitizenBenefitsCfg.defaults();
+        var cb = new CitizenBenefitsCfg(
+                c.getBoolean("country.citizenBenefits.enabled", cbD.enabled()),
+                str(c, "country.citizenBenefits.permBase", cbD.permBase()),
+                c.getLong("country.citizenBenefits.periodTicks", cbD.periodTicks()),
+                (float) c.getDouble("country.citizenBenefits.saturationAmount", cbD.saturationAmount())
+        );
+
+        return new CountryCfg(antiPhantom, effects, church, farmland, foodRation, gf, livestock, nb, rs, tq,
+                es, fol, pfb, rots, ha, cb);
     }
 
     public record AntiPhantomCfg(boolean enabled, String permBase) {
@@ -528,5 +621,33 @@ public record CountryCfg(
                     0.20
             );
         }
+    }
+
+    public record EnergySavingCfg(boolean enabled, String permBase, double reductionPercent) {
+        public static EnergySavingCfg defaults() { return new EnergySavingCfg(true, "unity.industrial.energy_saving", 35.0); }
+    }
+
+    public record FestivalOfLightsCfg(boolean enabled, String permBase, long periodTicks, int buffDurationTicks) {
+        public static FestivalOfLightsCfg defaults() {
+            return new FestivalOfLightsCfg(true, "unity.church.festival_of_lights", 20L * 60 * 3, 20 * 15);
+        }
+    }
+
+    public record TruePondsAndFlowerbedsCfg(boolean enabled, String permBase, long periodTicks, int buffDurationTicks, int waterRadius) {
+        public static TruePondsAndFlowerbedsCfg defaults() {
+            return new TruePondsAndFlowerbedsCfg(true, "unity.park.true_ponds_and_flowerbeds", 20L * 10, 20 * 4, 3);
+        }
+    }
+
+    public record ReturnOfTheSparkCfg(boolean enabled, String permBase, int buffDurationTicks) {
+        public static ReturnOfTheSparkCfg defaults() { return new ReturnOfTheSparkCfg(true, "unity.country.return_of_the_spark", 20 * 8); }
+    }
+
+    public record HolyAuraCfg(boolean enabled, String permBase, long periodTicks) {
+        public static HolyAuraCfg defaults() { return new HolyAuraCfg(true, "unity.church.holy_aura", 20L * 15); }
+    }
+
+    public record CitizenBenefitsCfg(boolean enabled, String permBase, long periodTicks, float saturationAmount) {
+        public static CitizenBenefitsCfg defaults() { return new CitizenBenefitsCfg(true, "unity.country.citizen_benefits", 20L * 30, 1.0f); }
     }
 }

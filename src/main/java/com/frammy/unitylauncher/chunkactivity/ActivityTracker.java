@@ -4,6 +4,7 @@ import com.frammy.unitylauncher.UnityLauncher;
 import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -19,6 +20,19 @@ public final class ActivityTracker implements Listener {
 
     private final UnityLauncher plugin;
     private final ActivityWeights weights = new ActivityWeights();
+    private final LandValueWeights landValueWeights = new LandValueWeights();
+
+    // Подключается ПОСЛЕ конструктора (UnityLauncher создаёт ActivityTracker раньше
+    // ZoneManager) — используется только для того, чтобы приглушить вес визита
+    // владельца/согражданина зоны (см. computeVisitorWeight). Может быть null
+    // в короткое окно между стартом плагина и вызовом setZoneManager — тогда
+    // просто используем обычный вес 1.0, ничего не ломается.
+    private com.frammy.unitylauncher.zones.ZoneManager zoneManager;
+    private static final double MEMBER_VISITOR_WEIGHT = 0.25;
+
+    public void setZoneManager(com.frammy.unitylauncher.zones.ZoneManager zoneManager) {
+        this.zoneManager = zoneManager;
+    }
 
     // ключ: "world:x,z"
     private final Map<String, ChunkStats> chunkStatsMap = new ConcurrentHashMap<>();
@@ -29,6 +43,7 @@ public final class ActivityTracker implements Listener {
     private BukkitTask saveTask;
     private BukkitTask coolingTask;
     private BukkitTask hourlySampleTask;
+    private BukkitTask visitorResetTask;
     private final BukkitTask pruneTask;
     public ActivityTracker(UnityLauncher plugin) {
         this.plugin = plugin;
@@ -75,12 +90,14 @@ public final class ActivityTracker implements Listener {
     }
 
     public ActivityWeights getWeights() { return weights; }
+    public LandValueWeights getLandValueWeights() { return landValueWeights; }
     public Map<String, ChunkStats> getChunkStatsMap() { return chunkStatsMap; }
 
     public void stop() {
         if (saveTask != null) { saveTask.cancel(); saveTask = null; }
         if (coolingTask != null) { coolingTask.cancel(); coolingTask = null; }
         if (hourlySampleTask != null) { hourlySampleTask.cancel(); hourlySampleTask = null; }
+        if (visitorResetTask != null) { visitorResetTask.cancel(); visitorResetTask = null; }
         if (pruneTask != null) pruneTask.cancel();
 
         for (Player p : Bukkit.getOnlinePlayers()) {
@@ -141,6 +158,14 @@ public final class ActivityTracker implements Listener {
             Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> ChunkActivityStorage.saveToFile(snapshot, plugin.getDataFolder()));
         }, 20L * 60L * 5L, 20L * 60L * 5L);
 
+        // окно уникальных посетителей — раз в неделю, отдельно от угасающей активности
+        long week = 20L * 60L * 60L * 24L * 7L;
+        visitorResetTask = Bukkit.getScheduler().runTaskTimer(plugin, this::resetVisitorWindowsSync, week, week);
+    }
+
+    private void resetVisitorWindowsSync() {
+        for (ChunkStats s : chunkStatsMap.values()) s.resetVisitorWindow();
+        plugin.getLogger().info("[Heatmap] Недельное окно уникальных посетителей сброшено");
     }
 
     private void applyCoolingSync() {
@@ -184,6 +209,23 @@ public final class ActivityTracker implements Listener {
         if (millis <= 0) return;
         ChunkStats s = chunkStatsMap.computeIfAbsent(chunkKey, k -> new ChunkStats());
         s.addTime(millis);
+    }
+
+    public void incBlocksPlaced(Chunk chunk, Material material, int amount) {
+        if (chunk == null || amount <= 0) return;
+        ChunkStats s = statsFor(chunk);
+        s.blocksPlaced += amount;
+        s.addBuildVolume(BuildMaterialWeights.weightFor(material) * amount, 0);
+        s.recordMaterialPlaced(material);
+        s.lastUpdated = System.currentTimeMillis();
+    }
+
+    public void incBlocksBroken(Chunk chunk, Material material, int amount) {
+        if (chunk == null || amount <= 0) return;
+        ChunkStats s = statsFor(chunk);
+        s.blocksBroken += amount;
+        s.addBuildVolume(0, BuildMaterialWeights.weightFor(material) * amount);
+        s.lastUpdated = System.currentTimeMillis();
     }
 
     public void incItemDrops(Chunk chunk, int amount) {
@@ -235,6 +277,7 @@ public final class ActivityTracker implements Listener {
         if (prev == null) {
             Chunk cur = to.getChunk();
             sessions.put(uuid, new PlayerChunkSession(getChunkKey(cur), now));
+            statsFor(cur).addVisitor(uuid, computeVisitorWeight(player, to));
             return;
         }
 
@@ -245,6 +288,25 @@ public final class ActivityTracker implements Listener {
         long spent = now - prev.enterTime();
         addTimeInChunk(prev.currentChunk(), spent);
         sessions.put(uuid, new PlayerChunkSession(getChunkKey(toChunk), now));
+
+        // "ценность земли" через трафик — уникальные посетители чанка, а НЕ
+        // время владельца в нём (см. LandValueWeights)
+        statsFor(toChunk).addVisitor(uuid, computeVisitorWeight(player, to));
+    }
+
+    /**
+     * Обычный посторонний визит весит 1.0. Если игрок — владелец зоны в этой
+     * точке, либо гражданин страны, которой принадлежит эта зона, вес сильно
+     * ниже: иначе хозяин, просто играя у себя дома, сам накручивает себе же
+     * налог на землю через "трафик". Вне зон (или пока ZoneManager ещё не
+     * подключен на старте плагина) — обычный вес 1.0: земля без владельца не
+     * может иметь "своего", чей визит нужно было бы приглушать.
+     */
+    private double computeVisitorWeight(Player player, Location loc) {
+        if (zoneManager != null && zoneManager.isOwnerOrMemberAt(loc, player.getName())) {
+            return MEMBER_VISITOR_WEIGHT;
+        }
+        return 1.0;
     }
 
     private void closeSession(Player p) {

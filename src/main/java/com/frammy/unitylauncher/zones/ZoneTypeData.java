@@ -20,4 +20,9 @@ public record ZoneTypeData(String displayName, double areaLimit, int index, doub
     public double priceMultiplier() {
         return costMultiplier;
     }
+
+    /** Копия с изменённым areaLimit (напр., чтобы учесть докупленный бонус к площади). */
+    public ZoneTypeData withAreaLimit(double newAreaLimit) {
+        return new ZoneTypeData(displayName, newAreaLimit, index, minSize, allowOverlap, costMultiplier, quota, requiredPermission);
+    }
 }

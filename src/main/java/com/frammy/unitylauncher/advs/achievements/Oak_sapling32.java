@@ -17,7 +17,7 @@ public class Oak_sapling32 extends FrameRewardAdvancement  {
     );
 
     
-private static final int FRAME_ID = 8;
+private static final int FRAME_ID = 38;
 
 @Override
 protected int getFrameId() {
@@ -34,8 +34,8 @@ protected int getFrameId() {
                         1f,
                         9f,
                         "",
-                        "Съесть светящиеся ягоды",
-                        "",
+                        "Вырастить и собрать 50 светящихся",
+                        "ягод с собственной лозы",
                         "Награда: Рамка §bСветящиеся Ягоды"
                 ),
                 parent,

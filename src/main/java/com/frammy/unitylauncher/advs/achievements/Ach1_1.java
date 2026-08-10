@@ -20,7 +20,7 @@ public class Ach1_1 extends FrameRewardAdvancement  {
             "ach1_1"
     );
     
-    private static final int FRAME_ID = 8;
+    private static final int FRAME_ID = 15;
 
     @Override
     protected int getFrameId() {
@@ -39,8 +39,8 @@ public class Ach1_1 extends FrameRewardAdvancement  {
                         1f,
                         1f,
                         "",
-                        "Скрафтить все виды предметов из ",
-                        "вишнёвой древесины",
+                        "Выложить ковёр из 150 блоков розовых ",
+                        "лепестков, поставленных игроком",
                         "",
                         "Награда: Рамка §bВишня"
                 ),

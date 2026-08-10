@@ -117,6 +117,10 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     private static int AUTH_KEY_LEN = 256;
     private static byte[] AUTH_PEPPER = new byte[0];
 
+    // --- bridge to the new farlandsconnect backend (auth mirror only, see FarLandsApiClient) ---
+    private com.frammy.unitylauncher.auth.FarLandsApiClient farLandsApi;
+    public com.frammy.unitylauncher.auth.FarLandsApiClient getFarLandsApi() { return farLandsApi; }
+
     @Override
     public void onEnable() {
         instance = this;
@@ -150,6 +154,19 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
         // --- zone manager (claims / stores / regions / country borders) ---
         zoneManager = new ZoneManager(this, null, blueMapIntegration, activityTracker);
+        // обратная ссылка — нужна ActivityTracker'у, чтобы приглушать вес визита
+        // владельца/согражданина зоны в её же собственный трафик (см. computeVisitorWeight)
+        activityTracker.setZoneManager(zoneManager);
+
+        // --- веб-заявки на создание/редактирование зон с сайта ---
+        com.frammy.unitylauncher.zones.web.ZoneWebRequestService zoneWebRequestService =
+                new com.frammy.unitylauncher.zones.web.ZoneWebRequestService(this, zoneManager);
+        zoneWebRequestService.start(100L); // 40 тиков ≈ 2 секунды
+
+        // чистка "осиротевших" территорий Государств — страна могла быть удалена на
+        // сайте (напр. выход последнего лидера, countryOperations.php) без уведомления
+        // плагина; раз в 2 минуты сверяем COUNTRY-зоны со списком существующих стран
+        zoneManager.startOrphanCountryZoneCleanup(2400L); // 2400 тиков ≈ 2 минуты
 
         // --- sign manager (shops, scroll text etc.) ---
         signManager = new SignManager(
@@ -297,8 +314,16 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             lp.getEventBus().subscribe(this, net.luckperms.api.event.group.GroupDataRecalculateEvent.class, e -> {
                 String name = e.getGroup().getName();
 
-                if (name.equalsIgnoreCase("default")) UpgradeCondition.invalidateDefaultNodeCache();
-                else UpgradeCondition.invalidateCountryNodeCache(name);
+                if (name.equalsIgnoreCase("default")) {
+                    UpgradeCondition.invalidateDefaultNodeCache();
+                } else {
+                    // группа страны называется "country_<Countries.Id>", а кэш в UpgradeCondition
+                    // ключуется по голому Id — снимаем префикс перед инвалидацией
+                    String canonId = name.regionMatches(true, 0, "country_", 0, "country_".length())
+                            ? name.substring("country_".length())
+                            : name;
+                    UpgradeCondition.invalidateCountryNodeCache(canonId);
+                }
             });
         } catch (Throwable t) {
             getLogger().severe("[UL] LuckPerms not available, upgrade cache invalidation disabled: " + t.getMessage());
@@ -331,12 +356,44 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         this.dailyEconomyTask.start();
 
         // --- AUTH ---
-        this.authService  = new AuthService();
+        this.authService  = new AuthService(farLandsApi);
         this.authBossbars = new AuthBossbarManager(this);
         this.authListener = new AuthListener(this, this.authService, this.authBossbars);
         this.loginLimiter = new LoginRateLimiter();
         getServer().getPluginManager().registerEvents(this.authListener, this);
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> authService.preloadAllAuth());
+
+        // --- site-initiated money requests (transfers/invoice-pay/salary-claim from
+        // farlands.in) — see infra/game-integration-architecture.md in the farlandsconnect repo
+        new com.frammy.unitylauncher.auth.MoneyRequestPoller(this, farLandsApi, getLogger()).start(40L); // ~2s
+
+        // --- site-initiated zone/country requests (create/edit/delete zones from
+        // farlands.in) — HTTP counterpart of the MySQL-direct ZoneWebRequestService
+        // below, both feed the same ZoneManager.handle(...)
+        new com.frammy.unitylauncher.auth.ZoneRequestPoller(this, farLandsApi, zoneManager, getLogger()).start(40L); // ~2s
+
+        // --- site-initiated password changes (farlands.in account settings) ---
+        new com.frammy.unitylauncher.auth.PasswordChangeRequestPoller(this, farLandsApi, authService, getLogger()).start(40L); // ~2s
+
+        // --- site-initiated upgrade purchases/toggles/choices (farlands.in
+        // /upgrades) — carries the resulting LuckPerms state to the country's
+        // group (or the player's own user) so UpgradeCondition actually sees
+        // it. See infra/game-integration-architecture.md "апгрейды".
+        new com.frammy.unitylauncher.auth.UpgradeGrantPoller(this, farLandsApi, getLogger()).start(40L); // ~2s
+
+        // --- site-initiated country creation (farlands.in "Создать страну")
+        // — mirrors the new country into this plugin's own Countries table +
+        // LuckPerms group, without which it's invisible to ZoneManager/
+        // UpgradeCondition entirely. See infra/game-integration-architecture.md.
+        new com.frammy.unitylauncher.auth.CountryCreateRequestPoller(this, farLandsApi, getLogger()).start(40L); // ~2s
+
+        // --- chunk activity heatmap reporting (feeds the site's /stats) ---
+        new com.frammy.unitylauncher.chunkactivity.HeatmapReporter(this, farLandsApi, activityTracker).start(6000L); // 5min
+
+        // --- Plan plugin stats mirror (playtime/mob kills/deaths, feeds the
+        // site's /stats "Мой перформанс"/"Игроки" tabs) — no-ops quietly
+        // until the Plan plugin is actually installed on the server.
+        new com.frammy.unitylauncher.auth.PlanStatsReporter(this, farLandsApi, getLogger()).start(12000L); // 10min
 
         // --- server messages (join/quit/advancement phrases) ---
         this.serverMessagesListener = ServerMessagesListener.init(this);
@@ -486,6 +543,12 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         if (webSocketManager != null) {
             webSocketManager.connectPlayer(e.getPlayer().getName());
         }
+
+        // прогреваем кэш LuckPerms сразу при заходе — чтобы веб-заявки не спотыкались на первой попытке
+        try {
+            net.luckperms.api.LuckPerms lp = net.luckperms.api.LuckPermsProvider.get();
+            lp.getUserManager().loadUser(e.getPlayer().getUniqueId());
+        } catch (Throwable ignored) {}
     }
 
     /* ===================== Small helpers ===================== */
@@ -623,10 +686,17 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         cfg.setPassword(pass);
 
         cfg.setMaximumPoolSize(8);
-        cfg.setMinimumIdle(2);
+        cfg.setMinimumIdle(1);
         cfg.setConnectionTimeout(8000);
-        cfg.setIdleTimeout(60_000);
-        cfg.setMaxLifetime(10 * 60_000);
+        cfg.setIdleTimeout(15_000);
+        cfg.setMaxLifetime(25 * 60_000);
+        // БД сейчас удалённая (Hostinger), а сервер хостится локально — сеть/БД
+        // рвёт простаивающие соединения примерно через ~20с. Без keepalive
+        // единственное "запасное" (minimumIdle=1) соединение просто умирает в
+        // пуле и ловится только когда кто-то пытается им воспользоваться —
+        // отсюда "No operations allowed after connection closed". Пингуем
+        // каждые 10с, с запасом до дедлайна в ~20с.
+        cfg.setKeepaliveTime(10_000);
         cfg.setPoolName("UnityLauncher-DBPool");
         cfg.setDriverClassName("com.mysql.cj.jdbc.Driver");
         return cfg;
@@ -678,8 +748,16 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             AUTH_TTL_MS = Long.parseLong(props.getProperty("auth.ttlMs", "86400000").trim());
 
             getLogger().info("[Auth] secrets loaded: iter=" + AUTH_ITER + " keyLen=" + AUTH_KEY_LEN + " ttlMs=" + AUTH_TTL_MS);
+
+            String apiBaseUrl = props.getProperty("backend.apiBaseUrl", "").trim();
+            String apiToken = props.getProperty("backend.apiToken", "").trim();
+            farLandsApi = new com.frammy.unitylauncher.auth.FarLandsApiClient(getLogger(), apiBaseUrl, apiToken);
+            getLogger().info(farLandsApi.isEnabled()
+                    ? "[FarLandsApi] enabled, target=" + apiBaseUrl
+                    : "[FarLandsApi] disabled (set backend.apiBaseUrl / backend.apiToken in secrets.properties to enable)");
         } catch (Throwable t) {
             getLogger().warning("[Auth] failed to load secrets.properties: " + t);
+            farLandsApi = new com.frammy.unitylauncher.auth.FarLandsApiClient(getLogger(), "", "");
         }
     }
 
@@ -695,6 +773,10 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                 out.println("auth.iter=120000");
                 out.println("auth.keyLen=256");
                 out.println("auth.ttlMs=86400000");
+                out.println();
+                out.println("# farlandsconnect backend bridge (auth mirror) — leave empty to disable");
+                out.println("# backend.apiBaseUrl=https://farlands.frammy.lat");
+                out.println("# backend.apiToken=");
             }
         }
 
@@ -758,7 +840,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                 TriageUpgrade.class, CalmUpgrade.class, EducationUpgrade.class,
                 ScrollsUpgrade.class, GardenerUpgrade.class, QuietGuardUpgrade.class,
                 PondBedsUpgrade.class, QuietHourUpgrade.class, BenchesUpgrade.class,
-                DepositInterestUpgrade.class, AtmFeesUpgrade.class, SafeDepositUpgrade.class
+                DepositInterestUpgrade.class, AtmFeesUpgrade.class, SafeDepositUpgrade.class,
+                EnergySavingUpgrade.class, FestivalOfLightsUpgrade.class, TruePondsAndFlowerbedsUpgrade.class,
+                ReturnOfTheSparkUpgrade.class, HolyAuraUpgrade.class, CitizenBenefitsUpgrade.class
             };
 
             int registered = 0;

@@ -113,6 +113,36 @@ public final class ZoneYamlRepository {
                         zi.setOwnerCountry(ownerCountryYaml);
                     }
 
+                    // мульти-полигон: доп. фигуры (extraShapes: List<List<corner-map>>) — отсутствует у
+                    // подавляющего большинства зон (обычный однополигональный случай), тогда просто пропускаем
+                    List<?> extraShapesRaw = z.getList("extraShapes");
+                    if (extraShapesRaw != null) {
+                        for (Object shapeObj : extraShapesRaw) {
+                            if (!(shapeObj instanceof List<?> shapeList)) continue;
+                            List<Location> shape = new ArrayList<>();
+                            for (Object cornerObj : shapeList) {
+                                if (!(cornerObj instanceof Map<?, ?> m)) continue;
+                                try {
+                                    String wName = (worldOverride != null ? worldOverride : (String) m.get("world"));
+                                    World w = Bukkit.getWorld(wName);
+                                    if (w == null) continue;
+                                    double x = num(m, "x");
+                                    double y = num(m, "y");
+                                    double zz = num(m, "z");
+                                    float pitch = fnum(m, "pitch");
+                                    float yaw = fnum(m, "yaw");
+                                    shape.add(new Location(w, x, y, zz, yaw, pitch));
+                                } catch (Throwable ignore) { }
+                            }
+                            if (shape.size() >= 3) zi.addShape(shape);
+                        }
+                    }
+
+                    List<String> membersYaml = z.getStringList("members");
+                    if (!membersYaml.isEmpty()) {
+                        zi.setMembers(membersYaml);
+                    }
+
                     targetMap.put(markerID, zi);
                 }
             }
@@ -155,11 +185,37 @@ public final class ZoneYamlRepository {
             }
             zonesConfig.set(path + ".corners", corners);
 
+            // мульти-полигон: доп. фигуры (индекс 0 — основная, она уже сохранена выше как .corners)
+            List<List<Location>> allShapes = z.getShapes();
+            if (allShapes.size() > 1) {
+                List<List<Map<String, Object>>> extraShapes = new ArrayList<>();
+                for (int i = 1; i < allShapes.size(); i++) {
+                    List<Map<String, Object>> shape = new ArrayList<>();
+                    for (Location l : allShapes.get(i)) {
+                        Map<String, Object> m = new HashMap<>();
+                        m.put("world", l.getWorld().getName());
+                        m.put("x", l.getX());
+                        m.put("y", l.getY());
+                        m.put("z", l.getZ());
+                        m.put("pitch", l.getPitch());
+                        m.put("yaw", l.getYaw());
+                        shape.add(m);
+                    }
+                    extraShapes.add(shape);
+                }
+                zonesConfig.set(path + ".extraShapes", extraShapes);
+            }
+
             if (lastCornersEditByMarker != null) {
                 Long lastEdit = lastCornersEditByMarker.get(z.getMarkerID());
                 if (lastEdit != null && lastEdit > 0L) {
                     zonesConfig.set(path + ".lastCornersEdit", lastEdit);
                 }
+            }
+
+            Set<String> members = z.getMembers();
+            if (!members.isEmpty()) {
+                zonesConfig.set(path + ".members", new ArrayList<>(members));
             }
         }
 
