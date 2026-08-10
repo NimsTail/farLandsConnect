@@ -143,6 +143,11 @@ public final class ShopController {
     // добраться никак. Крутим сами, как обычную бегущую строку.
     private final Map<Location, Integer> overviewOffset = new ConcurrentHashMap<>();
     private static final long OVERVIEW_CYCLE_TICKS = 30L; // ~1.5с
+    // Радиус, в котором должен стоять хоть один игрок, чтобы табличку вообще
+    // имело смысл крутить — иначе это чистый расход на getBlock().getState()
+    // + пакет обновления таблички на КАЖДОЙ SHOP_LIST на карте каждые 1.5с,
+    // 24/7, даже когда рядом с магазином никого нет неделями.
+    private static final double OVERVIEW_CYCLE_RADIUS_SQ = 24.0 * 24.0;
 
     private void startOverviewCycler() {
         Bukkit.getScheduler().runTaskTimer(plugin, this::tickOverviewCycle, OVERVIEW_CYCLE_TICKS, OVERVIEW_CYCLE_TICKS);
@@ -154,15 +159,136 @@ public final class ShopController {
             SignVariables sv = entry.getValue();
             if (sv == null || sv.getSignCategory() != SignCategory.SHOP_LIST) continue;
             if (viewingDetailAt.containsValue(loc)) continue; // кто-то сейчас смотрит товар детально — не мешаем
+            if (isWheelBrowsed(loc)) continue; // кто-то сейчас сам крутит колесом — не перебиваем автопрокруткой
 
             List<String> items = store.signPages().get(loc);
             if (items == null || items.size() <= 3) continue; // и так целиком влезает — листать нечего
+
+            if (!anyPlayerNear(loc, OVERVIEW_CYCLE_RADIUS_SQ)) continue; // никого рядом — крутить незачем
 
             if (!(loc.getBlock().getState() instanceof Sign sign)) continue;
 
             int offset = overviewOffset.merge(loc, 1, Integer::sum);
             renderer.updateSignView(sign, items, offset);
         }
+    }
+
+    private static boolean anyPlayerNear(Location loc, double radiusSq) {
+        if (loc == null || loc.getWorld() == null) return false;
+        for (Player pl : loc.getWorld().getPlayers()) {
+            if (pl.getLocation().distanceSquared(loc) <= radiusSq) return true;
+        }
+        return false;
+    }
+
+    /** Индекс товара, который СЕЙЧАС реально подсвечен зелёным на строке 2 таблички-списка — см. SignRenderer.updateSignView. */
+    private int currentlyHighlightedIndex(Location loc) {
+        List<String> items = store.signPages().get(loc);
+        int n = (items == null) ? 0 : items.size();
+        if (n <= 1) return 0;
+        int offset = overviewOffset.getOrDefault(loc, 0);
+        return Math.floorMod(offset + 1, n);
+    }
+
+    // ===== ручная прокрутка SHOP_LIST колесом мыши (аналог AtmController.onItemHeld) =====
+    // Раньше единственным способом полистать список товаров было Shift+ЛКМ
+    // (на один шаг) уже находясь в детальном просмотре — колесо мыши никак
+    // не перехватывалось, и единственное, что двигало обзорный список,
+    // была автопрокрутка (tickOverviewCycle), которую нельзя было ни
+    // остановить, ни направить в нужную сторону. Табличка физическая
+    // (реальный текст блока, не виртуальный per-player пакет как у ATM),
+    // так что сессия тут одна на локацию, а не на игрока — что смотрит один,
+    // видят все, ровно как уже было с автопрокруткой.
+
+    private static final int SHOP_LIST_LOOK_RANGE = 6;
+    private static final double SHOP_LIST_WHEEL_MAX_DISTANCE_SQ = 8.0 * 8.0;
+
+    private record WheelBrowse(Location loc, int anchorSlot) {}
+    private final Map<UUID, WheelBrowse> wheelBrowse = new ConcurrentHashMap<>();
+
+    private boolean isWheelBrowsed(Location loc) {
+        for (WheelBrowse wb : wheelBrowse.values()) if (wb.loc().equals(loc)) return true;
+        return false;
+    }
+
+    /** true если событие "съедено" (перехвачен скролл активной SHOP_LIST-сессии). */
+    public boolean onItemHeld(Player p, int previousSlot, int newSlot) {
+        UUID id = p.getUniqueId();
+        WheelBrowse wb = wheelBrowse.get(id);
+
+        if (wb != null && !stillLookingAtShopListOverview(p, wb.loc())) {
+            wheelBrowse.remove(id);
+            wb = null;
+        }
+
+        if (wb == null) {
+            Location target = shopListOverviewUnderCursor(p);
+            if (target == null) return false;
+            wb = new WheelBrowse(target, p.getInventory().getHeldItemSlot());
+            wheelBrowse.put(id, wb);
+        }
+
+        List<String> items = store.signPages().get(wb.loc());
+        if (items == null || items.size() <= 1) {
+            wheelBrowse.remove(id);
+            return false;
+        }
+
+        if (!(wb.loc().getBlock().getState() instanceof Sign sign)) {
+            wheelBrowse.remove(id);
+            return false;
+        }
+
+        int dir = scrollDirection(wb.anchorSlot(), newSlot);
+        int offset = overviewOffset.merge(wb.loc(), dir, Integer::sum);
+        renderer.updateSignView(sign, items, offset);
+
+        if (p.getInventory().getHeldItemSlot() != wb.anchorSlot()) {
+            p.getInventory().setHeldItemSlot(wb.anchorSlot());
+        }
+        return true;
+    }
+
+    /** Строго то же, что даёт возможность взять сессию: смотрит на SHOP_LIST в обзорном (не детальном) режиме. */
+    private Location shopListOverviewUnderCursor(Player p) {
+        try {
+            var target = p.getTargetBlockExact(SHOP_LIST_LOOK_RANGE, FluidCollisionMode.NEVER);
+            if (target == null || !(target.getState() instanceof Sign)) return null;
+            Location loc = SignStore.keyLoc(target.getLocation());
+            SignVariables sv = store.get(loc);
+            if (sv == null || sv.getSignCategory() != SignCategory.SHOP_LIST) return null;
+            if (loc.equals(viewingDetailAt.get(p.getUniqueId()))) return null; // в детальном просмотре — не мешаем
+            List<String> items = store.signPages().get(loc);
+            if (items == null || items.size() <= 1) return null;
+            return loc;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private boolean stillLookingAtShopListOverview(Player p, Location loc) {
+        try {
+            if (!p.getWorld().equals(loc.getWorld())) return false;
+            if (p.getLocation().distanceSquared(loc) > SHOP_LIST_WHEEL_MAX_DISTANCE_SQ) return false;
+            if (loc.equals(viewingDetailAt.get(p.getUniqueId()))) return false; // перешёл в детальный просмотр
+            var target = p.getTargetBlockExact(SHOP_LIST_LOOK_RANGE, FluidCollisionMode.NEVER);
+            return target != null && SignStore.keyLoc(target.getLocation()).equals(loc);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * Тот же кольцевой алгоритм, что в AtmController.scrollDirection — см.
+     * подробный комментарий там. Наивный sign(next - prev) ломается на
+     * переходе через шов хотбара (0/8); нормализация к кратчайшей дуге
+     * (диапазон (-4, 4]) чинит это для любого реального прыжка.
+     */
+    private static int scrollDirection(int prev, int next) {
+        int diff = next - prev;
+        if (diff > 4) diff -= 9;
+        if (diff < -4) diff += 9;
+        return Integer.signum(diff);
     }
 
     private static final Pattern INT_ANY = Pattern.compile("-?\\d+");
@@ -573,8 +699,18 @@ public final class ShopController {
             if (!alreadyViewingThis) {
                 // Первый ЛКМ по этому списку — открыть текущий товар детально,
                 // БЕЗ смещения индекса (иначе первый же клик перескакивал бы товар 0).
+                // ВАЖНО: раньше тут читался playerScrollIndex, который для
+                // игрока, ещё ни разу не листавшего список Shift+ЛКМ, всегда
+                // == 0 — то есть клик открывал товар №0, даже если на самой
+                // табличке (за счёт автопрокрутки обзора, см.
+                // tickOverviewCycle/overviewOffset) сейчас подсвечен
+                // (зелёным, строка 2) СОВСЕМ другой товар. Берём индекс из
+                // того же overviewOffset, которым реально нарисован текущий
+                // вид таблички — то, что игрок видит зелёным, то и открывается.
+                int idx = currentlyHighlightedIndex(loc);
+                playerScrollIndex.put(p.getUniqueId(), idx);
                 viewingDetailAt.put(p.getUniqueId(), loc);
-                updateShopListSignSelection(loc, playerScrollIndex.getOrDefault(p.getUniqueId(), 0));
+                updateShopListSignSelection(loc, idx);
                 return;
             }
 
@@ -1369,6 +1505,7 @@ public final class ShopController {
         signSelectionMap.remove(p.getUniqueId());
         playerScrollIndex.remove(p.getUniqueId());
         viewingDetailAt.remove(p.getUniqueId());
+        wheelBrowse.remove(p.getUniqueId());
     }
 
     // ======= utils =======

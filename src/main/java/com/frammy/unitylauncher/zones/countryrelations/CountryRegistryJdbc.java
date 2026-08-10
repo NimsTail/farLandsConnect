@@ -259,14 +259,17 @@ public class CountryRegistryJdbc {
         if (delta == 0.0) return;
 
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            // MariaDB не поддерживает CAST(x AS JSON) (нет типа JSON — только
+            // LONGTEXT + CHECK(json_valid()), см. тот же коммент в
+            // UnityCommands.mergeAndUpdatePlayerData) — с ним запрос падал с
+            // SQLSyntaxErrorException прямо тут. Числовой результат сам по
+            // себе JSON_SET понимает без кастов — DECIMAL достаточно.
             final String sql = """
                 UPDATE Countries
                 SET CountryInfo = JSON_SET(
                     COALESCE(CountryInfo, JSON_OBJECT()),
                     '$.Money',
-                    CAST(
-                        (COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(CountryInfo,'$.Money')) AS DECIMAL(20,3)), 0) + ?) AS JSON
-                    )
+                    COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(CountryInfo,'$.Money')) AS DECIMAL(20,3)), 0) + ?
                 )
                 WHERE Name = ?
                 """;
@@ -291,14 +294,14 @@ public class CountryRegistryJdbc {
         if (countryName == null || countryName.isBlank()) return false;
         if (delta == 0.0) return true;
 
+        // см. комментарий в addCountryMoney() выше — CAST(x AS JSON) не
+        // поддерживается MariaDB, роняло запрос с синтаксической ошибкой.
         final String sql = """
         UPDATE Countries
         SET CountryInfo = JSON_SET(
             COALESCE(CountryInfo, JSON_OBJECT()),
             '$.Money',
-            CAST(
-                (COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(CountryInfo,'$.Money')) AS DECIMAL(20,3)), 0) + ?) AS JSON
-            )
+            COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(CountryInfo,'$.Money')) AS DECIMAL(20,3)), 0) + ?
         )
         WHERE Name = ?
         """;

@@ -433,10 +433,17 @@ public final class AtmController {
                 lines[3] = "";
             }
             case TARGET_LIST -> {
+                int n = s.listCache.size();
                 lines[0] = trim(ACTION_LABELS[indexOfAction(s.action)]);
-                lines[1] = s.listCache.size() > 1 ? ("(" + (s.index + 1) + "/" + s.listCache.size() + ")") : "";
+                // Стрелочки над/под выбранным пунктом (строки 1 и 3) — чтобы
+                // было видно, что список вообще можно прокрутить колесом, а
+                // не только что где-то есть счётчик. Ring-список (кольцевой,
+                // см. s.index = Math.floorMod(...) в onItemHeld), так что при
+                // >1 пункте вверх/вниз всегда есть куда крутить — обе
+                // стрелочки показываются одновременно.
+                lines[1] = n > 1 ? ("▲  (" + (s.index + 1) + "/" + n + ")") : "";
                 lines[2] = trim(s.listCache.isEmpty() ? "(пусто)" : s.listCache.get(s.index));
-                lines[3] = "";
+                lines[3] = n > 1 ? "▼" : "";
             }
             case PREFS_MENU -> {
                 lines[0] = trim("Настройки");

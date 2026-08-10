@@ -136,9 +136,20 @@ public final class SignManager implements Listener {
     private static String signCountryCanonical(SignVariables sv) {
         if (sv == null) return null;
 
+        // sv.getOwnerCountry() is ALREADY the canonical Countries.Id (every
+        // call site that populates it — AtmController/TrashController/
+        // ShopController — passes playerCountryCanonical(...)'s result
+        // straight through, see the `pc` params above). Re-resolving it here
+        // via resolveCountryGroupId() treated it as a raw country NAME
+        // instead and looked it up by lowercased-name, which a numeric id
+        // string never matches — so this always returned null, countByCountry
+        // never matched any existing sign, `have` was permanently stuck at 0,
+        // and the "X/Y" limit shown to players never advanced past 1/allowed
+        // no matter how many ATM/TRASH signs were already placed for the
+        // country (the limit itself was silently never enforced either).
         String c = sv.getOwnerCountry();
         if (c != null && !c.isBlank()) {
-            return com.frammy.unitylauncher.upgrades.UpgradeCondition.resolveCountryGroupId(c);
+            return c;
         }
 
         String owner = sv.getOwnerName();
@@ -860,6 +871,13 @@ public final class SignManager implements Listener {
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onItemHeld(org.bukkit.event.player.PlayerItemHeldEvent e) {
         if (atm.onItemHeld(e.getPlayer(), e.getPreviousSlot(), e.getNewSlot())) {
+            e.setCancelled(true);
+            return;
+        }
+        // SHOP_LIST wheel-browse (see ShopController.onItemHeld) — same
+        // hijack pattern as ATM, only while the player is actually looking
+        // at a SHOP_LIST sign in overview mode.
+        if (shop.onItemHeld(e.getPlayer(), e.getPreviousSlot(), e.getNewSlot())) {
             e.setCancelled(true);
         }
     }
