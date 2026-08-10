@@ -281,7 +281,12 @@ public final class SignManager implements Listener {
     private void rebuildShopIndexAndListsWhenZonesReady() {
         final int[] tries = {0};
 
-        shopReadyPollTask = Bukkit.getScheduler().runTaskTimer(plugin, task -> {
+        // The Consumer<BukkitTask> overload returns void (unlike the plain
+        // Runnable one) — self-cancellation only works via the task handed
+        // to the callback, so that's also how shopReadyPollTask gets set,
+        // not from this call's own return value.
+        Bukkit.getScheduler().runTaskTimer(plugin, task -> {
+            shopReadyPollTask = task;
             if (shopIndexBuilt) {
                 task.cancel();
                 return;
