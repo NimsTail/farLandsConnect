@@ -75,6 +75,14 @@ public final class AtmFeesUpgrade extends BaseUpgrade {
 
         double rate = calculateAtmFee(player.getName(), atmLocation, amount);
         if (rate <= 1e-9) return amount;
+        // Комиссия — доля от 0 до 1 (см. javadoc calculateAtmFee), но
+        // upgrades.yml сейчас позволяет задать что угодно (напр. feeForeign:
+        // 2.0 = 200%). Без этой защиты rate>1 давал net<0, а
+        // MoneyManager.withdrawToCashBurnFee/depositCash*BurnFee отклоняли
+        // это как "Некорректная сумма" — то есть операция выглядела сломанной
+        // при ЛЮБОЙ сумме, если ATM не в своей стране. Зажимаем в [0,1]
+        // независимо от того, что стоит в конфиге.
+        if (rate > 1.0) rate = 1.0;
 
         double fee = amount * rate;
         double result = amount - fee;

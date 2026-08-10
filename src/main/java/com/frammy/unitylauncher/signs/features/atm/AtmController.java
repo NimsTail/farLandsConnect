@@ -190,7 +190,7 @@ public final class AtmController {
         BrowseSession s = sessions.get(p.getUniqueId());
         if (s == null || !s.atmLoc.equals(atmLoc)) {
             if (s != null) endSession(p, s); // была сессия у другого ATM — закрываем её
-            s = new BrowseSession(atmLoc);
+            s = new BrowseSession(atmLoc, p.getInventory().getHeldItemSlot());
             sessions.put(p.getUniqueId(), s);
             scroll.pauseScrolling(atmLoc);
             renderBrowse(p, s);
@@ -204,23 +204,23 @@ public final class AtmController {
         BrowseSession s = sessions.get(p.getUniqueId());
         if (s == null) return false;
 
+        // Игнорируем event.getPreviousSlot() как источник истины — если
+        // отмена события хоть иногда не успевает откатить слот ДО того, как
+        // придёт следующий scroll, previousSlot следующего события будет
+        // уже "уехавшим", и косвенно так объяснялись откаты назад при
+        // быстром скролле. Держим свой собственный якорь и всегда
+        // возвращаем именно к нему — независимо от того, что там у сервера
+        // по этому конкретному событию.
         int count = optionsCountFor(s);
         if (count > 1) {
-            int dir = scrollDirection(previousSlot, newSlot);
+            int dir = scrollDirection(s.anchorSlot, newSlot);
             s.index = Math.floorMod(s.index + dir, count);
             renderBrowse(p, s);
         }
 
-        // Отмена события НЕ гарантирует, что клиент не успел уже
-        // локально предсказать смену выбранного слота — при быстром
-        // скролле это расхождение накапливается, и следующий scroll-евент
-        // считает previousSlot/newSlot уже от "уехавшего" клиентского
-        // значения, что и выглядело как случайные скачки/откаты назад.
-        // Принудительно возвращаем слот на сервере (со сдвигом на тик,
-        // внутри самого события это ненадёжно/реентерантно).
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            if (p.isOnline()) p.getInventory().setHeldItemSlot(previousSlot);
-        });
+        if (p.getInventory().getHeldItemSlot() != s.anchorSlot) {
+            p.getInventory().setHeldItemSlot(s.anchorSlot);
+        }
         return true;
     }
 
@@ -241,6 +241,11 @@ public final class AtmController {
 
     private static final class BrowseSession {
         final Location atmLoc;
+        // Хотбар-слот, к которому принудительно возвращаем игрока при каждом
+        // перехваченном скролле — единственный источник истины для
+        // scrollDirection() ниже, event.getPreviousSlot() больше не
+        // используем (см. onItemHeld).
+        final int anchorSlot;
         BrowseStage stage = BrowseStage.ACTION;
         int index = 0;
         ActionType action;
@@ -248,7 +253,10 @@ public final class AtmController {
         String targetValue;
         List<String> listCache = List.of();
 
-        BrowseSession(Location atmLoc) { this.atmLoc = atmLoc; }
+        BrowseSession(Location atmLoc, int anchorSlot) {
+            this.atmLoc = atmLoc;
+            this.anchorSlot = anchorSlot;
+        }
     }
 
     private static int indexOfAction(ActionType a) {
@@ -264,11 +272,20 @@ public final class AtmController {
         };
     }
 
-    /** Hotbar slots are a 0..8 ring — this figures out which way the wheel actually turned, wrap included. */
+    /**
+     * Hotbar slots are a 0..8 ring. A naive sign(next - prev) breaks the
+     * moment a jump crosses the 0/8 seam — e.g. three forward notches from
+     * slot 7 (7->8->0->1) is prev=7,next=1, a raw diff of -6, whose sign
+     * flips to "backward" even though every individual notch was forward.
+     * That's exactly what fast scrolling could trigger (Bukkit coalescing
+     * several notches into one event under load) and looked like random
+     * reverts. Normalizing to the shortest arc on the ring (range (-4, 4])
+     * before taking the sign fixes it for any realistic jump size.
+     */
     private static int scrollDirection(int prev, int next) {
         int diff = next - prev;
-        if (diff == 1 || diff == -8) return 1;
-        if (diff == -1 || diff == 8) return -1;
+        if (diff > 4) diff -= 9;
+        if (diff < -4) diff += 9;
         return Integer.signum(diff);
     }
 
