@@ -7,7 +7,6 @@ import com.frammy.unitylauncher.UnityCommands;
 import com.frammy.unitylauncher.signs.SignCategory;
 import com.frammy.unitylauncher.signs.SignState;
 import com.frammy.unitylauncher.signs.SignVariables;
-import com.frammy.unitylauncher.signs.features.atm.AtmController;
 import com.frammy.unitylauncher.signs.markers.MarkerService;
 import com.frammy.unitylauncher.signs.render.SignRenderer;
 import com.frammy.unitylauncher.signs.render.SignScrollService;
@@ -1178,7 +1177,10 @@ public final class ShopController {
 
     public void onInventoryOpen(InventoryOpenEvent e) {
         var holder = e.getInventory().getHolder();
-        if (holder instanceof AtmController.AtmHolder) return;
+        // ATM больше не открывает инвентарь (см. AtmController — целиком
+        // табличный интерфейс), так что отдельной проверки holder'а тут
+        // больше не нужно: resolveContainerLocations и так вернёт пусто
+        // для чего угодно, что не является реальным контейнером.
 
         // определяем локации контейнера (1 или 2 — для double chest)
         List<Location> containerLocs = resolveContainerLocations(holder);
@@ -1276,8 +1278,6 @@ public final class ShopController {
 
     public void onInventoryClose(InventoryCloseEvent e) {
         var holder = e.getInventory().getHolder();
-        if (holder instanceof AtmController.AtmHolder) return;
-
         List<Location> locs = resolveContainerLocations(holder);
         for (Location l : locs) {
             try { shopLists.updateAllRelatedShopListSigns(SignStore.keyLoc(l)); } catch (Throwable ignored) {}

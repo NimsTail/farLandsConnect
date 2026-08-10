@@ -9,6 +9,8 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -22,6 +24,11 @@ import static com.frammy.unitylauncher.UnityLauncher.DBConnect;
  */
 public class AuthService {
     private final ConcurrentHashMap<String, AuthRecord> authCache = new ConcurrentHashMap<>();
+    // Original-case display name per lowercased key — authCache itself only ever
+    // keyed on lowercase, the real casing (e.g. "NimsTail") was never kept anywhere
+    // in memory before. Needed for AtmController's "прокрутка по списку ников"
+    // (see getAllRegisteredUsernames()) so it doesn't show all-lowercase names.
+    private final ConcurrentHashMap<String, String> displayNameByLower = new ConcurrentHashMap<>();
     private final AtomicBoolean preloadDone = new AtomicBoolean(false);
 
     // Best-effort mirror to the new farlandsconnect backend — never authoritative,
@@ -223,6 +230,7 @@ public class AuthService {
                     Long at = parseJsonLong(rs.getString("lastAuthAt"));
                     String lastIp = parseJsonString(rs.getString("lastIp"));
                     authCache.put(lc(name), new AuthRecord(phc, at, lastIp, now));
+                    if (name != null) displayNameByLower.put(lc(name), name);
                     n++;
                 }
             }
@@ -242,6 +250,22 @@ public class AuthService {
         String key = lc(playerName);
         authCache.compute(key, (k, v) -> (v == null ? new AuthRecord(phcHash, null, null, System.currentTimeMillis())
                 : v.withPhc(phcHash)));
+        if (playerName != null) displayNameByLower.put(key, playerName);
+    }
+
+    /**
+     * Отсортированный (без учёта регистра) список ников всех когда-либо
+     * зарегистрированных игроков — источник для ATM "прокрутка по списку
+     * ников" вместо ручного ввода (см. AtmController). Кэш в памяти, не
+     * живой запрос к БД: наполняется в preloadAllAuth() при старте сервера
+     * и обновляется здесь же при каждой регистрации/смене пароля — так что
+     * игрок, зарегистрировавшийся уже после старта, виден сразу, без
+     * рестарта.
+     */
+    public List<String> getAllRegisteredUsernames() {
+        List<String> out = new ArrayList<>(displayNameByLower.values());
+        out.sort(String.CASE_INSENSITIVE_ORDER);
+        return out;
     }
 
     /** ВЫЗЫВАТЬ после успешного логина, когда записали сессию (authUntil, lastAuthIp) в БД. */

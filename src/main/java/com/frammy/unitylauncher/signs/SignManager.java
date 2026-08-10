@@ -24,11 +24,9 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.SignChangeEvent;
-import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryMoveItemEvent;
 import org.bukkit.event.inventory.InventoryOpenEvent;
-import org.bukkit.event.player.AsyncPlayerChatEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 
@@ -571,6 +569,13 @@ public final class SignManager implements Listener {
         Player p = e.getPlayer();
         Location loc = SignStore.keyLoc(sign.getLocation());
 
+        // ===== EDIT existing ATM (через openSign — ввод суммы/цели, см. AtmController) =====
+        SignVariables existingForEdit = store.get(loc);
+        if (existingForEdit != null && existingForEdit.getSignCategory() == SignCategory.ATM) {
+            atm.onSignEditSubmit(e, loc, existingForEdit);
+            return;
+        }
+
         // ===== EDIT existing SHOP_SOURCE (через openSign) =====
         SignVariables existing = store.get(loc);
         if (existing != null && existing.getSignCategory() == SignCategory.SHOP_SOURCE) {
@@ -795,12 +800,6 @@ public final class SignManager implements Listener {
 
     @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
     public void onInventoryOpen(InventoryOpenEvent e) {
-        // сначала ATM пропускаем
-        if (e.getInventory().getHolder() instanceof AtmController.AtmHolder) {
-            shop.onInventoryOpen(e);
-            return;
-        }
-
         if (e.getPlayer() instanceof Player p) {
             // если это магазинный контейнер — открыть может только владелец SHOP-зоны источника
             if (isShopLinkedInventory(e.getInventory())) {
@@ -844,21 +843,26 @@ public final class SignManager implements Listener {
         shop.onInventoryOpen(e);
     }
 
-    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
-    public void onInventoryClick(InventoryClickEvent e) {
-        atm.onInventoryClick(e);
-    }
-
     @EventHandler(ignoreCancelled = true, priority = EventPriority.MONITOR)
     public void onInventoryClose(InventoryCloseEvent e) {
         try { shop.onInventoryClose(e); } catch (Throwable ignored) {}
-        try { atm.onInventoryClose(e); } catch (Throwable ignored) {}
     }
 
     @EventHandler
     public void onPlayerQuit(PlayerQuitEvent e) {
         atm.onQuit(e.getPlayer());
         shop.onPlayerQuit(e.getPlayer());
+    }
+
+    // ATM's browse sessions hijack the mouse wheel (see AtmController) — only
+    // while a session is active for that player, and only enough to cancel
+    // the hotbar-slot change; ignoreCancelled=false on purpose since a wheel
+    // scroll isn't cancelled by anything else that would matter here.
+    @EventHandler(priority = EventPriority.HIGHEST)
+    public void onItemHeld(org.bukkit.event.player.PlayerItemHeldEvent e) {
+        if (atm.onItemHeld(e.getPlayer(), e.getPreviousSlot(), e.getNewSlot())) {
+            e.setCancelled(true);
+        }
     }
 
     public void enable() { onEnable(); }
@@ -884,13 +888,6 @@ public final class SignManager implements Listener {
 
         // 2) корректно остановить ВСЁ, что крутится
         stopAllScrollingTasks();
-    }
-
-    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
-    public void onAtmChat(AsyncPlayerChatEvent e) {
-        if (atm.onChat(e)) {
-            e.setCancelled(true);
-        }
     }
 
     private boolean isShopLinkedInventory(org.bukkit.inventory.Inventory inv) {

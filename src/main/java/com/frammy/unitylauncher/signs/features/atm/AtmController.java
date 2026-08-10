@@ -11,46 +11,85 @@ import com.frammy.unitylauncher.signs.storage.SignStore;
 import com.frammy.unitylauncher.upgrades.impl.AtmFeesUpgrade;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
+import org.bukkit.FluidCollisionMode;
 import org.bukkit.Location;
-import org.bukkit.Material;
 import org.bukkit.block.Sign;
+import org.bukkit.block.sign.Side;
 import org.bukkit.entity.Player;
 import org.bukkit.event.block.Action;
-import org.bukkit.event.inventory.InventoryClickEvent;
-import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.block.SignChangeEvent;
-import org.bukkit.event.player.AsyncPlayerChatEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
-import org.bukkit.inventory.Inventory;
-import org.bukkit.inventory.InventoryHolder;
-import org.bukkit.inventory.ItemStack;
-import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.scheduler.BukkitRunnable;
-import org.bukkit.inventory.meta.SkullMeta;
-import org.jspecify.annotations.NonNull;
+import org.bukkit.scheduler.BukkitTask;
 
 import java.util.*;
 
+/**
+ * ATM signs are fully in-world now — no chest GUI, no chat prompts. Two
+ * inputs, reused for everything:
+ *
+ *  - ЛКМ (Action.LEFT_CLICK_BLOCK): first touch starts a per-player "browse"
+ *    session (nothing changes on the real block — see sendSignChange below);
+ *    every touch after that confirms whatever option is currently
+ *    highlighted and advances to the next step.
+ *  - Mouse wheel (PlayerItemHeldEvent, hijacked while a session is active —
+ *    see onItemHeld): scrolls the highlighted option. The player's actual
+ *    held hotbar slot never changes; we just read the direction and cancel.
+ *  - ПКМ (Action.RIGHT_CLICK_BLOCK): step back one level / cancel.
+ *
+ * Once enough is chosen that only a number (or a number + a name) is left to
+ * type, we open the real sign-edit screen (Player#openSign) pre-filled with
+ * short prompts and read the answer back from SignChangeEvent — see
+ * beginAmountEdit()/onSignEditSubmit(). That screen writes to the REAL sign
+ * block (Minecraft has no per-player virtual-text sign editor), so the
+ * marquee (SignScrollService) is paused for that sign while it's in use and
+ * explicitly restored afterward.
+ *
+ * All the actual money movement (runActionWithResolvedTarget and below) is
+ * untouched from the old chest-GUI version — only the front end changed.
+ */
 public final class AtmController {
-
-    private static final String GUI_TITLE_PREFIX = ChatColor.DARK_GREEN + "ATM";
 
     private final UnityLauncher plugin;
     private final BlueMapIntegration blueMap;
     private final SignStore store;
     private final SignScrollService scroll;
 
-    private final Map<UUID, Location> openAtmByPlayer = new HashMap<>();
-    private final Map<UUID, PendingInput> pending = new HashMap<>();
+    private final Map<UUID, BrowseSession> sessions = new HashMap<>();
+    private final Map<UUID, PendingSignEdit> pendingEdits = new HashMap<>();
+    private BukkitTask watchdogTask;
+
+    // Raycast range for "is the player still actually looking at this ATM"
+    // (getTargetBlockExact) — should comfortably cover normal interact reach.
+    private static final int LOOK_RANGE = 6;
+    // Fallback-only distance check (see tickWatchdog) in case the raycast
+    // check ever misses something (teleport, world change, odd hitbox).
+    private static final double MAX_SESSION_DISTANCE_SQ = 8.0 * 8.0;
+    // Safety net for the sign-edit screen specifically: Bukkit has no
+    // "player closed the sign editor without saving" event at all, so if
+    // someone opens the amount prompt and then just disconnects or presses
+    // Escape, nothing tells us that happened. Without this the real sign
+    // block would be stuck showing "Сумма:" forever.
+    private static final long EDIT_TIMEOUT_MS = 45_000L;
+
+    private static final ActionType[] ACTIONS = {
+            ActionType.WITHDRAW, ActionType.DEPOSIT, ActionType.TRANSFER_PLAYER, ActionType.TRANSFER_COUNTRY, ActionType.INFO
+    };
+    // Kept short on purpose — sign lines are ~15 narrow-font characters wide
+    // and Cyrillic glyphs render noticeably wider than Latin ones, so an
+    // exact character budget isn't reliable blind. Tune these in-game if
+    // anything clips.
+    private static final String[] ACTION_LABELS = { "Снять", "Внести", "-> Игроку", "-> Стране", "Инфо" };
 
     public AtmController(UnityLauncher plugin, BlueMapIntegration blueMap, SignStore store, SignScrollService scroll) {
         this.plugin = plugin;
         this.blueMap = blueMap;
         this.store = store;
         this.scroll = scroll;
+        startWatchdog();
     }
 
-    // ===== creation =====
+    // ===== creation (unchanged from the chest-GUI version) =====
 
     public void onSignCreateATM(SignChangeEvent e,
                                 String countryCanonical,
@@ -68,7 +107,6 @@ public final class AtmController {
             return;
         }
 
-        // Ставим сразу (не ждём async), потом можно “украсить” названием страны из Users.
         String title = "ATM [" + countryCanonical + "]";
         e.setLine(0, title);
         e.setLine(1, "Коснитесь,");
@@ -99,7 +137,6 @@ public final class AtmController {
 
         p.sendMessage(ChatColor.GREEN + "Банкомат установлен." + ChatColor.GRAY + " (" + need + "/" + allowed + ")");
 
-        // Пытаемся заменить canonical на “красивое” имя страны из Users (как в Legacy).
         UnityCommands.getInstance().getPlayerInfo(p.getName(), data -> {
             if (data == null) return;
             new BukkitRunnable() {
@@ -116,7 +153,6 @@ public final class AtmController {
                     sign.setLine(0, newTitle);
                     sign.update();
 
-                    // обновим текст в переменных
                     List<String> t = new ArrayList<>(sv.getSignText());
                     while (t.size() < 4) t.add("");
                     t.set(0, newTitle);
@@ -130,522 +166,392 @@ public final class AtmController {
         });
     }
 
-    // ===== interact =====
+    // ===== interact (ЛКМ = browse/confirm, ПКМ = back/cancel) =====
 
     public void onInteract(PlayerInteractEvent e, SignVariables sv) {
-        if (e.getAction() != Action.RIGHT_CLICK_BLOCK) return;
+        Action act = e.getAction();
+        if (act != Action.LEFT_CLICK_BLOCK && act != Action.RIGHT_CLICK_BLOCK) return;
 
-        // ATM должен работать и с предметом в руке (включая "деньги"),
-        // иначе ты отдаёшь событие другим механикам.
-        // Жёстко запрещаем стандартное взаимодействие.
         e.setCancelled(true);
         e.setUseInteractedBlock(org.bukkit.event.Event.Result.DENY);
         e.setUseItemInHand(org.bukkit.event.Event.Result.DENY);
 
         Player p = e.getPlayer();
-        Location atmLoc = (e.getClickedBlock() != null)
-                ? SignStore.keyLoc(e.getClickedBlock().getLocation())
-                : null;
+        Location atmLoc = (e.getClickedBlock() != null) ? SignStore.keyLoc(e.getClickedBlock().getLocation()) : null;
         if (atmLoc == null) return;
 
-        openAtmByPlayer.put(p.getUniqueId(), atmLoc);
-        openMainMenu(p, sv);
+        if (act == Action.RIGHT_CLICK_BLOCK) {
+            BrowseSession s = sessions.get(p.getUniqueId());
+            if (s != null && s.atmLoc.equals(atmLoc)) stepBack(p, s);
+            return;
+        }
+
+        // ЛКМ
+        BrowseSession s = sessions.get(p.getUniqueId());
+        if (s == null || !s.atmLoc.equals(atmLoc)) {
+            if (s != null) endSession(p, s); // была сессия у другого ATM — закрываем её
+            s = new BrowseSession(atmLoc);
+            sessions.put(p.getUniqueId(), s);
+            scroll.pauseScrolling(atmLoc);
+            renderBrowse(p, s);
+            return;
+        }
+        confirmCurrentSelection(p, s);
     }
 
-    // ===== GUI =====
+    /** true если событие "съедено" (перехвачен скролл активной ATM-сессии). */
+    public boolean onItemHeld(Player p, int previousSlot, int newSlot) {
+        BrowseSession s = sessions.get(p.getUniqueId());
+        if (s == null) return false;
 
-    public void onInventoryClick(InventoryClickEvent e) {
-        if (!(e.getWhoClicked() instanceof Player p)) return;
-        Inventory inv = e.getInventory();
-        if (!(inv.getHolder() instanceof AtmHolder(
-                GuiType gui, ActionType action, TargetKind targetKind, String targetValue, int page
-        ))) return;
-
-        e.setCancelled(true);
-
-        Location atmLoc = openAtmByPlayer.get(p.getUniqueId());
-        if (atmLoc == null) { p.closeInventory(); return; }
-
-        SignVariables sv = store.get(atmLoc);
-
-        int slot = e.getRawSlot();
-        if (slot < 0 || slot >= inv.getSize()) return;
-
-        // ===== MAIN =====
-        if (gui == GuiType.MAIN) {
-            switch (slot) {
-                case 10 -> openWithdrawDepositTargetMenu(p, sv, ActionType.WITHDRAW);
-                case 12 -> openWithdrawDepositTargetMenu(p, sv, ActionType.DEPOSIT);
-                case 14, 16 -> openTransferModeMenu(p, sv);
-                case 22 -> showInfo(p, atmLoc, sv);
-                case 26 -> p.closeInventory();
-            }
-            return;
+        int count = optionsCountFor(s);
+        if (count > 1) {
+            int dir = scrollDirection(previousSlot, newSlot);
+            s.index = Math.floorMod(s.index + dir, count);
+            renderBrowse(p, s);
         }
-
-        // ===== WD_TARGET: выбор игрок/страна для withdraw/deposit =====
-        if (gui == GuiType.WD_TARGET) {
-            if (slot == 11) { // PLAYER
-                openAmountMenu(p, sv, action, TargetKind.PLAYER, null);
-                return;
-            }
-            if (slot == 15) { // COUNTRY
-                String my = UnityLauncher.getInstance().countryRegistryJdbc.getCountryOfPlayer(p.getName());
-                if (my == null || my.isBlank()) { p.sendMessage(ChatColor.RED + "Ты не состоишь в стране."); return; }
-                openAmountMenu(p, sv, action, TargetKind.COUNTRY, my);
-                return;
-            }
-            if (slot == 26) { // BACK
-                openMainMenu(p, sv);
-            }
-            return;
-        }
-
-        // ===== AMOUNT: пресеты/кастом =====
-        if (gui == GuiType.AMOUNT) {
-            if (slot == 26) { // BACK
-                if (action == ActionType.WITHDRAW || action == ActionType.DEPOSIT) {
-                    openWithdrawDepositTargetMenu(p, sv, action);
-                } else {
-                    openTransferModeMenu(p, sv);
-                }
-                return;
-            }
-
-            if (slot == 22) { // CUSTOM -> chat
-                beginAmountChatOnly(p, atmLoc, sv, action, targetKind, targetValue);
-                p.closeInventory();
-                return;
-            }
-
-            Double preset = amountPresetBySlot(slot);
-            if (preset == null || preset <= 0) return;
-
-            // выполнить операцию сразу
-            runActionWithResolvedTarget(p, atmLoc, action, targetKind, targetValue, preset);
-            p.closeInventory();
-            return;
-        }
-
-        // ===== TRANSFER_MODE: голова/баннер =====
-        if (gui == GuiType.TRANSFER_MODE) {
-            if (slot == 11) { // HEAD -> pick player
-                openPickPlayerMenu(p, sv);
-                return;
-            }
-            if (slot == 15) { // BANNER -> pick country
-                openPickCountryMenu(p, sv);
-                return;
-            }
-            if (slot == 26) { // BACK
-                openMainMenu(p, sv);
-            }
-            return;
-        }
-
-        // ===== PICK_PLAYER =====
-        if (gui == GuiType.PICK_PLAYER) {
-            if (slot == 26) { openTransferModeMenu(p, sv); return; }
-
-            ItemStack it = inv.getItem(slot);
-            if (it == null || it.getType().isAir()) return;
-
-            String target = null;
-            if (it.getItemMeta() instanceof SkullMeta sm) {
-                if (sm.getOwningPlayer() != null) target = sm.getOwningPlayer().getName();
-            }
-            if (target == null || target.isBlank()) return;
-            if (target.equalsIgnoreCase(p.getName())) { p.sendMessage(ChatColor.RED + "Нельзя перевести самому себе."); return; }
-
-            openAmountMenu(p, sv, ActionType.TRANSFER_PLAYER, TargetKind.PLAYER, target);
-            return;
-        }
-
-        // ===== PICK_COUNTRY =====
-        if (gui == GuiType.PICK_COUNTRY_LIST) {
-            if (slot == 45) { // BACK
-                openTransferModeMenu(p, sv);
-                return;
-            }
-            if (slot == 47) { // PREV
-                openPickCountryListMenu(p, sv, page - 1);
-                return;
-            }
-            if (slot == 51) { // NEXT
-                openPickCountryListMenu(p, sv, page + 1);
-                return;
-            }
-            if (slot == 49) { // CHAT INPUT (страна + сумма)
-                beginCountryAndAmountChat(p, atmLoc, sv);
-                p.closeInventory();
-                return;
-            }
-            if (slot == 53) { // MY COUNTRY
-                String my = UnityLauncher.getInstance().countryRegistryJdbc.getCountryOfPlayer(p.getName());
-                if (my == null || my.isBlank()) {
-                    p.sendMessage(ChatColor.RED + "Ты не состоишь в стране.");
-                    return;
-                }
-                openAmountMenu(p, sv, ActionType.TRANSFER_COUNTRY, TargetKind.COUNTRY, my);
-                return;
-            }
-
-            // Клик по стране (0..44)
-            if (slot <= 44) {
-                ItemStack it = inv.getItem(slot);
-                if (it == null || it.getType().isAir()) return;
-                ItemMeta meta = it.getItemMeta();
-                if (meta == null || !meta.hasDisplayName()) return;
-
-                String picked = ChatColor.stripColor(meta.getDisplayName());
-                if (picked.isBlank()) return;
-
-                // проверка существования (на всякий)
-                if (!UnityLauncher.getInstance().countryRegistryJdbc.countryExistsCached(picked)) {
-                    p.sendMessage(ChatColor.RED + "Страна больше не существует/не найдена.");
-                    openPickCountryListMenu(p, sv, page);
-                    return;
-                }
-
-                openAmountMenu(p, sv, ActionType.TRANSFER_COUNTRY, TargetKind.COUNTRY, picked);
-            }
-        }
-
-    }
-
-    public void onInventoryClose(InventoryCloseEvent e) {
-        if (!(e.getPlayer() instanceof Player p)) return;
-        Inventory inv = e.getInventory();
-        if (!(inv.getHolder() instanceof AtmHolder)) return;
-
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            Inventory top = p.getOpenInventory().getTopInventory();
-            InventoryHolder h = top.getHolder();
-            if (h instanceof AtmHolder) return;
-            openAtmByPlayer.remove(p.getUniqueId());
-            // pending не трогаем
-        });
+        return true;
     }
 
     public void onQuit(Player p) {
         if (p == null) return;
-        openAtmByPlayer.remove(p.getUniqueId());
-        pending.remove(p.getUniqueId());
+        BrowseSession s = sessions.remove(p.getUniqueId());
+        if (s != null) scroll.resumeScrolling(s.atmLoc);
+        PendingSignEdit pe = pendingEdits.remove(p.getUniqueId());
+        if (pe != null) {
+            restoreIdleDisplay(pe.atmLoc());
+            scroll.resumeScrolling(pe.atmLoc());
+        }
     }
 
-    private void openMainMenu(Player p, SignVariables sv) {
-        String country = (sv != null && sv.getOwnerCountry() != null) ? sv.getOwnerCountry() : "?";
-        Inventory inv = Bukkit.createInventory(new AtmHolder(GuiType.MAIN, null, null, null), 27, GUI_TITLE_PREFIX + " [" + country + "]");
+    // ===== browse session =====
 
-        inv.setItem(10, button(Material.GOLD_INGOT, ChatColor.YELLOW + "Снятие наличных", List.of(
-                ChatColor.GRAY + "Счёт игрока или казна страны → наличные",
-                ChatColor.DARK_GRAY + "Ввод: источник, сумма"
-        )));
-        inv.setItem(12, button(Material.EMERALD, ChatColor.GREEN + "Взнос наличных", List.of(
-                ChatColor.GRAY + "Наличные → счёт игрока или казна страны",
-                ChatColor.DARK_GRAY + "Ввод: получатель, сумма"
-        )));
-        inv.setItem(14, button(Material.PLAYER_HEAD, ChatColor.AQUA + "Перевод игроку", List.of(
-                ChatColor.GRAY + "Счёт игрока → игрок",
-                ChatColor.DARK_GRAY + "Ввод: ник, сумма"
-        )));
-        inv.setItem(16, button(Material.BOOK, ChatColor.AQUA + "Перевод стране", List.of(
-                ChatColor.GRAY + "Счёт игрока → казна страны",
-                ChatColor.DARK_GRAY + "Ввод: страна, сумма"
-        )));
-        inv.setItem(22, button(Material.PAPER, ChatColor.YELLOW + "Информация", List.of(
-                ChatColor.GRAY + "Комиссия и владелец ATM"
-        )));
-        inv.setItem(26, button(Material.BARRIER, ChatColor.RED + "Закрыть", List.of()));
+    private enum BrowseStage { ACTION, WD_KIND, TARGET_MODE, TARGET_LIST }
 
-        p.openInventory(inv);
+    private static final class BrowseSession {
+        final Location atmLoc;
+        BrowseStage stage = BrowseStage.ACTION;
+        int index = 0;
+        ActionType action;
+        TargetKind kind;
+        String targetValue;
+        List<String> listCache = List.of();
+
+        BrowseSession(Location atmLoc) { this.atmLoc = atmLoc; }
     }
 
-    private void openWithdrawDepositTargetMenu(Player p, SignVariables sv, ActionType action) {
-        String country = (sv != null && sv.getOwnerCountry() != null) ? sv.getOwnerCountry() : "?";
-        String title = GUI_TITLE_PREFIX + " [" + country + "] → " +
-                (action == ActionType.WITHDRAW ? "Снятие" : "Взнос");
-
-        Inventory inv = Bukkit.createInventory(new AtmHolder(GuiType.WD_TARGET, action, null, null), 27, ChatColor.DARK_GREEN + title);
-
-        inv.setItem(11, button(Material.PLAYER_HEAD, ChatColor.YELLOW + "Игрок", List.of(ChatColor.GRAY + "Операция со счётом игрока")));
-        inv.setItem(15, button(Material.BOOK, ChatColor.AQUA + "Страна", List.of(ChatColor.GRAY + "Операция с казной страны")));
-        inv.setItem(26, button(Material.BARRIER, ChatColor.RED + "Назад", List.of()));
-
-        p.openInventory(inv);
+    private static int indexOfAction(ActionType a) {
+        for (int i = 0; i < ACTIONS.length; i++) if (ACTIONS[i] == a) return i;
+        return 0;
     }
 
-    private void openAmountMenu(Player p, SignVariables sv, ActionType action, TargetKind kind, String targetValue) {
-        String country = (sv != null && sv.getOwnerCountry() != null) ? sv.getOwnerCountry() : "?";
-        String t = (action == ActionType.WITHDRAW ? "Снятие" :
-                action == ActionType.DEPOSIT ? "Взнос" :
-                        action == ActionType.TRANSFER_PLAYER ? "Перевод игроку" :
-                                "Перевод стране");
-
-        String who = (kind == TargetKind.PLAYER ? "Игрок" : "Страна");
-        if (targetValue != null && !targetValue.isBlank()) who += ": " + targetValue;
-
-        Inventory inv = Bukkit.createInventory(new AtmHolder(GuiType.AMOUNT, action, kind, targetValue), 27,
-                ChatColor.DARK_GREEN + "ATM [" + country + "] → " + t);
-
-        // Пресеты сумм (слоты подобраны так, чтобы красиво легло)
-        setAmountButton(inv, 10, 50);
-        setAmountButton(inv, 11, 100);
-        setAmountButton(inv, 12, 250);
-        setAmountButton(inv, 13, 500);
-        setAmountButton(inv, 14, 1000);
-        setAmountButton(inv, 15, 2500);
-        setAmountButton(inv, 16, 5000);
-
-        inv.setItem(22, button(Material.OAK_SIGN, ChatColor.YELLOW + "Своя сумма", List.of(
-                ChatColor.GRAY + "После выбора напиши число в чат"
-        )));
-        inv.setItem(26, button(Material.BARRIER, ChatColor.RED + "Назад", List.of(ChatColor.GRAY + who)));
-
-        p.openInventory(inv);
-    }
-
-    private void setAmountButton(Inventory inv, int slot, int amount) {
-        inv.setItem(slot, button(Material.GOLD_NUGGET, ChatColor.YELLOW + String.valueOf(amount) + " Ⓕ",
-                List.of(ChatColor.GRAY + "Нажми, чтобы выбрать")));
-    }
-
-    private Double amountPresetBySlot(int slot) {
-        return switch (slot) {
-            case 10 -> 50.0;
-            case 11 -> 100.0;
-            case 12 -> 250.0;
-            case 13 -> 500.0;
-            case 14 -> 1000.0;
-            case 15 -> 2500.0;
-            case 16 -> 5000.0;
-            default -> null;
+    private int optionsCountFor(BrowseSession s) {
+        return switch (s.stage) {
+            case ACTION -> ACTIONS.length;
+            case WD_KIND, TARGET_MODE -> 2;
+            case TARGET_LIST -> Math.max(1, s.listCache.size());
         };
     }
 
-    private void openTransferModeMenu(Player p, SignVariables sv) {
-        String country = (sv != null && sv.getOwnerCountry() != null) ? sv.getOwnerCountry() : "?";
-        Inventory inv = Bukkit.createInventory(new AtmHolder(GuiType.TRANSFER_MODE, null, null, null), 27,
-                ChatColor.DARK_GREEN + "ATM [" + country + "] → Перевод");
-
-        inv.setItem(11, button(Material.PLAYER_HEAD, ChatColor.AQUA + "Голова", List.of(
-                ChatColor.GRAY + "Перевод игроку",
-                ChatColor.DARK_GRAY + "Выбор игрока через головы"
-        )));
-        inv.setItem(15, button(Material.WHITE_BANNER, ChatColor.AQUA + "Баннер", List.of(
-                ChatColor.GRAY + "Перевод стране",
-                ChatColor.DARK_GRAY + "Выбор страны через баннер"
-        )));
-        inv.setItem(26, button(Material.BARRIER, ChatColor.RED + "Назад", List.of()));
-
-        p.openInventory(inv);
+    /** Hotbar slots are a 0..8 ring — this figures out which way the wheel actually turned, wrap included. */
+    private static int scrollDirection(int prev, int next) {
+        int diff = next - prev;
+        if (diff == 1 || diff == -8) return 1;
+        if (diff == -1 || diff == 8) return -1;
+        return Integer.signum(diff);
     }
 
-    private void openPickPlayerMenu(Player p, SignVariables sv) {
-        String country = (sv != null && sv.getOwnerCountry() != null) ? sv.getOwnerCountry() : "?";
-        Inventory inv = Bukkit.createInventory(new AtmHolder(GuiType.PICK_PLAYER, null, null, null), 54,
-                ChatColor.DARK_GREEN + "ATM [" + country + "] → Игрок");
+    private void endSession(Player p, BrowseSession s) {
+        sessions.remove(p.getUniqueId());
+        scroll.resumeScrolling(s.atmLoc);
+    }
 
-        int slot = 0;
-        for (Player pl : Bukkit.getOnlinePlayers()) {
-            if (pl == null) continue;
-            if (pl.getUniqueId().equals(p.getUniqueId())) continue;
-            if (slot >= 45) break; // оставим низ под кнопки
-
-            ItemStack head = new ItemStack(Material.PLAYER_HEAD);
-            SkullMeta meta = (SkullMeta) head.getItemMeta();
-            if (meta != null) {
-                meta.setOwningPlayer(pl);
-                meta.setDisplayName(ChatColor.YELLOW + pl.getName());
-                meta.setLore(List.of(ChatColor.GRAY + "Нажми чтобы выбрать"));
-                head.setItemMeta(meta);
+    private void stepBack(Player p, BrowseSession s) {
+        switch (s.stage) {
+            case ACTION -> endSession(p, s);
+            case WD_KIND, TARGET_MODE -> {
+                s.stage = BrowseStage.ACTION;
+                s.index = (s.action != null) ? indexOfAction(s.action) : 0;
+                renderBrowse(p, s);
             }
-            inv.setItem(slot++, head);
+            case TARGET_LIST -> {
+                s.stage = BrowseStage.TARGET_MODE;
+                s.index = 1; // «Список» — так мы сюда и попали
+                renderBrowse(p, s);
+            }
         }
-
-        inv.setItem(26, button(Material.BARRIER, ChatColor.RED + "Назад", List.of()));
-        p.openInventory(inv);
     }
 
-    private void openPickCountryMenu(Player p, SignVariables sv) {
-        openPickCountryListMenu(p, sv, 0);
+    private void confirmCurrentSelection(Player p, BrowseSession s) {
+        switch (s.stage) {
+            case ACTION -> {
+                ActionType chosen = ACTIONS[s.index];
+                s.action = chosen;
+                if (chosen == ActionType.INFO) {
+                    endSession(p, s);
+                    showInfo(p, s.atmLoc, store.get(s.atmLoc));
+                    return;
+                }
+                if (chosen == ActionType.WITHDRAW || chosen == ActionType.DEPOSIT) {
+                    s.stage = BrowseStage.WD_KIND;
+                    s.index = 0;
+                    renderBrowse(p, s);
+                    return;
+                }
+                s.stage = BrowseStage.TARGET_MODE;
+                s.index = 0;
+                renderBrowse(p, s);
+            }
+            case WD_KIND -> {
+                s.kind = (s.index == 0) ? TargetKind.PLAYER : TargetKind.COUNTRY;
+                s.targetValue = null;
+                beginAmountEdit(p, s, false);
+            }
+            case TARGET_MODE -> {
+                if (s.index == 0) {
+                    beginAmountEdit(p, s, true);
+                    return;
+                }
+                s.kind = (s.action == ActionType.TRANSFER_PLAYER) ? TargetKind.PLAYER : TargetKind.COUNTRY;
+                s.listCache = (s.kind == TargetKind.PLAYER) ? registeredPlayerNamesExcept(p) : countryNamesWithMineFirst(p);
+                s.stage = BrowseStage.TARGET_LIST;
+                s.index = 0;
+                renderBrowse(p, s);
+            }
+            case TARGET_LIST -> {
+                if (s.listCache.isEmpty()) {
+                    p.sendActionBar(ChatColor.RED + "Список пуст.");
+                    return;
+                }
+                String picked = s.listCache.get(s.index);
+                if (s.action == ActionType.TRANSFER_PLAYER && picked.equalsIgnoreCase(p.getName())) {
+                    p.sendActionBar(ChatColor.RED + "Нельзя перевести самому себе.");
+                    return;
+                }
+                s.kind = (s.action == ActionType.TRANSFER_PLAYER) ? TargetKind.PLAYER : TargetKind.COUNTRY;
+                s.targetValue = picked;
+                beginAmountEdit(p, s, false);
+            }
+        }
     }
 
-    private void openPickCountryListMenu(Player p, SignVariables sv, int page) {
+    private void renderBrowse(Player p, BrowseSession s) {
+        SignVariables sv = store.get(s.atmLoc);
         String country = (sv != null && sv.getOwnerCountry() != null) ? sv.getOwnerCountry() : "?";
+        String[] lines = new String[4];
 
-        List<String> countries = UnityLauncher.getInstance().countryRegistryJdbc.getAllCountryNames();
+        switch (s.stage) {
+            case ACTION -> {
+                lines[0] = trim("ATM [" + country + "]");
+                lines[1] = "";
+                lines[2] = trim(ACTION_LABELS[s.index]);
+                lines[3] = "Скролл ЛКМ=OK";
+            }
+            case WD_KIND -> {
+                lines[0] = trim(ACTION_LABELS[indexOfAction(s.action)]);
+                lines[1] = "";
+                lines[2] = trim(s.index == 0 ? "Свой счёт" : "Казна");
+                lines[3] = "ПКМ=назад";
+            }
+            case TARGET_MODE -> {
+                lines[0] = trim(ACTION_LABELS[indexOfAction(s.action)]);
+                lines[1] = "";
+                lines[2] = trim(s.index == 0 ? "Вручную" : "Список");
+                lines[3] = "ПКМ=назад";
+            }
+            case TARGET_LIST -> {
+                lines[0] = trim(ACTION_LABELS[indexOfAction(s.action)]);
+                lines[1] = s.listCache.size() > 1 ? ("(" + (s.index + 1) + "/" + s.listCache.size() + ")") : "";
+                lines[2] = trim(s.listCache.isEmpty() ? "(пусто)" : s.listCache.get(s.index));
+                lines[3] = "ПКМ=назад";
+            }
+        }
+        p.sendSignChange(s.atmLoc, lines);
+    }
 
-        final int pageSize = 45; // 0..44
-        int maxPage = (countries.isEmpty() ? 0 : (countries.size() - 1) / pageSize);
-        if (page < 0) page = 0;
-        if (page > maxPage) page = maxPage;
+    private static String trim(String s) {
+        if (s == null) return "";
+        return s.length() <= 15 ? s : s.substring(0, 15);
+    }
 
-        Inventory inv = Bukkit.createInventory(
-                new AtmHolder(GuiType.PICK_COUNTRY_LIST, null, TargetKind.COUNTRY, null, page),
-                54,
-                ChatColor.DARK_GREEN + "ATM [" + country + "] → Страна (" + (page + 1) + "/" + (maxPage + 1) + ")"
-        );
+    // ===== amount / target entry via real sign-edit screen =====
 
-        int start = page * pageSize;
-        int end = Math.min(countries.size(), start + pageSize);
+    private void beginAmountEdit(Player p, BrowseSession s, boolean manualTarget) {
+        Location atmLoc = s.atmLoc;
+        ActionType action = s.action;
+        TargetKind kind = s.kind;
+        String targetValue = s.targetValue;
 
-        int slot = 0;
-        for (int i = start; i < end; i++) {
-            String cName = countries.get(i);
+        // Просмотр окончен — дальше ввод идёт через реальный экран
+        // редактирования таблички, колесо мыши игроку возвращаем сразу.
+        sessions.remove(p.getUniqueId());
 
-            double money = UnityLauncher.getInstance().countryRegistryJdbc.getCountryMoney(cName);
-            double feePct = UnityLauncher.getInstance().countryRegistryJdbc.getCountryTransferFeePctOr(cName, 0.0);
-
-            ItemStack icon = getIcon(cName, money, feePct);
-
-            inv.setItem(slot++, icon);
+        if (!(atmLoc.getBlock().getState() instanceof Sign sign)) {
+            scroll.resumeScrolling(atmLoc);
+            return;
         }
 
-        // Нижняя панель (45..53)
-        inv.setItem(45, button(Material.BARRIER, ChatColor.RED + "Назад", List.of()));
-        inv.setItem(47, button(Material.ARROW, ChatColor.YELLOW + "Пред.", List.of(ChatColor.GRAY + "Предыдущая страница")));
-        inv.setItem(49, button(Material.OAK_SIGN, ChatColor.AQUA + "Ввести страну в чат", List.of(ChatColor.GRAY + "Формат: <страна> <сумма>")));
-        inv.setItem(51, button(Material.ARROW, ChatColor.YELLOW + "След.", List.of(ChatColor.GRAY + "Следующая страница")));
-
-        // Быстрый “моя страна”
-        inv.setItem(53, button(Material.WHITE_BANNER, ChatColor.YELLOW + "Моя страна", List.of(ChatColor.GRAY + "Сразу выбрать твою страну")));
-
-        p.openInventory(inv);
-    }
-
-    private @NonNull ItemStack getIcon(String cName, double money, double feePct) {
-        ItemStack icon = new ItemStack(Material.WHITE_BANNER);
-        ItemMeta meta = icon.getItemMeta();
-        if (meta != null) {
-            meta.setDisplayName(ChatColor.AQUA + cName);
-            List<String> lore = new ArrayList<>();
-            lore.add(ChatColor.GRAY + "Казна: " + ChatColor.YELLOW + round2(money) + " Ⓕ");
-            if (feePct > 0) lore.add(ChatColor.GRAY + "Комиссия страны: " + ChatColor.RED + round2(feePct) + "%");
-            lore.add(ChatColor.DARK_GRAY + "Нажми, чтобы выбрать");
-            meta.setLore(lore);
-            icon.setItemMeta(meta);
+        if (manualTarget) {
+            String promptTop = (action == ActionType.TRANSFER_PLAYER) ? "Ник игрока:" : "Страна:";
+            sign.setLine(0, trim(promptTop));
+            sign.setLine(1, "");
+            sign.setLine(2, "Сумма:");
+            sign.setLine(3, "");
+        } else {
+            String targetLabel = (targetValue != null) ? targetValue
+                    : (kind == TargetKind.COUNTRY ? "Казна страны" : "Свой счёт");
+            sign.setLine(0, trim(ACTION_LABELS[indexOfAction(action)]));
+            sign.setLine(1, trim(targetLabel));
+            sign.setLine(2, "Сумма:");
+            sign.setLine(3, "");
         }
-        return icon;
+        sign.update();
+
+        long expires = System.currentTimeMillis() + EDIT_TIMEOUT_MS;
+        pendingEdits.put(p.getUniqueId(), new PendingSignEdit(atmLoc, action, kind, targetValue, manualTarget, expires));
+
+        p.openSign(sign, Side.FRONT);
     }
 
-    private static ItemStack button(Material mat, String name, List<String> lore) {
-        ItemStack it = new ItemStack(mat);
-        ItemMeta meta = it.getItemMeta();
-        if (meta != null) {
-            meta.setDisplayName(name);
-            if (lore != null && !lore.isEmpty()) meta.setLore(lore);
-            it.setItemMeta(meta);
-        }
-        return it;
-    }
-
-    /**
-     * @param targetValue ник игрока или страна (если уже выбрано)
-     */
-    public record AtmHolder(GuiType gui, ActionType action, TargetKind targetKind, String targetValue, int page)
-            implements InventoryHolder {
-        private AtmHolder(GuiType gui, ActionType action, TargetKind targetKind, String targetValue) {
-            this(gui, action, targetKind, targetValue, 0);
-        }
-
-        @Override public @NonNull Inventory getInventory() {
-            // Bukkit не использует это для кастомных холдеров, но контракт InventoryHolder требует non-null
-            return Bukkit.createInventory(this, 9);
-        }
-    }
-
-    private enum GuiType {
-        MAIN,
-        WD_TARGET,      // withdraw/deposit: выбор игрок/страна
-        AMOUNT,         // выбор суммы (пресеты/кастом)
-        TRANSFER_MODE,  // голова/баннер
-        PICK_PLAYER,    // выбор игрока по головам
-        PICK_COUNTRY_LIST
-    }
-
-    private enum TargetKind {
-        PLAYER,
-        COUNTRY
-    }
-
-    // ===== Chat input =====
-
-    /** Вернёт true, если мы перехватили чат и его надо cancel. */
-    public boolean onChat(AsyncPlayerChatEvent e) {
+    /** Вызывается из SignManager.onSignChange для табличек категории ATM (существующих, не только что созданных). */
+    public void onSignEditSubmit(SignChangeEvent e, Location atmLoc, SignVariables sv) {
         Player p = e.getPlayer();
-        PendingInput pi = pending.get(p.getUniqueId());
-        if (pi == null) return false;
+        String[] submitted = e.getLines().clone(); // берём то, что реально напечатал игрок, ДО перезаписи ниже
 
-        String msg = e.getMessage();
+        PendingSignEdit pending = pendingEdits.remove(p.getUniqueId());
 
-        String raw = msg.trim();
-        if (raw.isEmpty()) return true;
+        // Что бы ни было напечатано — оно никогда не должно стать постоянным текстом таблички.
+        List<String> idle = safe4(sv != null ? sv.getSignText() : null);
+        for (int i = 0; i < 4; i++) e.setLine(i, idle.get(i));
+        scroll.resumeScrolling(atmLoc);
 
-        String low = raw.toLowerCase(Locale.ROOT);
-        if (low.equals("cancel") || low.equals("отмена") || low.equals("stop")) {
-            pending.remove(p.getUniqueId());
-            Bukkit.getScheduler().runTask(plugin, () ->
-                    p.sendMessage(ChatColor.GRAY + "Операция ATM отменена.")
-            );
-            return true;
+        if (pending == null || !atmLoc.equals(pending.atmLoc())) return; // просрочено (таймаут) или чужой стейт
+
+        String targetValue = pending.targetValue();
+        double amount;
+
+        if (pending.needsTargetInput()) {
+            String rawTarget = safeIdx(submitted, 1).trim();
+            if (rawTarget.isBlank()) { p.sendActionBar(ChatColor.RED + "Не указана цель."); return; }
+            Double amt = parseAmountForSign(safeIdx(submitted, 3), p);
+            if (amt == null) return;
+            targetValue = rawTarget;
+            amount = amt;
+        } else {
+            Double amt = parseAmountForSign(safeIdx(submitted, 3), p);
+            if (amt == null) return;
+            amount = amt;
         }
 
-        // Любой ввод обрабатываем на main thread (Bukkit API), а тяжёлое — async внутри.
-        Bukkit.getScheduler().runTask(plugin, () -> handleChatStep(p, pi, raw));
-        return true;
+        runActionWithResolvedTarget(p, atmLoc, pending.action(), pending.kind(), targetValue, amount);
     }
 
-    private void beginAmountChatOnly(Player p, Location atmLoc, SignVariables sv, ActionType type, TargetKind kind, String targetValue) {
-        pending.put(p.getUniqueId(), new PendingInput(type, atmLoc, sv, kind, targetValue));
-
-        p.sendMessage(ChatColor.YELLOW + "[ATM] Введи сумму числом.");
-        p.sendMessage(ChatColor.DARK_GRAY + "Пример: 250");
-        p.sendMessage(ChatColor.DARK_GRAY + "Отмена: cancel / отмена");
+    private static String safeIdx(String[] arr, int i) {
+        return (arr != null && i >= 0 && i < arr.length && arr[i] != null) ? arr[i] : "";
     }
 
-    private void beginCountryAndAmountChat(Player p, Location atmLoc, SignVariables sv) {
-        pending.put(p.getUniqueId(), new PendingInput(ActionType.TRANSFER_COUNTRY, atmLoc, sv, TargetKind.COUNTRY, null));
-
-        p.sendMessage(ChatColor.YELLOW + "[ATM] Перевод стране.");
-        p.sendMessage(ChatColor.GRAY + "Напиши: страна и сумма");
-        p.sendMessage(ChatColor.DARK_GRAY + "Пример: FarLands 250");
-        p.sendMessage(ChatColor.DARK_GRAY + "Отмена: cancel / отмена");
+    private Double parseAmountForSign(String raw, Player p) {
+        String s = ChatColor.stripColor(raw == null ? "" : raw).trim().replace(',', '.');
+        try {
+            double v = Double.parseDouble(s);
+            if (v <= 0) { p.sendActionBar(ChatColor.RED + "Сумма должна быть > 0."); return null; }
+            return v;
+        } catch (NumberFormatException ex) {
+            p.sendActionBar(ChatColor.RED + "Введи число в поле суммы.");
+            return null;
+        }
     }
 
-    private void handleChatStep(Player p, PendingInput pi, String raw) {
-        if (!pending.containsKey(p.getUniqueId())) return;
+    private static List<String> safe4(List<String> in) {
+        ArrayList<String> out = new ArrayList<>(4);
+        if (in != null) out.addAll(in);
+        while (out.size() < 4) out.add("");
+        if (out.size() > 4) out.subList(4, out.size()).clear();
+        return out;
+    }
 
-        Location atmLoc = pi.atmLoc;
+    private record PendingSignEdit(Location atmLoc, ActionType action, TargetKind kind, String targetValue,
+                                    boolean needsTargetInput, long expiresAtMs) {}
 
-        // 1) Если targetKind уже известен — ждём только сумму
-        if (pi.targetKind != null) {
-            double amount = parseAmount(raw, p);
-            if (amount <= 0) return;
+    // ===== watchdog: ends a browse session once the player looks away, and
+    // force-restores a sign stuck showing edit prompts if its screen was
+    // ever abandoned without submitting (see EDIT_TIMEOUT_MS) =====
 
-            boolean done = runActionWithResolvedTarget(p, atmLoc, pi.type, pi.targetKind, pi.targetValue, amount);
-            if (done) pending.remove(p.getUniqueId());
-            return;
+    private void startWatchdog() {
+        watchdogTask = Bukkit.getScheduler().runTaskTimer(plugin, this::tickWatchdog, 20L, 4L);
+    }
+
+    private void tickWatchdog() {
+        if (!sessions.isEmpty()) {
+            Iterator<Map.Entry<UUID, BrowseSession>> it = sessions.entrySet().iterator();
+            while (it.hasNext()) {
+                var entry = it.next();
+                Player p = Bukkit.getPlayer(entry.getKey());
+                BrowseSession s = entry.getValue();
+                if (p == null || !p.isOnline()) {
+                    it.remove();
+                    scroll.resumeScrolling(s.atmLoc);
+                    continue;
+                }
+                if (!stillLookingAt(p, s.atmLoc)) {
+                    it.remove();
+                    scroll.resumeScrolling(s.atmLoc);
+                }
+            }
         }
 
-        // 2) Fallback: старый формат "две части"
-        String[] parts = raw.split("\\s+");
-        if (parts.length < 2) {
-            p.sendMessage(ChatColor.RED + "Неверный формат. Нужно 2 значения.");
-            return;
+        if (!pendingEdits.isEmpty()) {
+            long now = System.currentTimeMillis();
+            Iterator<Map.Entry<UUID, PendingSignEdit>> it = pendingEdits.entrySet().iterator();
+            while (it.hasNext()) {
+                var entry = it.next();
+                PendingSignEdit pe = entry.getValue();
+                if (now < pe.expiresAtMs()) continue;
+                it.remove();
+                restoreIdleDisplay(pe.atmLoc());
+                scroll.resumeScrolling(pe.atmLoc());
+            }
         }
-
-        boolean done;
-        switch (pi.type) {
-            case WITHDRAW -> done = handleWithdraw(p, atmLoc, parts);
-            case DEPOSIT -> done = handleDeposit(p, atmLoc, parts);
-            case TRANSFER_PLAYER -> done = handleTransferPlayer(p, atmLoc, parts);
-            case TRANSFER_COUNTRY -> done = handleTransferCountry(p, atmLoc, parts);
-            default -> done = true;
-        }
-
-        if (done) pending.remove(p.getUniqueId());
     }
+
+    private boolean stillLookingAt(Player p, Location atmLoc) {
+        try {
+            if (!p.getWorld().equals(atmLoc.getWorld())) return false;
+            if (p.getLocation().distanceSquared(atmLoc) > MAX_SESSION_DISTANCE_SQ) return false;
+            var target = p.getTargetBlockExact(LOOK_RANGE, FluidCollisionMode.NEVER);
+            return target != null && SignStore.keyLoc(target.getLocation()).equals(atmLoc);
+        } catch (Throwable t) {
+            return false; // на любую неожиданность лучше тихо закрыть сессию, чем зависнуть навсегда
+        }
+    }
+
+    private void restoreIdleDisplay(Location atmLoc) {
+        SignVariables sv = store.get(atmLoc);
+        if (!(atmLoc.getBlock().getState() instanceof Sign sign)) return;
+        List<String> idle = safe4(sv != null ? sv.getSignText() : null);
+        for (int i = 0; i < 4; i++) sign.setLine(i, idle.get(i));
+        sign.update();
+    }
+
+    // ===== target-list sources =====
+
+    private List<String> registeredPlayerNamesExcept(Player p) {
+        List<String> names = new ArrayList<>(UnityLauncher.getInstance().getAuthService().getAllRegisteredUsernames());
+        names.removeIf(n -> n.equalsIgnoreCase(p.getName()));
+        return names;
+    }
+
+    private List<String> countryNamesWithMineFirst(Player p) {
+        List<String> all = new ArrayList<>(UnityLauncher.getInstance().countryRegistryJdbc.getAllCountryNames());
+        String mine = UnityLauncher.getInstance().countryRegistryJdbc.getCountryOfPlayer(p.getName());
+        if (mine != null && !mine.isBlank()) {
+            all.removeIf(c -> c.equalsIgnoreCase(mine));
+            all.add(0, mine);
+        }
+        return all;
+    }
+
+    // ===== operations (money-moving logic — unchanged from the chest-GUI version) =====
 
     private boolean runActionWithResolvedTarget(Player p, Location atmLoc, ActionType action, TargetKind kind, String targetValue, double amount) {
         if (p == null || atmLoc == null) return true;
@@ -734,225 +640,6 @@ public final class AtmController {
             }
         }
 
-        return true;
-    }
-
-    // ===== Operations (порт из Legacy) =====
-
-    private boolean handleWithdraw(Player p, Location atmLoc, String[] parts) {
-        String src = parts[0].trim().toLowerCase(Locale.ROOT);
-        double amount = parseAmount(parts[1], p);
-        if (amount <= 0) return false;
-
-        if (isPlayerWord(src)) {
-            double net = netAfterAtmFee(p, atmLoc, amount);
-            p.sendMessage(ChatColor.GRAY + "Обрабатываем снятие...");
-            plugin.moneyManager.withdrawToCashBurnFee(p, amount, net);
-            return true;
-        }
-
-        if (isCountryWord(src)) {
-            if (!UnityLauncher.getInstance().countryRegistryJdbc.isCountryLeaderCached(p.getName())) {
-                p.sendMessage(ChatColor.RED + "Снимать из казны может только лидер страны.");
-                return false;
-            }
-
-            String myCountry = UnityLauncher.getInstance().countryRegistryJdbc.getCountryOfPlayer(p.getName());
-            if (myCountry == null || myCountry.isBlank()) {
-                p.sendMessage(ChatColor.RED + "Ты не состоишь в стране.");
-                return false;
-            }
-
-            p.sendMessage(ChatColor.GRAY + "Проверяем казну страны...");
-
-            new BukkitRunnable() {
-                @Override public void run() {
-                    double countryMoney = UnityLauncher.getInstance().countryRegistryJdbc.getCountryMoney(myCountry);
-                    if (countryMoney < amount) {
-                        new BukkitRunnable(){ @Override public void run(){
-                            p.sendMessage(ChatColor.RED + "В казне недостаточно средств. Доступно: "
-                                    + ChatColor.YELLOW + round2(countryMoney) + ChatColor.RED + " Ⓕ.");
-                        }}.runTask(UnityLauncher.getInstance());
-                        return;
-                    }
-
-                    // sender pays full
-                    UnityLauncher.getInstance().countryRegistryJdbc.addCountryMoney(myCountry, -amount);
-
-                    new BukkitRunnable(){ @Override public void run(){
-                        double net = netAfterAtmFee(p, atmLoc, amount);
-                        plugin.moneyManager.giveCash(p, net);
-                        p.sendMessage(ChatColor.GREEN + "Снято из казны: " + ChatColor.YELLOW + round2(net)
-                                + ChatColor.GREEN + " Ⓕ (" + ChatColor.AQUA + myCountry + ChatColor.GREEN + ")");
-                    }}.runTask(UnityLauncher.getInstance());
-                }
-            }.runTaskAsynchronously(UnityLauncher.getInstance());
-            return true;
-        }
-
-        p.sendMessage(ChatColor.RED + "Источник: 'игрок' или 'страна'.");
-        return false;
-    }
-
-    private boolean handleDeposit(Player p, Location atmLoc, String[] parts) {
-        String dst = parts[0].trim().toLowerCase(Locale.ROOT);
-        double amount = parseAmount(parts[1], p);
-        if (amount <= 0) return false;
-
-        AtmFeesUpgrade atmFees = atmFeesUpgradeOrNull();
-
-        if (isCountryWord(dst)) {
-            p.sendMessage(ChatColor.GRAY + "Вносим наличку в казну...");
-
-            double net = amount;
-            if (atmFees != null) {
-                double rate = atmFees.calculateAtmFee(p.getName(), atmLoc, amount);
-                net = amount - (amount * rate);
-                if (net < 0) net = 0;
-            }
-
-            // gross=amount снимаем наличкой, net в казну, fee сгорает
-            return plugin.moneyManager.depositCashToCountryBurnFee(p, amount, net);
-        }
-
-        if (isPlayerWord(dst)) {
-            p.sendMessage(ChatColor.GRAY + "Вносим наличку на счёт...");
-
-            double net = amount;
-            if (atmFees != null) {
-                double rate = atmFees.calculateAtmFee(p.getName(), atmLoc, amount);
-                net = amount - (amount * rate);
-                if (net < 0) net = 0;
-            }
-
-            // gross=amount снимаем наличкой, net на счёт, fee сгорает
-            return plugin.moneyManager.depositCashToPlayerBurnFee(p, amount, net);
-        }
-
-        p.sendMessage(ChatColor.RED + "Получатель: 'игрок' или 'страна'.");
-        return true;
-    }
-
-    private boolean handleTransferPlayer(Player p, Location atmLoc, String[] parts) {
-        String targetName = parts[0].trim();
-        double amount = parseAmount(parts[1], p);
-        if (amount <= 0) return false;
-
-        if (targetName.isEmpty()) { p.sendMessage(ChatColor.RED + "Укажи ник."); return false; }
-        if (targetName.equalsIgnoreCase(p.getName())) { p.sendMessage(ChatColor.RED + "Нельзя перевести самому себе."); return false; }
-
-        AtmFeesUpgrade atmFees = atmFeesUpgradeOrNull();
-
-        p.sendMessage(ChatColor.GRAY + "Проверяем данные и выполняем перевод...");
-
-        new BukkitRunnable() {
-            @Override public void run() {
-                List<String> keys = List.of("money");
-                Map<String, Object> senderMap = UnityCommands.getInstance()
-                        .getJsonFieldValues("Users", "GeneralData", "Name", p.getName(), keys);
-                Double senderMoney = senderMap.get("money") instanceof Number ? ((Number) senderMap.get("money")).doubleValue() : null;
-
-                UnityCommands.getInstance().getPlayerInfo(targetName, targetData -> {
-                    if (senderMoney == null) {
-                        new BukkitRunnable(){ @Override public void run(){
-                            p.sendMessage(ChatColor.RED + "Не удалось получить твой баланс.");
-                        }}.runTask(UnityLauncher.getInstance());
-                        return;
-                    }
-                    if (targetData == null) {
-                        new BukkitRunnable(){ @Override public void run(){
-                            p.sendMessage(ChatColor.RED + "Игрок '" + targetName + "' не найден.");
-                        }}.runTask(UnityLauncher.getInstance());
-                        return;
-                    }
-                    if (senderMoney < amount) {
-                        new BukkitRunnable(){ @Override public void run(){
-                            p.sendMessage(ChatColor.RED + "Недостаточно средств. Доступно: " + ChatColor.YELLOW + senderMoney + ChatColor.RED + " Ⓕ.");
-                        }}.runTask(UnityLauncher.getInstance());
-                        return;
-                    }
-
-                    new BukkitRunnable(){ @Override public void run(){
-                        UnityCommands uc = UnityCommands.getInstance();
-
-                        double rate = 0.0;
-                        if (atmFees != null) rate = atmFees.calculateAtmFee(p.getName(), atmLoc, amount);
-
-                        double fee = amount * rate;
-                        double net = Math.max(0.0, amount - fee);
-
-                        // sender pays full
-                        Map<String, Object> updSender = new HashMap<>();
-                        updSender.put("money", round2(senderMoney - amount));
-                        uc.mergeAndUpdatePlayerData(p.getName(), "GeneralData", updSender);
-
-                        // receiver gets less
-                        Map<String, Object> updTarget = new HashMap<>();
-                        updTarget.put("money", round2(targetData.money + net));
-                        uc.mergeAndUpdatePlayerData(targetName, "GeneralData", updTarget);
-
-                        new BukkitRunnable(){ @Override public void run(){
-                            p.sendMessage(ChatColor.GREEN + "Перевод выполнен: " + ChatColor.YELLOW + round2(amount) + " Ⓕ"
-                                    + ChatColor.GREEN + " → " + ChatColor.RESET + targetName
-                                    + (fee > 0 ? (ChatColor.GRAY + " (получатель получил " + ChatColor.YELLOW + round2(net) + " Ⓕ"
-                                    + ChatColor.GRAY + ", комиссия " + ChatColor.RED + round2(fee) + " Ⓕ" + ChatColor.GRAY + ")") : ""));
-                        }}.runTask(UnityLauncher.getInstance());
-
-                    }}.runTaskAsynchronously(UnityLauncher.getInstance());
-                });
-            }
-        }.runTaskAsynchronously(UnityLauncher.getInstance());
-        return true;
-    }
-
-    private boolean handleTransferCountry(Player p, Location atmLoc, String[] parts) {
-        String targetCountry = parts[0].trim();
-        double amount = parseAmount(parts[1], p);
-        if (amount <= 0) return false;
-
-        if (targetCountry.isEmpty()) { p.sendMessage(ChatColor.RED + "Укажи страну."); return false; }
-        if (!UnityLauncher.getInstance().getCountryRegistryJdbc().countryExistsCached(targetCountry)) {
-            p.sendMessage(ChatColor.RED + "Страна '" + targetCountry + "' не найдена.");
-            return false;
-        }
-
-        AtmFeesUpgrade atmFees = atmFeesUpgradeOrNull();
-
-        p.sendMessage(ChatColor.GRAY + "Выполняем перевод стране...");
-
-        double rate = 0.0;
-        if (atmFees != null) rate = atmFees.calculateAtmFee(p.getName(), atmLoc, amount);
-
-        final double fee = amount * rate;
-        final double net = Math.max(0.0, amount - fee);
-
-        // sender pays full
-        plugin.moneyManager.tryWithdraw(p.getName(), amount, ok -> {
-            if (!ok) {
-                new BukkitRunnable() { @Override public void run() {
-                    p.sendMessage(ChatColor.RED + "Недостаточно средств на счёте для перевода.");
-                }}.runTask(UnityLauncher.getInstance());
-                return;
-            }
-
-            new BukkitRunnable() {
-                @Override public void run() {
-                    UnityLauncher.getInstance().countryRegistryJdbc.addCountryMoney(targetCountry, net);
-
-                    new BukkitRunnable() { @Override public void run() {
-                        p.sendMessage(
-                                ChatColor.GREEN + "Перевод выполнен: " +
-                                        ChatColor.YELLOW + round2(amount) + " Ⓕ" +
-                                        ChatColor.GREEN + " → " + ChatColor.AQUA + targetCountry +
-                                        (fee > 0
-                                                ? ChatColor.GRAY + " (зачислено " + ChatColor.YELLOW + round2(net) +
-                                                ChatColor.GRAY + " Ⓕ, комиссия " + ChatColor.RED + round2(fee) + " Ⓕ)"
-                                                : "")
-                        );
-                    }}.runTask(UnityLauncher.getInstance());
-                }
-            }.runTaskAsynchronously(UnityLauncher.getInstance());
-        });
         return true;
     }
 
@@ -1086,30 +773,6 @@ public final class AtmController {
 
     // ===== utils =====
 
-    private double parseAmount(String s, Player p) {
-        try {
-            double v = Double.parseDouble(s.replace(',', '.'));
-            if (v <= 0) {
-                p.sendMessage(ChatColor.RED + "Сумма должна быть > 0.");
-                return -1;
-            }
-            return v;
-        } catch (NumberFormatException ex) {
-            p.sendMessage(ChatColor.RED + "Введите корректную сумму.");
-            return -1;
-        }
-    }
-
-    private boolean isPlayerWord(String s) {
-        return s.equals("игрок") || s.equals("я") || s.equals("мой") || s.equals("мойсчёт")
-                || s.equals("me") || s.equals("player") || s.equals("игр") || s.equals("иг");
-    }
-
-    private boolean isCountryWord(String s) {
-        return s.equals("страна") || s.equals("государство") || s.equals("country")
-                || s.equals("стр") || s.equals("ст") || s.equals("с");
-    }
-
     private double round2(double v) {
         return Math.round(v * 100.0) / 100.0;
     }
@@ -1136,9 +799,12 @@ public final class AtmController {
         WITHDRAW,
         DEPOSIT,
         TRANSFER_PLAYER,
-        TRANSFER_COUNTRY
+        TRANSFER_COUNTRY,
+        INFO
     }
 
-    private record PendingInput(ActionType type, Location atmLoc, SignVariables sv, TargetKind targetKind, String targetValue) {
+    private enum TargetKind {
+        PLAYER,
+        COUNTRY
     }
 }
