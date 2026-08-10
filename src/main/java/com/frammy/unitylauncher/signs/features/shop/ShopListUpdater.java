@@ -96,36 +96,33 @@ public record ShopListUpdater(UnityLauncher plugin, ZoneManager zoneManager, Sig
             if (dealQty == null || dealQty <= 0) continue;
             if (dealPrice == null || dealPrice <= 0) continue;
 
-            // --- 3) материал и наличие в сундуке ---
+            // --- 3) материалы и наличие каждого в сундуке ---
+            // "Кол-во:/Цена:" на табличке — единая ставка за единицу для
+            // ВСЕГО сундука (см. AutoDebitService, class javadoc), не
+            // привязка к одному материалу — так что несколько разных
+            // товаров в одном сундуке это нормально: каждый попадает в
+            // список отдельной позицией по одной и той же ставке. Раньше
+            // тут брался только "первый попавшийся" материал, и любой
+            // другой тип в том же сундуке был не в списке и без цены — то
+            // есть фактически бесплатным.
             var st = chestLoc.getBlock().getState();
             if (!(st instanceof org.bukkit.block.Container c)) continue;
 
-            var inv = c.getInventory();
-            org.bukkit.Material mat = null;
-            int total = 0;
-            boolean mixed = false;
-
-            for (var it : inv.getContents()) {
+            Map<org.bukkit.Material, Integer> totalsByMaterial = new LinkedHashMap<>();
+            for (var it : c.getInventory().getContents()) {
                 if (it == null || it.getType().isAir()) continue;
-                if (mat == null) mat = it.getType();
-                else if (mat != it.getType()) { mixed = true; break; }
-                total += it.getAmount();
+                totalsByMaterial.merge(it.getType(), it.getAmount(), Integer::sum);
             }
-            // Смешанный сундук (несколько типов предмета) — раньше молча
-            // брали первый попавшийся материал, из-за чего второй тип не
-            // попадал ни в список, ни под цену — то есть был по факту
-            // бесплатным (см. AutoDebitService.soleMaterialIn — тот же
-            // случай, тот же фикс). Пропускаем такой сундук целиком, пока
-            // владелец не оставит один тип товара.
-            if (mat == null || mixed) continue;
 
-            allItems.add(new ItemData(
-                    SignStore.keyLoc(chestLoc),
-                    mat.name(),
-                    dealQty,
-                    total,
-                    dealPrice
-            ));
+            for (var matEntry : totalsByMaterial.entrySet()) {
+                allItems.add(new ItemData(
+                        SignStore.keyLoc(chestLoc),
+                        matEntry.getKey().name(),
+                        dealQty,
+                        matEntry.getValue(),
+                        dealPrice
+                ));
+            }
         }
 
         // линии для таблички списка
