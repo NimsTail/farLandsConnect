@@ -103,13 +103,21 @@ public record ShopListUpdater(UnityLauncher plugin, ZoneManager zoneManager, Sig
             var inv = c.getInventory();
             org.bukkit.Material mat = null;
             int total = 0;
+            boolean mixed = false;
 
             for (var it : inv.getContents()) {
                 if (it == null || it.getType().isAir()) continue;
                 if (mat == null) mat = it.getType();
-                if (it.getType() == mat) total += it.getAmount();
+                else if (mat != it.getType()) { mixed = true; break; }
+                total += it.getAmount();
             }
-            if (mat == null) continue;
+            // Смешанный сундук (несколько типов предмета) — раньше молча
+            // брали первый попавшийся материал, из-за чего второй тип не
+            // попадал ни в список, ни под цену — то есть был по факту
+            // бесплатным (см. AutoDebitService.soleMaterialIn — тот же
+            // случай, тот же фикс). Пропускаем такой сундук целиком, пока
+            // владелец не оставит один тип товара.
+            if (mat == null || mixed) continue;
 
             allItems.add(new ItemData(
                     SignStore.keyLoc(chestLoc),

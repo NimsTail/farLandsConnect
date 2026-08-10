@@ -84,6 +84,8 @@ public final class AutoDebitService {
     private final Map<UUID, Material> unpaidMaterial = new ConcurrentHashMap<>();
     private final Map<UUID, Location> unpaidChest = new ConcurrentHashMap<>();
     private final Map<UUID, Double> unpaidPricePerUnit = new ConcurrentHashMap<>();
+    // Не даём копиться нескольким reconcile-задачам на одного игрока за один тик.
+    private final Map<UUID, Boolean> reconcilePending = new ConcurrentHashMap<>();
 
     // ===== preferences (см. ATM "Настройки") =====
 
@@ -149,9 +151,19 @@ public final class AutoDebitService {
         }
 
         Double pricePerUnit = pricePerUnit(sv);
-        Material material = firstMaterialIn(topInv);
+        Material material = soleMaterialIn(topInv);
         if (pricePerUnit == null || material == null) {
-            e.setCancelled(true); // товар/цена не настроены — трогать нечего
+            e.setCancelled(true);
+            if (pricePerUnit != null && material == null && !isEmpty(topInv)) {
+                // Сундук непуст, но содержит больше одного типа предмета —
+                // раньше молча брался "первый попавшийся" материал, а второй
+                // (и любой другой) тип оставался вообще вне учёта: не в
+                // списке SHOP_LIST, без цены — забрать бесплатно. Не гадаем,
+                // какой из них "настоящий" — считаем такой сундук
+                // неоднозначно настроенным и просто не даём в нём ничего
+                // трогать не-владельцу, пока не останется один тип товара.
+                p.sendMessage(ChatColor.RED + "В сундуке смешаны разные товары — авто-списание временно недоступно, пусть владелец магазина оставит только один тип товара в сундуке.");
+            }
             return;
         }
 
@@ -159,8 +171,6 @@ public final class AutoDebitService {
         boolean clickedChest = e.getClickedInventory() != null && e.getClickedInventory().equals(topInv);
         ItemStack clicked = e.getCurrentItem();
         ItemStack cursor = e.getCursor();
-        boolean cursorHasOurItem = cursor != null && cursor.getType() == material
-                && chestLoc.equals(unpaidChest.get(p.getUniqueId()));
 
         // ---- A) Shift-клик по товару в сундуке: сразу в инвентарь, минуя курсор ----
         if (clickedChest && (e.getClick() == ClickType.SHIFT_LEFT || e.getClick() == ClickType.SHIFT_RIGHT)
@@ -210,35 +220,81 @@ public final class AutoDebitService {
             return;
         }
 
-        // ---- C) Клик по СВОЕМУ инвентарю с непроплаченным товаром на курсоре: покупка ----
-        if (!clickedChest && cursorHasOurItem) {
-            int placing = (e.getClick() == ClickType.RIGHT) ? 1 : cursor.getAmount();
-            placing = Math.min(placing, cursor.getAmount());
-            placing = Math.min(placing, unpaidUnits.getOrDefault(p.getUniqueId(), 0));
-            if (placing <= 0) return;
+        // ---- Всё остальное: не гадаем, что именно сделает Bukkit (двойной
+        // клик собирает стак ИЗ ВСЕГО инвентаря включая уже принадлежащие
+        // игроку предметы, клик мимо слота роняет предмет, клик по своему
+        // инвентарю при открытом сундуке иногда кладёт В сундук, а не из
+        // него — слишком много вариантов, чтобы классифицировать заранее).
+        // Если у игрока сейчас есть неоплаченные единицы именно этого
+        // сундука/товара — просто сверяем через тик, что реально
+        // изменилось в самом сундуке и на курсоре, и списываем/возвращаем
+        // по факту. См. reconcileNow.
+        UUID id = p.getUniqueId();
+        if (unpaidUnits.getOrDefault(id, 0) > 0
+                && material.equals(unpaidMaterial.get(id))
+                && chestLoc.equals(unpaidChest.get(id))) {
+            scheduleReconcile(p, chestLoc, material);
+        }
+    }
 
-            double cost = round2(placing * pricePerUnit);
-            if (!charge(p, cost, priority)) {
-                e.setCancelled(true);
-                p.sendMessage(ChatColor.RED + "Недостаточно средств.");
-                return;
-            }
-            // сам перенос не трогаем — пусть Bukkit кладёт как обычно
-            untrackUnits(p, placing);
-            p.sendMessage(ChatColor.GRAY + "Куплено: " + ChatColor.YELLOW + placing + "x" + ChatColor.GRAY + " за " + ChatColor.GREEN + cost + " Ⓕ");
-            return;
+    /** Коалесцируется: если проверка уже запланирована на этот тик — второй раз не планируем, дождавшийся тик всё равно увидит суммарный эффект всех кликов. */
+    private void scheduleReconcile(Player p, Location chestLoc, Material material) {
+        UUID id = p.getUniqueId();
+        if (Boolean.TRUE.equals(reconcilePending.get(id))) return;
+        reconcilePending.put(id, true);
+        int chestCountBefore = countMaterialInChestBlock(chestLoc, material);
+
+        org.bukkit.Bukkit.getScheduler().runTask(plugin, () -> {
+            reconcilePending.remove(id);
+            reconcileNow(p, chestLoc, material, chestCountBefore);
+        });
+    }
+
+    private void reconcileNow(Player p, Location chestLoc, Material material, int chestCountBefore) {
+        UUID id = p.getUniqueId();
+        int unpaid = unpaidUnits.getOrDefault(id, 0);
+        if (unpaid <= 0) return;
+        if (!chestLoc.equals(unpaidChest.get(id)) || material != unpaidMaterial.get(id)) return;
+
+        // Сколько вернулось обратно в сундук с прошлой проверки — без списания.
+        int chestCountAfter = countMaterialInChestBlock(chestLoc, material);
+        int returned = Math.max(0, chestCountAfter - chestCountBefore);
+        if (returned > 0) {
+            untrackUnits(p, Math.min(returned, unpaid));
+            unpaid = unpaidUnits.getOrDefault(id, 0);
+            if (unpaid <= 0) return;
         }
 
-        // ---- D) Клик обратно в тот же сундук с непроплаченным товаром на курсоре: возврат, без списания ----
-        if (clickedChest && cursorHasOurItem) {
-            int beforeCursor = cursor.getAmount();
-            org.bukkit.Bukkit.getScheduler().runTask(plugin, () -> {
-                ItemStack cur = p.getItemOnCursor();
-                int afterCursor = (cur != null && cur.getType() == material) ? cur.getAmount() : 0;
-                int returned = Math.max(0, beforeCursor - afterCursor);
-                if (returned > 0) untrackUnits(p, returned);
-            });
+        // Что осталось из неоплаченного и НЕ вернулось в сундук и НЕ висит
+        // на курсоре — значит уже физически у игрока (в инвентаре) или
+        // было выброшено (это уже могло списаться отдельно через onDrop —
+        // тогда unpaidUnits уже уменьшен ДО этой проверки, двойного
+        // списания не будет).
+        ItemStack cursor = p.getItemOnCursor();
+        int stillOnCursor = (cursor != null && cursor.getType() == material) ? cursor.getAmount() : 0;
+        int committed = Math.max(0, unpaid - stillOnCursor);
+        if (committed <= 0) return;
+
+        Double ppu = unpaidPricePerUnit.get(id);
+        if (ppu == null) return;
+        double cost = round2(committed * ppu);
+        String priority = priorityCache.getOrDefault(id, "CASH");
+
+        if (charge(p, cost, priority)) {
+            p.sendMessage(ChatColor.GRAY + "Куплено: " + ChatColor.YELLOW + committed + "x" + ChatColor.GRAY + " за " + ChatColor.GREEN + cost + " Ⓕ");
+        } else {
+            p.sendMessage(ChatColor.RED + "Не удалось списать за товар (" + committed + "x) — недостаточно средств.");
         }
+        untrackUnits(p, committed);
+    }
+
+    private int countMaterialInChestBlock(Location chestLoc, Material material) {
+        if (!(chestLoc.getBlock().getState() instanceof org.bukkit.block.Container c)) return 0;
+        int total = 0;
+        for (ItemStack it : c.getInventory().getContents()) {
+            if (it != null && it.getType() == material) total += it.getAmount();
+        }
+        return total;
     }
 
     public void onDrag(InventoryDragEvent e) {
@@ -322,6 +378,7 @@ public final class AutoDebitService {
         unpaidMaterial.remove(id);
         unpaidChest.remove(id);
         unpaidPricePerUnit.remove(id);
+        reconcilePending.remove(id);
     }
 
     private void trackPickup(Player p, Location chestLoc, Material material, int take, double pricePerUnit) {
@@ -370,11 +427,22 @@ public final class AutoDebitService {
 
     // ===== inventory/material helpers =====
 
-    private static Material firstMaterialIn(Inventory inv) {
+    /** null если пусто ИЛИ содержит больше одного типа предмета — см. использование выше (bug: смешанные сундуки = бесплатный второй товар). */
+    private static Material soleMaterialIn(Inventory inv) {
+        Material found = null;
         for (ItemStack it : inv.getContents()) {
-            if (it != null && !it.getType().isAir()) return it.getType();
+            if (it == null || it.getType().isAir()) continue;
+            if (found == null) found = it.getType();
+            else if (found != it.getType()) return null;
         }
-        return null;
+        return found;
+    }
+
+    private static boolean isEmpty(Inventory inv) {
+        for (ItemStack it : inv.getContents()) {
+            if (it != null && !it.getType().isAir()) return false;
+        }
+        return true;
     }
 
     private static int freeSpaceFor(PlayerInventory inv, Material mat) {
@@ -439,9 +507,16 @@ public final class AutoDebitService {
         try { return Math.abs(Double.parseDouble(m.group().replace(',', '.'))); } catch (NumberFormatException e) { return null; }
     }
 
+    /**
+     * НЕ используем Inventory#getLocation() как основной источник — для
+     * PlayerInventory (когда игрок открывает СВОЙ инвентарь, не сундук) он
+     * возвращает позицию самого ИГРОКА, а не null. Если игрок в этот момент
+     * физически стоит на/у блока сундука магазина, координаты совпадали, и
+     * вся эта логика ошибочно принимала его личный инвентарь за сундук
+     * магазина — отсюда и запрет перетаскивать что-либо в своих собственных
+     * слотах просто от стояния рядом с сундуком. Смотрим только на holder.
+     */
     private Location chestLocationOf(Inventory inv) {
-        Location loc = inv.getLocation();
-        if (loc != null) return SignStore.keyLoc(loc);
         var holder = inv.getHolder();
         if (holder instanceof org.bukkit.block.Container c) return SignStore.keyLoc(c.getLocation());
         if (holder instanceof org.bukkit.block.DoubleChest dc) {
