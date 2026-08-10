@@ -210,6 +210,17 @@ public final class AtmController {
             s.index = Math.floorMod(s.index + dir, count);
             renderBrowse(p, s);
         }
+
+        // Отмена события НЕ гарантирует, что клиент не успел уже
+        // локально предсказать смену выбранного слота — при быстром
+        // скролле это расхождение накапливается, и следующий scroll-евент
+        // считает previousSlot/newSlot уже от "уехавшего" клиентского
+        // значения, что и выглядело как случайные скачки/откаты назад.
+        // Принудительно возвращаем слот на сервере (со сдвигом на тик,
+        // внутри самого события это ненадёжно/реентерантно).
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            if (p.isOnline()) p.getInventory().setHeldItemSlot(previousSlot);
+        });
         return true;
     }
 
@@ -264,6 +275,15 @@ public final class AtmController {
     private void endSession(Player p, BrowseSession s) {
         sessions.remove(p.getUniqueId());
         scroll.resumeScrolling(s.atmLoc);
+        // resumeScrolling only re-arms the marquee TASK — and for a short
+        // title (fits under maxLength, see makeSignScrollingLines) there
+        // never was one to begin with, since it returns before creating a
+        // task if nothing needs to scroll. Relying on it alone left ПКМ
+        // (back-out to idle) with nothing that would ever repaint the
+        // player's client — their view just stayed on whatever the last
+        // browse render was, forever. Send the idle text ourselves instead
+        // of assuming something else will.
+        sendIdleView(p, s.atmLoc);
     }
 
     private void stepBack(Player p, BrowseSession s) {
@@ -367,7 +387,28 @@ public final class AtmController {
                 lines[3] = "";
             }
         }
-        p.sendSignChange(s.atmLoc, lines);
+        // Отправляем со сдвигом на тик, а не прямо сейчас: клик по табличке
+        // сам по себе, судя по всему, заставляет клиент запросить/получить
+        // повторную синхронизацию блока (обычное поведение при взаимодействии
+        // с block entity) — если наш пакет уходит в тот же момент, он может
+        // прийти РАНЬШЕ этой синхронизации и тут же перезатереться ею, и
+        // именно это выглядело как "коснитесь" на долю секунды при каждом
+        // подтверждении выбора. Сдвиг на тик почти гарантирует, что наш
+        // пакет придёт последним.
+        sendSignChangeNextTick(p, s.atmLoc, lines);
+    }
+
+    private void sendSignChangeNextTick(Player p, Location loc, String[] lines) {
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            if (p.isOnline()) p.sendSignChange(loc, lines);
+        });
+    }
+
+    private void sendIdleView(Player p, Location atmLoc) {
+        if (p == null || !p.isOnline()) return;
+        SignVariables sv = store.get(atmLoc);
+        List<String> idle = safe4(sv != null ? sv.getSignText() : null);
+        sendSignChangeNextTick(p, atmLoc, idle.toArray(new String[0]));
     }
 
     /** sv.getOwnerCountry() исторически хранит Countries.Id (см. UpgradeCondition.playerCountryCanonical), не имя — отображать напрямую нельзя. */
@@ -421,7 +462,16 @@ public final class AtmController {
         long expires = System.currentTimeMillis() + EDIT_TIMEOUT_MS;
         pendingEdits.put(p.getUniqueId(), new PendingSignEdit(atmLoc, action, kind, targetValue, manualTarget, expires));
 
-        p.openSign(sign, Side.FRONT);
+        // openSign нельзя звать сразу вслед за update() — судя по всему,
+        // клиент открывает экран редактирования с тем текстом, который уже
+        // знал ДО того, как успел обработать наше только что отправленное
+        // обновление блока (та же гонка пакетов, что и в renderBrowse выше),
+        // из-за чего в полях редактирования оставался предыдущий шаг вместо
+        // только что записанных подсказок. Небольшая задержка даёт update()
+        // время дойти первым.
+        Bukkit.getScheduler().runTaskLater(plugin, () -> {
+            if (p.isOnline()) p.openSign(sign, Side.FRONT);
+        }, 2L);
     }
 
     /** Вызывается из SignManager.onSignChange для табличек категории ATM (существующих, не только что созданных). */
@@ -507,6 +557,7 @@ public final class AtmController {
                 if (!stillLookingAt(p, s.atmLoc)) {
                     it.remove();
                     scroll.resumeScrolling(s.atmLoc);
+                    sendIdleView(p, s.atmLoc);
                     continue;
                 }
                 // sendSignChange is a one-off client-side override, not a
