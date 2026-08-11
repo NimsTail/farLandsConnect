@@ -20,31 +20,23 @@ public final class SignRenderer {
 
         String highlighted = null;
 
+        // GH #6: scroll affordance matches the ATM signs (заголовок / ▴ /
+        // <контекст> / ▾) instead of previewing the actual prev/next item
+        // text on lines 1/3 — arrows only, shown solely when there's
+        // something to scroll to in that direction.
         if (items.size() == 1) {
             sign.setLine(1, "");
             sign.setLine(2, ChatColor.GREEN + truncateToVisible(items.getFirst()));
             sign.setLine(3, "");
             highlighted = items.getFirst();
-        } else if (items.size() == 2) {
-            int upperIndex = offset % 2;
-            int centerIndex = (offset + 1) % 2;
-
-            sign.setLine(1, truncateToVisible(items.get(upperIndex)));
-            sign.setLine(2, ChatColor.GREEN + truncateToVisible(items.get(centerIndex)));
-            sign.setLine(3, "");
-            highlighted = items.get(centerIndex);
         } else {
-            for (int i = 0; i < 3; i++) {
-                int index = (offset + i) % items.size();
-                String text = items.get(index);
+            int centerIndex = Math.floorMod(offset + 1, items.size());
+            String text = items.get(centerIndex);
+            highlighted = text;
 
-                if (i == 1) {
-                    highlighted = text;
-                    sign.setLine(i + 1, ChatColor.GREEN + truncateToVisible(text));
-                } else {
-                    sign.setLine(i + 1, truncateToVisible(text));
-                }
-            }
+            sign.setLine(1, "▴");
+            sign.setLine(2, ChatColor.GREEN + truncateToVisible(text));
+            sign.setLine(3, "▾");
         }
 
         sign.update();

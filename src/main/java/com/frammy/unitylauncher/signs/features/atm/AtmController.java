@@ -441,9 +441,11 @@ public final class AtmController {
                 // см. s.index = Math.floorMod(...) в onItemHeld), так что при
                 // >1 пункте вверх/вниз всегда есть куда крутить — обе
                 // стрелочки показываются одновременно.
-                lines[1] = n > 1 ? ("▲  (" + (s.index + 1) + "/" + n + ")") : "";
+                // GH #6: ▴/▾ everywhere now, not ▲/▼ — matches SignRenderer's
+                // SHOP_LIST arrows so every scrollable sign list uses the same glyphs.
+                lines[1] = n > 1 ? ("▴  (" + (s.index + 1) + "/" + n + ")") : "";
                 lines[2] = trim(s.listCache.isEmpty() ? "(пусто)" : s.listCache.get(s.index));
-                lines[3] = n > 1 ? "▼" : "";
+                lines[3] = n > 1 ? "▾" : "";
             }
             case PREFS_MENU -> {
                 lines[0] = trim("Настройки");
