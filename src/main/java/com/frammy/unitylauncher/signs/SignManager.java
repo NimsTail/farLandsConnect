@@ -362,10 +362,9 @@ public final class SignManager implements Listener {
         shopToListSigns.clear();
         shopToSourceSigns.clear();
 
-        // Рантайм-состояние REDSTONE-эмиттеров (Map в RedstoneController) не
-        // персистится — оно каждый раз пересобирается заново из уже
-        // сохранённых табличек, чтобы пережить рестарт сервера.
-        redstone.reclaimAllOnStartup();
+        // REDSTONE-таблички (v2, GH #2 round 2) больше не владеют никаким
+        // блоком — они ищут уже существующий провод/рычаг рядом при каждом
+        // клике, так что тут нечего восстанавливать на старте.
     }
 
     public SignStore store() { return store; }

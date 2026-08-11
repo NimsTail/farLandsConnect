@@ -11,9 +11,11 @@ import org.bukkit.ChatColor;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
+import org.bukkit.block.BlockFace;
 import org.bukkit.block.Sign;
+import org.bukkit.block.data.AnaloguePowerable;
 import org.bukkit.block.data.BlockData;
-import org.bukkit.block.data.Levelled;
+import org.bukkit.block.data.type.Switch;
 import org.bukkit.entity.Player;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockRedstoneEvent;
@@ -29,26 +31,33 @@ import java.util.regex.Pattern;
 /**
  * "REDSTONE" таблички — GitHub issue #2 (minecraftServer repo): клик снимает
  * заданную сумму денег с игрока и на короткое время выдаёт редстоун-сигнал
- * мощностью {@value #PULSE_LEVEL} с блока-опоры таблички.
+ * мощностью {@value #PULSE_LEVEL}.
  *
- * Как это физически устроено (и почему): Bukkit не даёт произвольному блоку
- * (камню, дереву и т.д.) просто "стать" источником питания — сила редстоуна
- * у обычных блоков не хранится, она всегда ВЫЧИСЛЯЕТСЯ движком из соседей. Мы
- * ставим настоящий REDSTONE_WIRE-блок сверху опоры (единственный ванильный
- * блок, чью мощность можно явно задать через {@link Levelled}) и держим его
- * силу вручную: сразу после клика — выставляем уровень через BlockData, а
- * дальше на КАЖДЫЙ следующий пересчёт этого блока (BlockRedstoneEvent —
- * фактически на каждое соседнее обновление) принудительно возвращаем нужное
- * значение через {@link BlockRedstoneEvent#setNewCurrent(int)}, иначе ванильная
- * физика тут же пересчитает провод обратно по своим соседям (то есть в 0) и
- * наш "источник" погаснет сам по себе на следующем тике.
+ * v2 (по фидбеку в issue #2, второй раунд): первая версия сама СТАВИЛА
+ * REDSTONE_WIRE-блок над опорой и держала его силу вручную. Это оказалось
+ * неудачной идеей по двум причинам:
+ * 1) баг — {@code b.getBlockData()} для REDSTONE_WIRE это {@link AnaloguePowerable}
+ *    (getPower/setPower), а не {@link org.bukkit.block.data.Levelled}, которым
+ *    код пытался его кастовать — каст всегда падал в null-ветку, applyForced
+ *    тихо не делал вообще ничего, деньги снимались, сигнал никогда не появлялся.
+ * 2) эксплойт — блок ставился в обход обычной валидации размещения (в том
+ *    числе туда, куда игрок вручную поставить не смог бы), а "переставляется
+ *    автоматически, если игрок его сломал" на практике означало бесконечный
+ *    фарм редстоуновой пыли (сломал → плагин тут же восстановил на следующем
+ *    клике/рестарте → сломал снова).
+ *
+ * Теперь ничего не ставится вообще: при клике ищется уже существующий
+ * REDSTONE_WIRE или рычаг (Lever) среди 6 соседей опорного блока — то, что
+ * игрок построил сам как часть своей схемы, — и его сила/состояние
+ * форсируется на время импульса. Если рядом ничего такого нет, деньги не
+ * снимаются вовсе (проверка идёт ДО списания).
  */
 public final class RedstoneController {
 
     private final UnityLauncher plugin;
     private final SignStore store;
 
-    /** Локация REDSTONE_WIRE-эмиттера -> сила, которую туда принудительно возвращаем при пересчёте. */
+    /** Локация REDSTONE_WIRE, чью силу мы сейчас удерживаем -> нужное значение. Только для проводов, которые СУЩЕСТВОВАЛИ сами по себе — мы их не создаём. */
     private final Map<Location, Integer> forcedPower = new ConcurrentHashMap<>();
 
     private static final int PULSE_LEVEL = 2; // как попросили в issue — фиксированные 2 единицы
@@ -58,6 +67,10 @@ public final class RedstoneController {
     private final Map<Location, Long> lastTriggeredAt = new ConcurrentHashMap<>();
 
     private static final Pattern DOUBLE_ANY = Pattern.compile("-?\\d+(?:[.,]\\d+)?");
+
+    private static final BlockFace[] ADJACENT = {
+            BlockFace.UP, BlockFace.DOWN, BlockFace.NORTH, BlockFace.SOUTH, BlockFace.EAST, BlockFace.WEST
+    };
 
     public RedstoneController(UnityLauncher plugin, SignStore store) {
         this.plugin = plugin;
@@ -89,11 +102,10 @@ public final class RedstoneController {
             return;
         }
 
-        Block emitterBlock = support.getBlock().getRelative(org.bukkit.block.BlockFace.UP);
-        if (!emitterBlock.getType().isAir()) {
+        if (findTarget(support.getBlock()) == null) {
             e.setCancelled(true);
-            p.sendMessage(ChatColor.RED + "Над опорным блоком таблички должно быть свободное место "
-                    + ChatColor.GRAY + "(туда ставится редстоун-эмиттер).");
+            p.sendMessage(ChatColor.RED + "Рядом с опорным блоком таблички нет редстоун-провода или рычага "
+                    + ChatColor.GRAY + "— сначала построй свою схему вплотную к блоку, потом ставь табличку.");
             return;
         }
 
@@ -115,8 +127,6 @@ public final class RedstoneController {
                 SignState.SHOP_DEFINED,
                 null
         ));
-
-        claimEmitter(emitterBlock.getLocation());
 
         p.sendMessage(ChatColor.GREEN + "Редстоун-табличка установлена. "
                 + ChatColor.GRAY + "Цена активации: " + round2(price) + " Ⓕ, сигнал силой " + PULSE_LEVEL
@@ -143,6 +153,13 @@ public final class RedstoneController {
             return;
         }
 
+        Location support = SignManager.getSupportBlockOfSign(signLoc.getBlock());
+        Target target = support != null ? findTarget(support.getBlock()) : null;
+        if (target == null) {
+            p.sendMessage(ChatColor.RED + "Рядом с табличкой больше нет провода/рычага — деньги не списаны.");
+            return;
+        }
+
         lastTriggeredAt.put(signLoc, now);
 
         plugin.moneyManager.tryWithdraw(p.getName(), price, ok -> {
@@ -153,88 +170,77 @@ public final class RedstoneController {
                 }
                 p.sendMessage(ChatColor.GREEN + "Списано: " + ChatColor.YELLOW + round2(price)
                         + ChatColor.GREEN + " Ⓕ. Сигнал активирован на " + (PULSE_DURATION_TICKS / 20) + "с.");
-                pulse(signLoc);
+                pulse(target);
             });
         });
     }
 
-    private void pulse(Location signLoc) {
-        Location emitter = emitterFor(signLoc);
-        if (emitter == null) return;
-
-        // На случай если эмиттер потерялся (перезагрузка/ручная застройка) — переставим.
-        if (!(emitter.getBlock().getType() == Material.REDSTONE_WIRE)) {
-            claimEmitter(emitter);
+    private void pulse(Target target) {
+        switch (target.type()) {
+            case WIRE -> {
+                forcedPower.put(target.loc(), PULSE_LEVEL);
+                applyForcedWire(target.loc());
+                Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                    forcedPower.remove(target.loc());
+                    // Отпускаем принудительно — пересчитываем блок физикой один раз,
+                    // чтобы он сразу вернулся к тому, что реально дают его соседи.
+                    Block b = target.loc().getBlock();
+                    if (b.getBlockData() instanceof AnaloguePowerable) {
+                        b.getState().update(true, true);
+                    }
+                }, PULSE_DURATION_TICKS);
+            }
+            case LEVER -> {
+                setLeverPowered(target.loc(), true);
+                Bukkit.getScheduler().runTaskLater(plugin, () -> setLeverPowered(target.loc(), false), PULSE_DURATION_TICKS);
+            }
         }
-
-        forcedPower.put(emitter, PULSE_LEVEL);
-        applyForced(emitter);
-
-        Bukkit.getScheduler().runTaskLater(plugin, () -> {
-            forcedPower.put(emitter, 0);
-            applyForced(emitter);
-        }, PULSE_DURATION_TICKS);
     }
 
-    private void applyForced(Location emitterLoc) {
-        Block b = emitterLoc.getBlock();
-        if (b.getType() != Material.REDSTONE_WIRE) return; // кто-то снёс наш блок вручную — не лезем
+    private void applyForcedWire(Location wireLoc) {
+        Block b = wireLoc.getBlock();
+        if (b.getType() != Material.REDSTONE_WIRE) return; // рычаг сломан/убран за это время — не лезем
 
         BlockData bd = b.getBlockData();
-        if (!(bd instanceof Levelled lv)) return;
+        if (!(bd instanceof AnaloguePowerable ap)) return;
 
-        int level = forcedPower.getOrDefault(emitterLoc, 0);
-        lv.setLevel(level);
-        b.setBlockData(lv, true); // true = physics update, тем самым триггерит BlockRedstoneEvent у соседей
+        ap.setPower(forcedPower.getOrDefault(wireLoc, 0));
+        b.setBlockData(ap, true); // true = physics update, тем самым триггерит BlockRedstoneEvent у соседей
     }
 
-    /** Ставит REDSTONE_WIRE-эмиттер и регистрирует его как "наш" (принудительно удерживаемый). */
-    private void claimEmitter(Location loc) {
-        Block b = loc.getBlock();
-        if (b.getType() != Material.REDSTONE_WIRE) {
-            if (!b.getType().isAir()) {
-                // Место заняли (постройка игрока, пока сервер был выключен,
-                // и т.п.) — не сносим чужое, просто не регистрируем эмиттер.
-                // Активация этой таблички не сработает, пока место не
-                // освободится (следующий reclaimAllOnStartup её подхватит).
-                return;
+    private void setLeverPowered(Location leverLoc, boolean powered) {
+        Block b = leverLoc.getBlock();
+        if (!(b.getBlockData() instanceof Switch sw)) return; // рычаг сломан/убран за это время
+        sw.setPowered(powered);
+        b.setBlockData(sw, true);
+    }
+
+    private enum TargetType { WIRE, LEVER }
+
+    private record Target(Location loc, TargetType type) {}
+
+    /** Первый существующий REDSTONE_WIRE или рычаг среди 6 соседей блока — ничего не создаёт. */
+    private Target findTarget(Block support) {
+        for (BlockFace face : ADJACENT) {
+            Block b = support.getRelative(face);
+            if (b.getType() == Material.REDSTONE_WIRE) {
+                return new Target(SignStore.keyLoc(b.getLocation()), TargetType.WIRE);
             }
-            b.setType(Material.REDSTONE_WIRE, false);
+            if (b.getBlockData() instanceof Switch && isLever(b.getType())) {
+                return new Target(SignStore.keyLoc(b.getLocation()), TargetType.LEVER);
+            }
         }
-        forcedPower.put(loc, 0);
-        applyForced(loc);
+        return null;
     }
 
-    private void releaseEmitter(Location loc) {
-        forcedPower.remove(loc);
-        lastTriggeredAt.remove(loc);
-        Block b = loc.getBlock();
-        if (b.getType() == Material.REDSTONE_WIRE) {
-            b.setType(Material.AIR, true);
-        }
+    private static boolean isLever(Material m) {
+        return m == Material.LEVER;
     }
 
-    private Location emitterFor(Location signLoc) {
-        Block signBlock = signLoc.getBlock();
-        Location support = SignManager.getSupportBlockOfSign(signBlock);
-        if (support == null || support.getWorld() == null) return null;
-        return SignStore.keyLoc(support.getBlock().getRelative(org.bukkit.block.BlockFace.UP).getLocation());
-    }
-
-    /** Табличка сломана/убрана — освобождаем и убираем свой эмиттер. */
+    /** Табличка сломана/убрана — принудительное удержание провода (если было активно) снимаем. */
     public void onSignRemoved(Location signLoc) {
-        Location emitter = emitterFor(signLoc);
-        if (emitter != null) releaseEmitter(emitter);
-    }
-
-    /** Восстановление рантайм-состояния после старта сервера — для всех уже сохранённых REDSTONE-табличек. */
-    public void reclaimAllOnStartup() {
-        for (var entry : store.signs().entrySet()) {
-            SignVariables sv = entry.getValue();
-            if (sv == null || sv.getSignCategory() != SignCategory.REDSTONE) continue;
-            Location emitter = emitterFor(entry.getKey());
-            if (emitter != null) claimEmitter(emitter);
-        }
+        lastTriggeredAt.remove(signLoc);
+        // Сам провод/рычаг — не наш блок, мы его не создавали и не удаляем при сносе таблички.
     }
 
     // ===== редстоун-физика =====
