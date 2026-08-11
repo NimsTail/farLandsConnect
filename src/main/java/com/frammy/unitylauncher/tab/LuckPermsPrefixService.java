@@ -10,6 +10,7 @@ import org.bukkit.plugin.Plugin;
 
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -20,6 +21,20 @@ public final class LuckPermsPrefixService {
 
     private final Plugin plugin;
     private final Map<UUID, String> lastApplied = new ConcurrentHashMap<>();
+    // GH #10: два вызова applyOrClear для одного игрока подряд (джойн-событие
+    // + периодический таймер TabPrefixService, раз в 15с) раньше могли
+    // выполниться параллельно на разных async-потоках — оба грузят User,
+    // оба видят один и тот же СТАРЫЙ снимок нод, оба чистят+добавляют СВОЙ
+    // новый узел в своей локальной копии и сохраняют. LuckPerms сохраняет
+    // как diff относительно загруженного снимка, а не полной заменой — из-за
+    // этого второй save применял diff "убрать старое (уже не было), добавить
+    // новое" ПОВЕРХ уже сохранённого первым результата, и оба prefix-узла
+    // выживали одновременно (см. luckperms_user_permissions в issue #10 —
+    // 4 разных prefix.1000.&X на одном игроке). Цепочка per-UUID гарантирует,
+    // что load→clear→add→save для одного игрока всегда идёт строго
+    // последовательно, второй вызов стартует только после того, как первый
+    // реально долетел до БД.
+    private final Map<UUID, CompletableFuture<Void>> chains = new ConcurrentHashMap<>();
     private static final String META_SOURCE_VAL = "unitylauncher";
     private static final int PRIORITY = 1000; // выше типичных групп, если нужно — измените
     private static final NodeMetadataKey<String> META_SOURCE_KEY =
@@ -45,12 +60,12 @@ public final class LuckPermsPrefixService {
 
     /** Установить/обновить префикс. Если prefix == null или пустой — снимаем наш кастомный LP-префикс. */
     public void applyOrClear(UUID uuid, String now) {
-        String prev = lastApplied.get(uuid);
+        // Быстрый выход по кешу ДО постановки в цепочку — если значение точно
+        // не менялось, незачем даже занимать очередь. Если кеш устарел
+        // (гонка), applyOnce ниже всё равно safe — просто лишний load/save.
+        String prevCached = lastApplied.get(uuid);
+        if ((prevCached == null && now == null) || (prevCached != null && prevCached.equals(now))) return;
 
-        // если ничего не поменялось — не дёргаем LuckPerms лишний раз
-        if ((prev == null && now == null) || (prev != null && prev.equals(now))) return;
-
-        // Если LuckPerms вообще нет — не пытаемся ничего делать
         if (lp == null) {
             Bukkit.getLogger().warning(
                     "[UnityLauncher] LuckPermsPrefixService: lp == null, пропускаю applyOrClear для " + uuid
@@ -58,41 +73,55 @@ public final class LuckPermsPrefixService {
             return;
         }
 
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-            try {
-                User user = lp.getUserManager().loadUser(uuid).join();
-                if (user == null) {
-                    Bukkit.getLogger().warning(
-                            "[UnityLauncher] LuckPermsPrefixService: user == null для " + uuid
-                    );
-                    return;
-                }
-
-                // убираем наши старые prefix-ноды
-                user.data().clear(node ->
-                        (node instanceof PrefixNode) &&
-                                node.getMetadata(META_SOURCE_KEY).map(META_SOURCE_VAL::equals).orElse(false)
-                );
-
-                // ставим новый, если есть
-                if (now != null && !now.trim().isEmpty()) {
-                    String amp = now.replace('§', '&').trim();
-                    PrefixNode n = PrefixNode.builder(amp, PRIORITY)
-                            .withMetadata(META_SOURCE_KEY, META_SOURCE_VAL)
-                            .build();
-                    user.data().add(n);
-                }
-
-                lp.getUserManager().saveUser(user);
-                lastApplied.put(uuid, now);
-            } catch (Exception t) {
-                Bukkit.getLogger().warning(
-                        "[UnityLauncher] LuckPermsPrefixService error: "
-                                + t.getClass().getSimpleName() + ": " + t.getMessage()
-                );
-                t.printStackTrace();
-            }
+        chains.compute(uuid, (id, prevInChain) -> {
+            CompletableFuture<Void> base = (prevInChain != null) ? prevInChain : CompletableFuture.completedFuture(null);
+            return base
+                    .thenRunAsync(() -> applyOnce(uuid, now), r -> Bukkit.getScheduler().runTaskAsynchronously(plugin, r))
+                    .exceptionally(t -> {
+                        Bukkit.getLogger().warning(
+                                "[UnityLauncher] LuckPermsPrefixService chain error for " + uuid + ": " + t.getMessage()
+                        );
+                        return null;
+                    });
         });
+    }
+
+    private void applyOnce(UUID uuid, String now) {
+        try {
+            User user = lp.getUserManager().loadUser(uuid).join();
+            if (user == null) {
+                Bukkit.getLogger().warning(
+                        "[UnityLauncher] LuckPermsPrefixService: user == null для " + uuid
+                );
+                return;
+            }
+
+            // убираем наши старые prefix-ноды
+            user.data().clear(node ->
+                    (node instanceof PrefixNode) &&
+                            node.getMetadata(META_SOURCE_KEY).map(META_SOURCE_VAL::equals).orElse(false)
+            );
+
+            // ставим новый, если есть
+            if (now != null && !now.trim().isEmpty()) {
+                String amp = now.replace('§', '&').trim();
+                PrefixNode n = PrefixNode.builder(amp, PRIORITY)
+                        .withMetadata(META_SOURCE_KEY, META_SOURCE_VAL)
+                        .build();
+                user.data().add(n);
+            }
+
+            // .join() — must complete (and the DB write with it) before this
+            // chain link resolves and the next queued call is allowed to load.
+            lp.getUserManager().saveUser(user).join();
+            lastApplied.put(uuid, now);
+        } catch (Exception t) {
+            Bukkit.getLogger().warning(
+                    "[UnityLauncher] LuckPermsPrefixService error: "
+                            + t.getClass().getSimpleName() + ": " + t.getMessage()
+            );
+            t.printStackTrace();
+        }
     }
 
     /** Снять наш кастомный префикс. */

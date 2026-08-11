@@ -1,5 +1,6 @@
 package com.frammy.unitylauncher;
 
+import com.frammy.unitylauncher.auth.LuckPermsCountryCleanup;
 import com.frammy.unitylauncher.chunkactivity.ActivityTracker;
 import com.frammy.unitylauncher.chunkactivity.ActivityWeights;
 import com.frammy.unitylauncher.chunkactivity.ChunkActivityHeatmapExporter;
@@ -216,6 +217,27 @@ public class Unity implements CommandExecutor {
             sender.sendMessage(ok
                     ? ChatColor.GREEN + "Начислено " + amount + " игроку " + targetName + "."
                     : ChatColor.RED + "Не удалось — игрок '" + targetName + "' не найден в базе.");
+            return true;
+        }
+
+        // ===================== /ul luckperms cleanup dry|apply =====================
+        // GH #10 one-time fix — pre-migration cruft (name-based group.* nodes
+        // like "group.bentley") that never got stripped when a player left/
+        // switched countries, plus leftover duplicate prefix nodes from the
+        // race LuckPermsPrefixService had. See LuckPermsCountryCleanup.
+        if (args.length >= 2 && args[0].equalsIgnoreCase("luckperms") && args[1].equalsIgnoreCase("cleanup")) {
+            boolean allowed = !(sender instanceof Player) || sender.isOp();
+            if (!allowed) {
+                sender.sendMessage(ChatColor.RED + "Только для OP.");
+                return true;
+            }
+            String mode = args.length >= 3 ? args[2] : "dry";
+            if (!mode.equalsIgnoreCase("dry") && !mode.equalsIgnoreCase("apply")) {
+                sender.sendMessage(ChatColor.YELLOW + "Используй: /ul luckperms cleanup dry|apply");
+                return true;
+            }
+            sender.sendMessage(ChatColor.GRAY + "Сканирую всех известных LuckPerms-игроков, это может занять время...");
+            LuckPermsCountryCleanup.run(sender, mode.equalsIgnoreCase("apply"));
             return true;
         }
 

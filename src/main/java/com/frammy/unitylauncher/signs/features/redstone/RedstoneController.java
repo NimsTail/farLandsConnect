@@ -15,7 +15,7 @@ import org.bukkit.block.BlockFace;
 import org.bukkit.block.Sign;
 import org.bukkit.block.data.AnaloguePowerable;
 import org.bukkit.block.data.BlockData;
-import org.bukkit.block.data.type.Switch;
+import org.bukkit.block.data.Powerable;
 import org.bukkit.entity.Player;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockRedstoneEvent;
@@ -47,10 +47,23 @@ import java.util.regex.Pattern;
  *    клике/рестарте → сломал снова).
  *
  * Теперь ничего не ставится вообще: при клике ищется уже существующий
- * REDSTONE_WIRE или рычаг (Lever) среди 6 соседей опорного блока — то, что
- * игрок построил сам как часть своей схемы, — и его сила/состояние
- * форсируется на время импульса. Если рядом ничего такого нет, деньги не
- * снимаются вовсе (проверка идёт ДО списания).
+ * REDSTONE_WIRE, рычаг или повторитель среди 6 соседей — то, что игрок
+ * построил сам как часть своей схемы, — и его сила/состояние форсируется на
+ * время импульса. Если рядом ничего такого нет, деньги не снимаются вовсе
+ * (проверка идёт ДО списания).
+ *
+ * v3 (issue #2, третий раунд): три отдельных бага/пробела —
+ * 1) провод не гас обратно — "выключение" просто снимало запись из карты и
+ *    звало BlockState.update(), которое ничего не пересчитывает само по
+ *    себе, просто пересохраняет уже стоящее значение (PULSE_LEVEL). Теперь
+ *    выключение форсирует 0 тем же способом, каким включение форсирует
+ *    PULSE_LEVEL.
+ * 2) искали цель только вокруг ОПОРНОГО блока — для настенной таблички это
+ *    обычно там, где игрок и строит схему, но для напольной игрок скорее
+ *    строит рядом с самой табличкой (на её высоте), не блоком под ней.
+ *    Теперь проверяются соседи и таблички, и опоры.
+ * 3) добавлена поддержка повторителя (Repeater — тоже Powerable, включается
+ *    точно так же, как рычаг).
  */
 public final class RedstoneController {
 
@@ -102,10 +115,10 @@ public final class RedstoneController {
             return;
         }
 
-        if (findTarget(support.getBlock()) == null) {
+        if (findTarget(e.getBlock(), support.getBlock()) == null) {
             e.setCancelled(true);
-            p.sendMessage(ChatColor.RED + "Рядом с опорным блоком таблички нет редстоун-провода или рычага "
-                    + ChatColor.GRAY + "— сначала построй свою схему вплотную к блоку, потом ставь табличку.");
+            p.sendMessage(ChatColor.RED + "Рядом с табличкой или её опорным блоком нет редстоун-провода/рычага/повторителя "
+                    + ChatColor.GRAY + "— сначала построй свою схему вплотную, потом ставь табличку.");
             return;
         }
 
@@ -154,9 +167,9 @@ public final class RedstoneController {
         }
 
         Location support = SignManager.getSupportBlockOfSign(signLoc.getBlock());
-        Target target = support != null ? findTarget(support.getBlock()) : null;
+        Target target = findTarget(signLoc.getBlock(), support != null ? support.getBlock() : null);
         if (target == null) {
-            p.sendMessage(ChatColor.RED + "Рядом с табличкой больше нет провода/рычага — деньги не списаны.");
+            p.sendMessage(ChatColor.RED + "Рядом с табличкой больше нет провода/рычага/повторителя — деньги не списаны.");
             return;
         }
 
@@ -181,25 +194,29 @@ public final class RedstoneController {
                 forcedPower.put(target.loc(), PULSE_LEVEL);
                 applyForcedWire(target.loc());
                 Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                    // Explicitly force it back to 0 — the previous version just
+                    // removed the map entry and called BlockState.update(), which
+                    // re-saves whatever level was ALREADY on the block (still
+                    // PULSE_LEVEL, nothing had actually changed it) instead of
+                    // recomputing anything. Nothing then prompts a fresh
+                    // BlockRedstoneEvent on its own, so the wire visibly never
+                    // turned back off. Setting power to 0 the same way we set it
+                    // to PULSE_LEVEL is what actually turns it off.
+                    forcedPower.put(target.loc(), 0);
+                    applyForcedWire(target.loc());
                     forcedPower.remove(target.loc());
-                    // Отпускаем принудительно — пересчитываем блок физикой один раз,
-                    // чтобы он сразу вернулся к тому, что реально дают его соседи.
-                    Block b = target.loc().getBlock();
-                    if (b.getBlockData() instanceof AnaloguePowerable) {
-                        b.getState().update(true, true);
-                    }
                 }, PULSE_DURATION_TICKS);
             }
-            case LEVER -> {
-                setLeverPowered(target.loc(), true);
-                Bukkit.getScheduler().runTaskLater(plugin, () -> setLeverPowered(target.loc(), false), PULSE_DURATION_TICKS);
+            case POWERABLE -> {
+                setPowered(target.loc(), true);
+                Bukkit.getScheduler().runTaskLater(plugin, () -> setPowered(target.loc(), false), PULSE_DURATION_TICKS);
             }
         }
     }
 
     private void applyForcedWire(Location wireLoc) {
         Block b = wireLoc.getBlock();
-        if (b.getType() != Material.REDSTONE_WIRE) return; // рычаг сломан/убран за это время — не лезем
+        if (b.getType() != Material.REDSTONE_WIRE) return; // провод сломан/убран за это время — не лезем
 
         BlockData bd = b.getBlockData();
         if (!(bd instanceof AnaloguePowerable ap)) return;
@@ -208,33 +225,42 @@ public final class RedstoneController {
         b.setBlockData(ap, true); // true = physics update, тем самым триггерит BlockRedstoneEvent у соседей
     }
 
-    private void setLeverPowered(Location leverLoc, boolean powered) {
-        Block b = leverLoc.getBlock();
-        if (!(b.getBlockData() instanceof Switch sw)) return; // рычаг сломан/убран за это время
-        sw.setPowered(powered);
-        b.setBlockData(sw, true);
+    /** Рычаг или повторитель — оба Powerable, оба включаются/выключаются одинаково через setPowered. */
+    private void setPowered(Location loc, boolean powered) {
+        Block b = loc.getBlock();
+        if (!(b.getBlockData() instanceof Powerable pw)) return; // сломан/убран за это время
+        pw.setPowered(powered);
+        b.setBlockData(pw, true);
     }
 
-    private enum TargetType { WIRE, LEVER }
+    private enum TargetType { WIRE, POWERABLE }
 
     private record Target(Location loc, TargetType type) {}
 
-    /** Первый существующий REDSTONE_WIRE или рычаг среди 6 соседей блока — ничего не создаёт. */
-    private Target findTarget(Block support) {
+    /**
+     * Первый существующий REDSTONE_WIRE, рычаг или повторитель среди 6
+     * соседей опорного блока таблички — ничего не создаёт. Также проверяет
+     * соседей самой таблички (не только опоры): для настенной таблички
+     * игрок обычно строит схему у опорного блока, но для напольной —
+     * скорее рядом с самой табличкой (на той же высоте), не блоком под ней.
+     */
+    private Target findTarget(Block signBlock, Block support) {
+        Target fromSign = signBlock != null ? findTargetAround(signBlock) : null;
+        if (fromSign != null) return fromSign;
+        return support != null ? findTargetAround(support) : null;
+    }
+
+    private Target findTargetAround(Block center) {
         for (BlockFace face : ADJACENT) {
-            Block b = support.getRelative(face);
+            Block b = center.getRelative(face);
             if (b.getType() == Material.REDSTONE_WIRE) {
                 return new Target(SignStore.keyLoc(b.getLocation()), TargetType.WIRE);
             }
-            if (b.getBlockData() instanceof Switch && isLever(b.getType())) {
-                return new Target(SignStore.keyLoc(b.getLocation()), TargetType.LEVER);
+            if ((b.getType() == Material.LEVER || b.getType() == Material.REPEATER) && b.getBlockData() instanceof Powerable) {
+                return new Target(SignStore.keyLoc(b.getLocation()), TargetType.POWERABLE);
             }
         }
         return null;
-    }
-
-    private static boolean isLever(Material m) {
-        return m == Material.LEVER;
     }
 
     /** Табличка сломана/убрана — принудительное удержание провода (если было активно) снимаем. */
