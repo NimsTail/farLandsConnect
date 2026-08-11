@@ -122,17 +122,20 @@ public final class RedstoneController {
             return;
         }
 
+        // GH #2: "ЛКМ - активировать" removed per the user's own call once
+        // the sign actually worked — self-explanatory, didn't need spelling
+        // out on the sign itself.
         String title = "Redstone";
         String line1 = "Цена: " + ChatColor.GOLD + round2(price);
         e.setLine(0, title);
         e.setLine(1, line1);
-        e.setLine(2, "ЛКМ -");
-        e.setLine(3, "активировать");
+        e.setLine(2, "");
+        e.setLine(3, "");
 
         store.put(loc, new SignVariables(
                 p.getName(),
                 null,
-                List.of(title, line1, "ЛКМ -", "активировать"),
+                List.of(title, line1, "", ""),
                 List.of(0),
                 false,
                 false,
