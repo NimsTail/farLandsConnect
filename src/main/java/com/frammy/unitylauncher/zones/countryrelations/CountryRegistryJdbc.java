@@ -468,6 +468,11 @@ public class CountryRegistryJdbc {
      * обычный refreshCacheIfExpired() на главном потоке вернул бы старый
      * кэш и запустил обновление в фоне, не дождавшись его).
      */
+    /** True once a refresh has actually succeeded at least once — false right after boot until the first successful DB round-trip, and stays false if every attempt so far has failed. Callers that would otherwise treat "not found in cache" as authoritative (e.g. ZoneManager's orphan-country cleanup, which DELETES data on a negative) must check this first. */
+    public boolean isCacheLoaded() {
+        return cacheLoadedOnce;
+    }
+
     public void forceRefreshBlocking() {
         refreshCacheNowBlocking_();
     }

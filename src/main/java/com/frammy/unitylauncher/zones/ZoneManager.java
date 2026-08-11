@@ -1088,7 +1088,27 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
         // every real country would read back as "doesn't exist" and this loop
         // would disband them all. Force one synchronous load first so the check
         // below always sees real data.
+        //
+        // THE ACTUAL BUG (found analyzing "страны сами по себе удалялись через
+        // несколько рестартов"): forceRefreshBlocking() can itself fail —
+        // DBConnect() returns null, or the query throws — if MySQL/the pool
+        // isn't fully up yet this soon after a restart. On failure it just
+        // logs and returns, leaving the cache exactly as it was. The FIRST
+        // time this runs after a fresh boot, "as it was" means genuinely
+        // empty (cacheLoadedOnce still false) — so every real country reads
+        // back as nonexistent and the loop below disbanded ALL of them in one
+        // sweep. Not on every restart (depends on whether the DB happened to
+        // be ready in time by the ~2min mark this first fires), matching the
+        // reported "after a few restarts" pattern exactly. Bailing out
+        // entirely when the cache still isn't loaded is the fix — better to
+        // skip this pass and retry next cycle (2 min later) than to trust
+        // country-doesn't-exist answers from an empty cache.
         ul.countryRegistryJdbc.forceRefreshBlocking();
+        if (!ul.countryRegistryJdbc.isCacheLoaded()) {
+            Bukkit.getLogger().warning("[Zones] cleanupOrphanCountryZones: countries cache still isn't loaded "
+                    + "(DB not ready yet?) — skipping this pass rather than risk disbanding real countries.");
+            return;
+        }
 
         for (ZoneInfo zi : countryZones) {
             // маркер мог быть уже удалён предыдущей итерацией (одна COUNTRY-зона —
@@ -1106,7 +1126,18 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
         }
     }
 
-    /** Запускает периодическую чистку осиротевших территорий Государств (см. cleanupOrphanCountryZones). */
+    /**
+     * Запускает периодическую чистку осиротевших территорий Государств (см.
+     * cleanupOrphanCountryZones). Остаётся на главном потоке намеренно —
+     * cleanupOrphanCountryZones/disbandCountryZoneCascade зовут
+     * Bukkit.broadcastMessage/getOnlinePlayers и мутируют zoneList/BlueMap
+     * напрямую, без самостоятельного ухода на главный поток (в отличие от
+     * записи в БД в конце каскада, которая уже async сама по себе).
+     * forceRefreshBlocking() внутри — блокирующий JDBC-вызов раз в 2 минуты;
+     * известная цена (небольшой хитч), не трогал — раскидывать эти
+     * Bukkit-вызовы по потокам отдельная, более рискованная задача, не то,
+     * о чём просили в этом заходе.
+     */
     public void startOrphanCountryZoneCleanup(long periodTicks) {
         Bukkit.getScheduler().runTaskTimer(ul, this::cleanupOrphanCountryZones, periodTicks, periodTicks);
     }
