@@ -633,6 +633,20 @@ public class UnityCommands {
      * there's genuinely nothing more specific to say.
      */
     public boolean applyMoneyDelta(@NotNull String playerName, double delta, String note) {
+        return applyMoneyDelta(playerName, delta, note, true);
+    }
+
+    /**
+     * Same as {@link #applyMoneyDelta(String, double, String)}, plus a
+     * {@code mirror} switch. Pass false when the site has ALREADY recorded
+     * this movement in its own ledger before asking the plugin to move the
+     * real money (see MoneyRequestPoller's "purchase" kind, farlandsconnect
+     * GH #17 point 1 — marketplace/real-estate purchases record a
+     * marketplace_purchase/property_purchase Transaction on the site side
+     * first, so mirroring it again here as a second plugin_deposit/
+     * plugin_withdrawal row would double it up in the bank history).
+     */
+    public boolean applyMoneyDelta(@NotNull String playerName, double delta, String note, boolean mirror) {
         if (playerName.isBlank()) return false;
         if (Math.abs(delta) < 0.0000001) return true;
 
@@ -669,9 +683,11 @@ public class UnityCommands {
                 }
 
                 // mirror to the site's /bank transaction history (best-effort, see FarLandsApiClient)
-                UnityLauncher ul = UnityLauncher.getInstance();
-                if (ul != null && ul.getFarLandsApi() != null) {
-                    ul.getFarLandsApi().transaction(playerName, Math.abs(delta), delta > 0, note);
+                if (mirror) {
+                    UnityLauncher ul = UnityLauncher.getInstance();
+                    if (ul != null && ul.getFarLandsApi() != null) {
+                        ul.getFarLandsApi().transaction(playerName, Math.abs(delta), delta > 0, note);
+                    }
                 }
 
                 return true;

@@ -49,6 +49,7 @@ public class MoneyRequestPoller {
         try {
             switch (req.kind()) {
                 case "transfer" -> processTransfer(req);
+                case "purchase" -> processPurchase(req);
                 case "invoice_pay" -> processInvoicePay(req);
                 case "salary_claim" -> processSalaryClaim(req);
                 case "balance_sync" -> processBalanceSync(req);
@@ -96,6 +97,34 @@ public class MoneyRequestPoller {
         }
         if (!cmds.applyMoneyDelta(req.toUsername(), req.amount(), "Перевод от " + req.fromUsername())) {
             cmds.applyMoneyDelta(req.fromUsername(), debit, "Возврат: перевод игроку " + req.toUsername() + " не прошёл"); // best-effort refund
+            api.reportMoneyRequestResult(req.id(), false, "recipient_not_found");
+            return;
+        }
+        api.reportMoneyRequestResult(req.id(), true, null);
+    }
+
+    /**
+     * Marketplace/real-estate purchases (farlandsconnect GH #17 point 1) —
+     * the site already records its own marketplace_purchase/
+     * property_purchase Transaction row for this (see routes/marketplace.ts,
+     * realEstate.ts's recordSettledTransaction call), so both legs move real
+     * money silently (mirror=false) — a plugin_deposit/plugin_withdrawal
+     * echo would just double the ledger entry.
+     */
+    private void processPurchase(FarLandsApiClient.PendingMoneyRequest req) {
+        if (req.fromUsername() == null || req.toUsername() == null) {
+            api.reportMoneyRequestResult(req.id(), false, "missing_username");
+            return;
+        }
+        double debit = req.debitAmount() != null ? req.debitAmount() : req.amount();
+
+        UnityCommands cmds = UnityCommands.getInstance();
+        if (!cmds.applyMoneyDelta(req.fromUsername(), -debit, null, false)) {
+            api.reportMoneyRequestResult(req.id(), false, "insufficient_funds");
+            return;
+        }
+        if (!cmds.applyMoneyDelta(req.toUsername(), req.amount(), null, false)) {
+            cmds.applyMoneyDelta(req.fromUsername(), debit, null, false); // best-effort refund
             api.reportMoneyRequestResult(req.id(), false, "recipient_not_found");
             return;
         }
