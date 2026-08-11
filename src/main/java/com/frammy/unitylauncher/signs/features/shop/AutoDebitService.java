@@ -246,7 +246,7 @@ public final class AutoDebitService {
             return;
         }
         double cost = round2(take * pricePerUnit);
-        if (!charge(p, cost, priorityCache.getOrDefault(p.getUniqueId(), "CASH"), chestLoc)) {
+        if (!charge(p, cost, priorityCache.getOrDefault(p.getUniqueId(), "CASH"), chestLoc, material, take)) {
             p.sendMessage(ChatColor.RED + "Недостаточно средств.");
             return;
         }
@@ -267,7 +267,7 @@ public final class AutoDebitService {
             return;
         }
         double cost = round2(take * pricePerUnit);
-        if (!charge(p, cost, priorityCache.getOrDefault(p.getUniqueId(), "CASH"), chestLoc)) {
+        if (!charge(p, cost, priorityCache.getOrDefault(p.getUniqueId(), "CASH"), chestLoc, material, take)) {
             p.sendMessage(ChatColor.RED + "Недостаточно средств.");
             return;
         }
@@ -410,7 +410,7 @@ public final class AutoDebitService {
             }
             double cost = round2(intoInv * pricePerUnit);
             String priority = priorityCache.getOrDefault(id, "CASH");
-            if (!charge(p, cost, priority, chestLoc)) {
+            if (!charge(p, cost, priority, chestLoc, dragMat, intoInv)) {
                 e.setCancelled(true);
                 p.sendMessage(ChatColor.RED + "Недостаточно средств.");
                 return;
@@ -446,7 +446,7 @@ public final class AutoDebitService {
         double cost = round2(chargeable * ppu);
         String priority = priorityCache.getOrDefault(id, "CASH");
 
-        if (!charge(p, cost, priority, chestLoc)) {
+        if (!charge(p, cost, priority, chestLoc, mat, chargeable)) {
             p.sendMessage(ChatColor.RED + "Не удалось списать за выброшенный товар (" + chargeable + "x) — недостаточно средств.");
         } else {
             p.sendMessage(ChatColor.GRAY + "Списано за выброшенный товар: " + ChatColor.YELLOW + chargeable + "x"
@@ -504,7 +504,7 @@ public final class AutoDebitService {
 
             double cost = round2(committed * ppu);
             String priority = priorityCache.getOrDefault(id, "CASH");
-            if (charge(p, cost, priority, chestLoc)) {
+            if (charge(p, cost, priority, chestLoc, material, committed)) {
                 p.sendMessage(ChatColor.GRAY + "Куплено: " + ChatColor.YELLOW + committed + "x" + ChatColor.GRAY + " за " + ChatColor.GREEN + cost + " Ⓕ");
             } else {
                 p.sendMessage(ChatColor.RED + "Не удалось списать за товар (" + committed + "x) — недостаточно средств.");
@@ -531,7 +531,7 @@ public final class AutoDebitService {
             int unpaid = entry.getValue();
             if (unpaid <= 0) continue;
             double cost = round2(unpaid * ppu);
-            boolean ok = charge(p, cost, priority, chestLoc);
+            boolean ok = charge(p, cost, priority, chestLoc, entry.getKey(), unpaid);
             if (p.isOnline()) {
                 if (ok) {
                     p.sendMessage(ChatColor.GRAY + "Списано за товар при закрытии: " + ChatColor.YELLOW + unpaid + "x"
@@ -616,13 +616,13 @@ public final class AutoDebitService {
      * вызывается на обе стороны сделки): деньги покупателя просто исчезали,
      * владелец магазина ничего не получал.
      */
-    private boolean charge(Player p, double amount, String priority, Location chestLoc) {
+    private boolean charge(Player p, double amount, String priority, Location chestLoc, Material material, int qty) {
         if (amount <= 0) return true;
         boolean cashFirst = !"BANK".equalsIgnoreCase(priority);
         boolean ok = cashFirst
                 ? (plugin.moneyManager.spendCash(p, amount) || chargeBank(p, amount))
                 : (chargeBank(p, amount) || plugin.moneyManager.spendCash(p, amount));
-        if (ok) creditSeller(chestLoc, amount, p.getName());
+        if (ok) creditSeller(chestLoc, amount, p.getName(), material, qty);
         return ok;
     }
 
@@ -633,12 +633,18 @@ public final class AutoDebitService {
         return true;
     }
 
-    /** Зеркалит handleShopSourceBuyClick: зачисление владельцу магазина + запись транзакции (applyMoneyDelta сам её шлёт на сайт). */
-    private void creditSeller(Location chestLoc, double amount, String buyerName) {
+    /**
+     * Зеркалит handleShopSourceBuyClick: зачисление владельцу магазина + запись транзакции
+     * (applyMoneyDelta сам её шлёт на сайт). Note-формат "Продажа в магазине: {qty}x {mat}
+     * игроку {name}" 1:1 с ShopController — сайт (economy.ts's SHOP_BUYER_RE) парсит из него
+     * ник покупателя в кликабельный @mention одинаково для обоих источников продажи (GH #8:
+     * раньше тут не было ни количества, ни названия предмета вовсе).
+     */
+    private void creditSeller(Location chestLoc, double amount, String buyerName, Material material, int qty) {
         if (amount <= 0 || chestLoc == null) return;
         String ownerName = resolveShopOwnerName(chestLoc);
         if (ownerName == null) return;
-        String note = "Продажа в магазине" + (buyerName != null ? " игроку " + buyerName : "");
+        String note = "Продажа в магазине: " + qty + "x " + material.name() + (buyerName != null ? " игроку " + buyerName : "");
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             try { UnityCommands.getInstance().applyMoneyDelta(ownerName, amount, note); }
             catch (Throwable ignored) {}
