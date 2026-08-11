@@ -5,6 +5,7 @@ import com.frammy.unitylauncher.UnityLauncher;
 import com.frammy.unitylauncher.signs.SignCategory;
 import com.frammy.unitylauncher.signs.SignVariables;
 import com.frammy.unitylauncher.signs.storage.SignStore;
+import com.frammy.unitylauncher.zones.ZoneInfo;
 import com.frammy.unitylauncher.zones.ZoneManager;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
@@ -658,20 +659,32 @@ public final class AutoDebitService {
 
     /**
      * Зеркалит handleShopSourceBuyClick: зачисление владельцу магазина + запись транзакции
-     * (applyMoneyDelta сам её шлёт на сайт). Note-формат "Продажа в магазине: {qty}x {mat}
-     * игроку {name}" 1:1 с ShopController — сайт (economy.ts's SHOP_BUYER_RE) парсит из него
-     * ник покупателя в кликабельный @mention одинаково для обоих источников продажи (GH #8:
-     * раньше тут не было ни количества, ни названия предмета вовсе).
+     * (applyMoneyDelta сам её шлёт на сайт). Note-формат "Продажа в магазине «{zone}»: {qty}x
+     * {mat} игроку {name}" 1:1 с ShopController.shopSaleNote — сайт (economy.ts's
+     * SHOP_SALE_RE/SHOP_BUYER_RE) парсит из него магазин + ник покупателя одинаково для обоих
+     * источников продажи (GH #8/#11: раньше тут не было ни количества, ни названия предмета,
+     * ни названия магазина вовсе).
      */
     private void creditSeller(Location chestLoc, double amount, String buyerName, Material material, int qty) {
         if (amount <= 0 || chestLoc == null) return;
         String ownerName = resolveShopOwnerName(chestLoc);
         if (ownerName == null) return;
-        String note = "Продажа в магазине: " + qty + "x " + material.name() + (buyerName != null ? " игроку " + buyerName : "");
+        String zoneName = resolveShopZoneName(chestLoc);
+        String zonePart = (zoneName != null && !zoneName.isBlank()) ? " «" + zoneName + "»" : "";
+        String note = "Продажа в магазине" + zonePart + ": " + qty + "x " + material.name() + (buyerName != null ? " игроку " + buyerName : "");
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             try { UnityCommands.getInstance().applyMoneyDelta(ownerName, amount, note); }
             catch (Throwable ignored) {}
         });
+    }
+
+    private String resolveShopZoneName(Location chestLoc) {
+        try {
+            ZoneInfo zone = zoneManager.getShopZoneAt(chestLoc);
+            return zone != null ? zone.getName() : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
     }
 
     private String resolveShopOwnerName(Location chestLoc) {

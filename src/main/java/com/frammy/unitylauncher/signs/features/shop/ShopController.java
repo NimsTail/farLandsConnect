@@ -11,6 +11,7 @@ import com.frammy.unitylauncher.signs.markers.MarkerService;
 import com.frammy.unitylauncher.signs.render.SignRenderer;
 import com.frammy.unitylauncher.signs.render.SignScrollService;
 import com.frammy.unitylauncher.signs.storage.SignStore;
+import com.frammy.unitylauncher.zones.ZoneInfo;
 import com.frammy.unitylauncher.zones.ZoneManager;
 import de.bluecolored.bluemap.api.markers.ExtrudeMarker;
 import net.md_5.bungee.api.chat.ClickEvent;
@@ -945,7 +946,7 @@ public final class ShopController {
             Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
                 boolean deposited = true;
                 try {
-                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price, "Продажа в магазине: " + qty + "x " + mat.name() + " игроку " + p.getName());
+                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price, shopSaleNote(loc, qty, mat, p.getName()));
                     if (!credited) {
                         Bukkit.getScheduler().runTask(plugin, () -> {
                             mm.giveCash(p, price);
@@ -1026,7 +1027,7 @@ public final class ShopController {
                 // 2) зачисляем в казну страны (async). если не удалось — вернём деньги и выйдем
                 boolean deposited = true;
                 try {
-                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price, "Продажа в магазине: " + qty + "x " + mat.name() + " игроку " + p.getName());
+                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price, shopSaleNote(loc, qty, mat, p.getName()));
                     if (!credited) {
                         UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: продавец недоступен"); // вернуть покупателю
                         Bukkit.getScheduler().runTask(plugin, () ->
@@ -1138,7 +1139,7 @@ public final class ShopController {
             Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
                 boolean deposited = true;
                 try {
-                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price, "Продажа в магазине: " + qty + "x " + mat.name() + " игроку " + p.getName());
+                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price, shopSaleNote(signLoc, qty, mat, p.getName()));
                     if (!credited) {
                         Bukkit.getScheduler().runTask(plugin, () -> {
                             mm.giveCash(p, price);
@@ -1206,7 +1207,7 @@ public final class ShopController {
 
                 boolean deposited = true;
                 try {
-                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price, "Продажа в магазине: " + qty + "x " + mat.name() + " игроку " + p.getName());
+                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price, shopSaleNote(signLoc, qty, mat, p.getName()));
                     if (!credited) {
                         // вернуть на счёт игрока, потому что платили со счёта
                         UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: продавец недоступен");
@@ -1579,6 +1580,33 @@ public final class ShopController {
         }
 
         return nearest;
+    }
+
+    /**
+     * farlandsconnect GH #11 follow-up: the site's transaction note never
+     * carried the shop's zone name, so the bank/orders history couldn't
+     * group or even show which shop a sale came from. Reuses the same
+     * SHOP zone lookup resolveShopOwnerName already falls back to.
+     */
+    private String resolveShopZoneName(Location loc) {
+        try {
+            ZoneInfo zone = zoneManager.getShopZoneAt(loc);
+            return zone != null ? zone.getName() : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * "Продажа в магазине «{zone}»: {qty}x {mat} игроку {buyer}" — the «zone»
+     * segment is omitted entirely when the zone name can't be resolved,
+     * keeping the note backward-compatible with economy.ts's SHOP_SALE_RE
+     * (the zone-name capture group is optional there).
+     */
+    private String shopSaleNote(Location loc, int qty, Material mat, String buyerName) {
+        String zoneName = resolveShopZoneName(loc);
+        String zonePart = (zoneName != null && !zoneName.isBlank()) ? " «" + zoneName + "»" : "";
+        return "Продажа в магазине" + zonePart + ": " + qty + "x " + mat.name() + (buyerName != null ? " игроку " + buyerName : "");
     }
 
     private String resolveShopOwnerName(Location loc, SignVariables sv) {
