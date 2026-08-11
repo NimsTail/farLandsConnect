@@ -137,6 +137,17 @@ public final class SignManager implements Listener {
         return com.frammy.unitylauncher.upgrades.UpgradeCondition.playerCountryCanonical(playerName);
     }
 
+    /** Same as AtmController.countryDisplayName — canonical is Countries.Id (a numeric string), never show it directly (GH #6). */
+    private static String countryDisplayName(String canonical) {
+        if (canonical == null || canonical.isBlank()) return canonical;
+        try {
+            String name = com.frammy.unitylauncher.UnityLauncher.getInstance().countryRegistryJdbc.getCountryDisplayNameForCanonical(canonical);
+            return name != null ? name : canonical;
+        } catch (Throwable ignored) {
+            return canonical;
+        }
+    }
+
     private static String signCountryCanonical(SignVariables sv) {
         if (sv == null) return null;
 
@@ -735,12 +746,12 @@ public final class SignManager implements Listener {
 
             if (allowed < need) {
                 e.setCancelled(true);
-                p.sendMessage(ChatColor.RED + "Нельзя поставить мусорку №" + need + " для страны [" + pc + "]. "
+                p.sendMessage(ChatColor.RED + "Нельзя поставить мусорку №" + need + " для страны [" + countryDisplayName(pc) + "]. "
                         + ChatColor.GRAY + "Нужно разрешение! (куплено: " + allowed + ").");
                 return;
             }
 
-            String title = "Мусорка [" + pc + "]";
+            String title = "Мусорка [" + countryDisplayName(pc) + "]";
             sign.setLine(0, title);
             sign.setLine(1, "ПКМ с пустой");
             sign.setLine(2, "рукой, чтобы");

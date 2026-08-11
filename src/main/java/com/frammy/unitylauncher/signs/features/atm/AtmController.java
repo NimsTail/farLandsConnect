@@ -108,15 +108,21 @@ public final class AtmController {
         Player p = e.getPlayer();
         Location loc = SignStore.keyLoc(e.getBlock().getLocation());
 
+        // countryCanonical is Countries.Id (a numeric string, see
+        // countryDisplayName's own javadoc below) — never show it directly
+        // to a player, resolve to the actual country name first (GH #6).
+        String countryName = countryDisplayName(countryCanonical);
+        if (countryName == null) countryName = countryCanonical;
+
         int need = have + 1;
         if (allowed < need) {
             e.setCancelled(true);
-            p.sendMessage(ChatColor.RED + "Нельзя поставить ATM №" + need + " для страны [" + countryCanonical + "]. "
+            p.sendMessage(ChatColor.RED + "Нельзя поставить ATM №" + need + " для страны [" + countryName + "]. "
                     + ChatColor.GRAY + "Нужно разрешение! (куплено: " + allowed + ").");
             return;
         }
 
-        String title = "ATM [" + countryCanonical + "]";
+        String title = "ATM [" + countryName + "]";
         e.setLine(0, title);
         e.setLine(1, "Коснитесь,");
         e.setLine(2, "чтобы начать");
@@ -413,24 +419,28 @@ public final class AtmController {
         if (country == null) country = "?";
         String[] lines = new String[4];
 
+        // GH #6: ACTION/WD_KIND/TARGET_MODE/PREFS_MENU are scrollable
+        // choices too (colесом, same as TARGET_LIST/SHOP_LIST) — they just
+        // never got the ▴/▾ affordance because each only ever had a fixed
+        // small option set instead of a real list to page through.
         switch (s.stage) {
             case ACTION -> {
                 lines[0] = trim("ATM [" + country + "]");
-                lines[1] = "";
+                lines[1] = "▴";
                 lines[2] = trim(ACTION_LABELS[s.index]);
-                lines[3] = "";
+                lines[3] = "▾";
             }
             case WD_KIND -> {
                 lines[0] = trim(ACTION_LABELS[indexOfAction(s.action)]);
-                lines[1] = "";
+                lines[1] = "▴";
                 lines[2] = trim(s.index == 0 ? "Свой счёт" : "Казна");
-                lines[3] = "";
+                lines[3] = "▾";
             }
             case TARGET_MODE -> {
                 lines[0] = trim(ACTION_LABELS[indexOfAction(s.action)]);
-                lines[1] = "";
+                lines[1] = "▴";
                 lines[2] = trim(s.index == 0 ? "Вручную" : "Список");
-                lines[3] = "";
+                lines[3] = "▾";
             }
             case TARGET_LIST -> {
                 int n = s.listCache.size();
@@ -449,11 +459,11 @@ public final class AtmController {
             }
             case PREFS_MENU -> {
                 lines[0] = trim("Настройки");
-                lines[1] = "";
+                lines[1] = "▴";
                 lines[2] = trim(s.index == 0
                         ? ("Авто-спис: " + (s.prefsAutoDebit ? "ВКЛ" : "выкл"))
                         : ("Оплата: " + ("BANK".equalsIgnoreCase(s.prefsPriority) ? "Счёт" : "Нал.")));
-                lines[3] = "";
+                lines[3] = "▾";
             }
         }
         // Отправляем со сдвигом на тик, а не прямо сейчас: клик по табличке
@@ -913,11 +923,12 @@ public final class AtmController {
         String country = (sv != null) ? countryDisplayName(sv.getOwnerCountry()) : null;
         if (country == null) country = "?";
 
+        // GH #6: dropped the "(получатель получает сумму целиком...)" line —
+        // redundant/confusing next to the commission % already shown above.
         p.sendMessage(ChatColor.YELLOW + "=======[ ATM ]=======\n" +
                 ChatColor.GREEN + "Принадлежит: " + ChatColor.RESET + country + "\n" +
                 ChatColor.GREEN + "Установлен: " + ChatColor.RESET + owner + "\n" +
-                ChatColor.GREEN + "Комиссия ATM сейчас: " + ChatColor.YELLOW + String.format(Locale.ROOT, "%.1f", rate * 100.0) + "%" + "\n" +
-                ChatColor.DARK_GRAY + "(получатель получает сумму целиком, комиссию сверху платишь ты)"
+                ChatColor.GREEN + "Комиссия ATM сейчас: " + ChatColor.YELLOW + String.format(Locale.ROOT, "%.1f", rate * 100.0) + "%"
         );
     }
 
