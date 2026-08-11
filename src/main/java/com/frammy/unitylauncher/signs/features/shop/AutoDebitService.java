@@ -345,6 +345,16 @@ public final class AutoDebitService {
         if (totalCursor > 0) {
             if (takeFromChest > 0) removeMaterialFromChest(topInv, mat, takeFromChest);
             p.setItemOnCursor(new ItemStack(mat, totalCursor));
+        } else {
+            // GH #14 round 2: the "0 money" report — when nothing at all
+            // could be afforded, totalCursor is 0 and this branch used to
+            // just be skipped, leaving whatever cursor state the client had
+            // already predicted locally untouched. setItemOnCursor(null)
+            // wasn't being called at all in that case, unlike every other
+            // outcome here, which is why only the broke-player path kept
+            // losing the item: nothing ever told the client's phantom
+            // cursor prediction it was wrong.
+            p.setItemOnCursor(null);
         }
         if (takeFromChest > 0) {
             trackPickup(p, chestLoc, mat, takeFromChest, pricePerUnit);
@@ -362,6 +372,18 @@ public final class AutoDebitService {
         // ourselves above regardless, so it's correct server-side either
         // way — updateInventory() forces the client's view back in sync
         // with it, which is what was making items visually "vanish".
+        //
+        // GH #14 round 2: updateInventory() alone only ever resyncs the
+        // PLAYER's own bottom inventory — it does not resend the currently
+        // open TOP inventory (this chest), so any client-side prediction
+        // that removed an item from a CHEST slot (the exact scenario here:
+        // double-clicking to collect into a slot that already had
+        // something) never actually got corrected by it. Force a resend of
+        // every chest slot explicitly through the open view, which does
+        // send a packet even when the value hasn't actually changed.
+        for (int i = 0; i < topInv.getSize(); i++) {
+            p.getOpenInventory().setItem(i, topInv.getItem(i));
+        }
         p.updateInventory();
     }
 
