@@ -971,6 +971,24 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
      * когда лидер выходит из страны последним и сайт удаляет её из Countries, не зная
      * ничего про игровые зоны (см. countryOperations.php: CountryLeave, disband-ветка).
      */
+    // Per ZoneType's own javadoc: INDUSTRIAL/BANK/HOSPITAL/PARK/CHURCH/LIBRARY/
+    // GREENHOUSE explicitly "находится только в стране или колонии" — they
+    // can't meaningfully exist without one, deleting them alongside COUNTRY/
+    // COLONY is correct. PLOT ("не привязан к стране... просто застолблённая
+    // территория") and SHOP ("может находится вне страны, самостоятельная
+    // зона") are explicitly documented as independent — a player's personal
+    // plot/shop being deleted just because their country disbanded was the
+    // actual bug reported (GH-adjacent user report, 2026-08-11): the old
+    // code swept up EVERY zone tagged with the country's name here,
+    // regardless of type, destroying player-owned property they still
+    // rightfully own. Those get detached (countryName cleared) instead of
+    // deleted — same idea as an employee losing employer-provided access
+    // when the employer closes, not losing their own house.
+    private static final Set<ZoneType> ZONE_TYPES_BOUND_TO_COUNTRY = EnumSet.of(
+            ZoneType.COUNTRY, ZoneType.COLONY, ZoneType.INDUSTRIAL, ZoneType.BANK,
+            ZoneType.HOSPITAL, ZoneType.PARK, ZoneType.CHURCH, ZoneType.LIBRARY, ZoneType.GREENHOUSE
+    );
+
     private ZoneOpResult disbandCountryZoneCascade(ZoneInfo zi, String broadcastSuffix, Player notifyPlayer) {
         String countryName = zoneCountry(zi);
         if (countryName == null || countryName.isBlank()) countryName = zi.getName();
@@ -990,12 +1008,23 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
         );
 
         List<ZoneInfo> toDelete = new ArrayList<>();
+        List<ZoneInfo> toDetach = new ArrayList<>();
         for (ZoneInfo z : new ArrayList<>(zoneList.values())) {
             String zCountry = zoneCountry(z);
             if (zCountry == null || zCountry.isBlank()) continue;
-            if (Objects.equals(normCountry(zCountry), normTarget)) toDelete.add(z);
+            if (!Objects.equals(normCountry(zCountry), normTarget)) continue;
+            if (ZONE_TYPES_BOUND_TO_COUNTRY.contains(z.getType())) {
+                toDelete.add(z);
+            } else {
+                toDetach.add(z);
+            }
         }
         for (ZoneInfo z : toDelete) removeZoneInternal(z);
+        for (ZoneInfo z : toDetach) {
+            z.setOwnerCountry(null);
+            if (blueMapService != null) blueMapService.upsert(z, z.getFillColor());
+            syncZoneToWebView(z);
+        }
 
         saveZonesToConfig();
 
@@ -1034,7 +1063,9 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
         });
 
         return ZoneOpResult.ok(ChatColor.GREEN + "Государство \"" + finalCountryName
-                + "\" и все связанные с ним зоны (" + toDelete.size() + " шт.) удалены.", zi.getMarkerID());
+                + "\" и привязанные к нему зоны (" + toDelete.size() + " шт.) удалены."
+                + (toDetach.isEmpty() ? "" : " Личные участки/магазины (" + toDetach.size() + " шт.) сохранены, просто отвязаны от страны."),
+                zi.getMarkerID());
     }
 
     /**
