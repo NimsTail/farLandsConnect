@@ -439,6 +439,46 @@ public class FarLandsApiClient {
         send("POST", "/plugin/country-delete-requests/" + encode(requestId) + "/result", body);
     }
 
+    /** GH #10 round 3 — a pending country-member-leave request (see CountryMemberLeaveRequestPoller). */
+    public record PendingCountryMemberLeaveRequest(String id, String username) {}
+
+    public List<PendingCountryMemberLeaveRequest> fetchPendingCountryMemberLeaveRequests() {
+        List<PendingCountryMemberLeaveRequest> out = new ArrayList<>();
+        if (!isEnabled()) return out;
+
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/plugin/country-member-leave-requests/pending"))
+                    .timeout(Duration.ofSeconds(10))
+                    .header("Authorization", "Bearer " + token)
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 300) {
+                log.warning("[FarLandsApi] GET /plugin/country-member-leave-requests/pending -> HTTP " + response.statusCode());
+                return out;
+            }
+
+            JsonObject body = GSON.fromJson(response.body(), JsonObject.class);
+            JsonArray requests = body.getAsJsonArray("requests");
+            for (JsonElement el : requests) {
+                JsonObject o = el.getAsJsonObject();
+                out.add(new PendingCountryMemberLeaveRequest(o.get("id").getAsString(), o.get("username").getAsString()));
+            }
+        } catch (Exception e) {
+            log.warning("[FarLandsApi] fetchPendingCountryMemberLeaveRequests failed: " + e);
+        }
+        return out;
+    }
+
+    public void reportCountryMemberLeaveRequestResult(String requestId, boolean success, String message) {
+        JsonObject body = new JsonObject();
+        body.addProperty("success", success);
+        if (message != null) body.addProperty("message", message);
+        send("POST", "/plugin/country-member-leave-requests/" + encode(requestId) + "/result", body);
+    }
+
     /** A pending country-sync request — groups is the raw JSON array from CountrySyncRequest.groupsJson (see schema.prisma). */
     public record PendingCountrySyncRequest(String id, String countryName, JsonArray groups) {}
 

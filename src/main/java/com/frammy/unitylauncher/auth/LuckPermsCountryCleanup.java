@@ -46,6 +46,40 @@ public final class LuckPermsCountryCleanup {
     private static final NodeMetadataKey<String> META_SOURCE_KEY = NodeMetadataKey.of("source", String.class);
     private static final String META_SOURCE_VAL = "unitylauncher";
 
+    /**
+     * GH #10 round 3 — strips EVERY country_* inheritance node and our own
+     * tagged prefix nodes from one player, unconditionally (unlike the batch
+     * dry/apply pass above, which only removes what doesn't match their
+     * CURRENT country). Used by CountryMemberLeaveRequestPoller right after
+     * the site tells us this specific player just left/was kicked from
+     * their country — at that point they have no country at all, so "keep
+     * the correct one" doesn't apply. Returns true if anything changed.
+     */
+    public static boolean stripPlayerCountryState(LuckPerms lp, UUID uuid) {
+        User user;
+        try {
+            user = lp.getUserManager().loadUser(uuid).join();
+        } catch (Exception e) {
+            return false;
+        }
+        if (user == null) return false;
+
+        List<Node> toRemove = new ArrayList<>();
+        for (Node node : user.data().toCollection()) {
+            if (node instanceof InheritanceNode inh && inh.getGroupName().toLowerCase().startsWith("country_")) {
+                toRemove.add(node);
+            } else if (node instanceof PrefixNode
+                    && node.getMetadata(META_SOURCE_KEY).map(META_SOURCE_VAL::equals).orElse(false)) {
+                toRemove.add(node);
+            }
+        }
+        if (toRemove.isEmpty()) return false;
+
+        for (Node n : toRemove) user.data().remove(n);
+        lp.getUserManager().saveUser(user).join();
+        return true;
+    }
+
     public record Report(int playersScanned, int playersChanged, int staleGroupsRemoved, int stalePrefixesRemoved) {}
 
     public static void run(CommandSender sender, boolean apply) {

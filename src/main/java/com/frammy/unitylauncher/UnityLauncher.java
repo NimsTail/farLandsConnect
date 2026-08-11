@@ -393,6 +393,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         // Countries table at all until these two. ---
         new com.frammy.unitylauncher.auth.CountryDeleteRequestPoller(this, farLandsApi, getLogger()).start(40L); // ~2s
         new com.frammy.unitylauncher.auth.CountrySyncRequestPoller(this, farLandsApi, getLogger()).start(40L); // ~2s
+        // GH #10 round 3: kick/leave never told the plugin either — a
+        // departed player kept their LuckPerms country group/prefix forever.
+        new com.frammy.unitylauncher.auth.CountryMemberLeaveRequestPoller(this, farLandsApi, getLogger()).start(40L); // ~2s
 
         // --- chunk activity heatmap reporting (feeds the site's /stats) ---
         new com.frammy.unitylauncher.chunkactivity.HeatmapReporter(this, farLandsApi, activityTracker).start(6000L); // 5min
