@@ -137,16 +137,22 @@ public class MoneyRequestPoller {
             return;
         }
 
+        // farlandsconnect GH #17 point 2: commission now rides on debitAmount
+        // (payer pays amount+commission, recipient still gets exactly
+        // amount — same split as processTransfer) instead of always
+        // debiting/crediting the bare amount.
+        double debit = req.debitAmount() != null ? req.debitAmount() : req.amount();
+
         UnityCommands cmds = UnityCommands.getInstance();
         String payee = req.toUsername();
         String payDesc = payee != null ? ("Оплата счёта игроку " + payee) : "Оплата счёта";
-        if (!cmds.applyMoneyDelta(req.fromUsername(), -req.amount(), payDesc)) {
+        if (!cmds.applyMoneyDelta(req.fromUsername(), -debit, payDesc)) {
             api.reportMoneyRequestResult(req.id(), false, "insufficient_funds");
             return;
         }
         // Server-issued invoices have no payee — the payer's debit is a pure sink.
         if (payee != null && !cmds.applyMoneyDelta(payee, req.amount(), "Оплата счёта от " + req.fromUsername())) {
-            cmds.applyMoneyDelta(req.fromUsername(), req.amount(), "Возврат: счёт не оплачен"); // best-effort refund
+            cmds.applyMoneyDelta(req.fromUsername(), debit, "Возврат: счёт не оплачен"); // best-effort refund
             api.reportMoneyRequestResult(req.id(), false, "payee_not_found");
             return;
         }
