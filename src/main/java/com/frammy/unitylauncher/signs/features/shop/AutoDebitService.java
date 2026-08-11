@@ -243,16 +243,21 @@ public final class AutoDebitService {
         int take = Math.min(wouldTake, affordable);
         if (take <= 0) {
             p.sendMessage(ChatColor.RED + "Недостаточно средств.");
+            p.updateInventory();
             return;
         }
         double cost = round2(take * pricePerUnit);
         if (!charge(p, cost, priorityCache.getOrDefault(p.getUniqueId(), "CASH"), chestLoc, material, take)) {
             p.sendMessage(ChatColor.RED + "Недостаточно средств.");
+            p.updateInventory();
             return;
         }
         removeMaterialFromChest(topInv, material, take);
         p.getWorld().dropItemNaturally(p.getLocation(), new ItemStack(material, take));
         p.sendMessage(ChatColor.GRAY + "Куплено и выброшено: " + ChatColor.YELLOW + take + "x" + ChatColor.GRAY + " за " + ChatColor.GREEN + cost + " Ⓕ");
+        // See handleDoubleClick's comment on updateInventory() — same
+        // cancelled-but-still-partially-applied-client-side risk here.
+        p.updateInventory();
     }
 
     private void handleShiftFromChest(InventoryClickEvent e, Player p, Location chestLoc, Inventory topInv, Material material, double pricePerUnit) {
@@ -264,16 +269,19 @@ public final class AutoDebitService {
         int take = Math.min(want, affordable);
         if (take <= 0) {
             p.sendMessage(ChatColor.RED + "Недостаточно средств.");
+            p.updateInventory();
             return;
         }
         double cost = round2(take * pricePerUnit);
         if (!charge(p, cost, priorityCache.getOrDefault(p.getUniqueId(), "CASH"), chestLoc, material, take)) {
             p.sendMessage(ChatColor.RED + "Недостаточно средств.");
+            p.updateInventory();
             return;
         }
         removeMaterialFromChest(topInv, material, take);
         giveToPlayer(p, material, take);
         p.sendMessage(ChatColor.GRAY + "Куплено: " + ChatColor.YELLOW + take + "x" + ChatColor.GRAY + " за " + ChatColor.GREEN + cost + " Ⓕ");
+        p.updateInventory();
     }
 
     private void handlePickup(InventoryClickEvent e, Player p, Location chestLoc, Inventory topInv, Material material, double pricePerUnit) {
@@ -284,6 +292,7 @@ public final class AutoDebitService {
         if (take <= 0) {
             e.setCancelled(true);
             p.sendMessage(ChatColor.RED + "Недостаточно средств даже на 1 шт.");
+            p.updateInventory();
             return;
         }
         if (take == wouldTake) {
@@ -295,6 +304,7 @@ public final class AutoDebitService {
         removeMaterialFromChest(topInv, material, take);
         p.setItemOnCursor(new ItemStack(material, take));
         trackPickup(p, chestLoc, material, take, pricePerUnit);
+        p.updateInventory();
     }
 
     /**
@@ -317,7 +327,10 @@ public final class AutoDebitService {
 
         int cursorNow = (cursor != null && cursor.getType() == mat) ? cursor.getAmount() : 0;
         int need = mat.getMaxStackSize() - cursorNow;
-        if (need <= 0) return;
+        if (need <= 0) {
+            p.updateInventory();
+            return;
+        }
 
         int fromOwnInv = takeFromPlayerInventory(p.getInventory(), mat, need);
         int stillNeed = need - fromOwnInv;
@@ -339,6 +352,16 @@ public final class AutoDebitService {
             p.sendMessage(ChatColor.YELLOW + "Не хватило средств добрать до полного стака — взято "
                     + ChatColor.WHITE + totalCursor + "x" + ChatColor.YELLOW + " вместо " + (cursorNow + need) + "x.");
         }
+        // GH #14: cancelling a DOUBLE_CLICK InventoryClickEvent doesn't
+        // reliably stop the client from having already predicted/applied
+        // vanilla's own multi-slot "collect matching items" merge locally
+        // (a well-known Bukkit/Paper quirk, worse the more slots are
+        // touched — i.e. worse when the clicked slot wasn't empty, matching
+        // the bug report exactly). We rewrite inventory/cursor state
+        // ourselves above regardless, so it's correct server-side either
+        // way — updateInventory() forces the client's view back in sync
+        // with it, which is what was making items visually "vanish".
+        p.updateInventory();
     }
 
     // ===== drag handling =====
