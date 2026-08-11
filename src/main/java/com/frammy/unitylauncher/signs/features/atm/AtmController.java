@@ -708,7 +708,7 @@ public final class AtmController {
                     double gross = grossFor(amount, rate);
                     announceFee(p, amount, rate);
                     p.sendMessage(ChatColor.GRAY + "Обрабатываем снятие...");
-                    plugin.moneyManager.withdrawToCashBurnFee(p, gross, amount);
+                    plugin.moneyManager.withdrawToCashBurnFee(p, gross, amount, atmLoc);
                     return true;
                 }
                 if (kind == TargetKind.COUNTRY) {
@@ -761,7 +761,7 @@ public final class AtmController {
 
                 if (kind == TargetKind.PLAYER) {
                     p.sendMessage(ChatColor.GRAY + "Вносим наличку на счёт...");
-                    return plugin.moneyManager.depositCashToPlayerBurnFee(p, gross, amount);
+                    return plugin.moneyManager.depositCashToPlayerBurnFee(p, gross, amount, atmLoc);
                 }
                 if (kind == TargetKind.COUNTRY) {
                     p.sendMessage(ChatColor.GRAY + "Вносим наличку в казну...");

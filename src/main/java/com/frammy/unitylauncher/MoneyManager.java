@@ -381,6 +381,13 @@ public class MoneyManager implements Listener {
      * Важно: здесь MoneyManager НЕ считает комиссию — ему передают уже рассчитанные суммы.
      */
     public void withdrawToCashBurnFee(Player player, double grossAmount, double netCashAmount) {
+        withdrawToCashBurnFee(player, grossAmount, netCashAmount, null);
+    }
+
+    /** Same as above, plus the ATM sign's location — threaded into the transaction note
+     * (site parses "(x, y, z, world)" out of it to link straight to that spot on BlueMap,
+     * see GH #8) so a withdrawal in the bank ledger says WHICH machine it came from. */
+    public void withdrawToCashBurnFee(Player player, double grossAmount, double netCashAmount, Location atmLoc) {
         if (player == null) return;
         if (grossAmount <= 0) { player.sendMessage(ChatColor.RED + "Сумма должна быть > 0."); return; }
         if (netCashAmount < 0 || netCashAmount > grossAmount + 1e-9) {
@@ -399,7 +406,7 @@ public class MoneyManager implements Listener {
         final double finalNet   = round2(netCashAmount);
 
         Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
-            boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), dbAmount(-centsToDouble(grossCents)), "Снятие наличных в банкомате");
+            boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), dbAmount(-centsToDouble(grossCents)), "Снятие наличных в банкомате" + atmNoteSuffix(atmLoc));
             Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
                 if (!ok) {
                     player.sendMessage(ChatColor.RED + "Не удалось снять деньги со счёта (БД/баланс).");
@@ -428,6 +435,11 @@ public class MoneyManager implements Listener {
      * Разница (gross - net) "сгорает". Сдача возвращается ТОЛЬКО от переплаты купюрами (как и раньше).
      */
     public boolean depositCashToPlayerBurnFee(Player player, double grossAmount, double netDepositAmount) {
+        return depositCashToPlayerBurnFee(player, grossAmount, netDepositAmount, null);
+    }
+
+    /** Same as above, plus the ATM sign's location — see withdrawToCashBurnFee's overload. */
+    public boolean depositCashToPlayerBurnFee(Player player, double grossAmount, double netDepositAmount, Location atmLoc) {
         if (player == null) return false;
         if (grossAmount <= 0) return false;
         if (netDepositAmount < 0 || netDepositAmount > grossAmount + 1e-9) {
@@ -453,7 +465,7 @@ public class MoneyManager implements Listener {
         final long feeCents = grossCents - finalNetCents;
 
         Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
-            boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), dbAmount(centsToDouble(finalNetCents)), "Внесение наличных в банкомате");
+            boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), dbAmount(centsToDouble(finalNetCents)), "Внесение наличных в банкомате" + atmNoteSuffix(atmLoc));
             Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
                 if (!ok) {
                     // возврат gross наличкой
@@ -550,6 +562,18 @@ public class MoneyManager implements Listener {
     /** Всегда приводим деньги к 2 знакам (через центы), перед записью в БД */
     private double dbAmount(double value) {
         return centsToDouble(toCents(value));
+    }
+
+    /**
+     * " (x, y, z, world)" appended to ATM transaction notes so the site can
+     * parse it back out and link straight to that spot on BlueMap (GH #8).
+     * Empty string if the location isn't known (e.g. the no-Location
+     * overloads used by non-ATM callers) — keeps the note text unchanged
+     * for those, no dangling trailing space.
+     */
+    private String atmNoteSuffix(Location loc) {
+        if (loc == null || loc.getWorld() == null) return "";
+        return " (" + loc.getBlockX() + ", " + loc.getBlockY() + ", " + loc.getBlockZ() + ", " + loc.getWorld().getName() + ")";
     }
 
 }
