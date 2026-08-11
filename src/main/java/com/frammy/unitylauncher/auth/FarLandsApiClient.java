@@ -395,6 +395,91 @@ public class FarLandsApiClient {
         send("POST", "/plugin/stats/plan-sync", body);
     }
 
+    // ===== Country-delete / country-sync job-queues (GH #10 — see
+    // CountryDeleteRequestPoller/CountrySyncRequestPoller). Same pattern as
+    // country-create above, one pair of methods each.
+
+    /** A pending country-delete request (see CountryDeleteRequestPoller). */
+    public record PendingCountryDeleteRequest(String id, String countryName) {}
+
+    public List<PendingCountryDeleteRequest> fetchPendingCountryDeleteRequests() {
+        List<PendingCountryDeleteRequest> out = new ArrayList<>();
+        if (!isEnabled()) return out;
+
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/plugin/country-delete-requests/pending"))
+                    .timeout(Duration.ofSeconds(10))
+                    .header("Authorization", "Bearer " + token)
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 300) {
+                log.warning("[FarLandsApi] GET /plugin/country-delete-requests/pending -> HTTP " + response.statusCode());
+                return out;
+            }
+
+            JsonObject body = GSON.fromJson(response.body(), JsonObject.class);
+            JsonArray requests = body.getAsJsonArray("requests");
+            for (JsonElement el : requests) {
+                JsonObject o = el.getAsJsonObject();
+                out.add(new PendingCountryDeleteRequest(o.get("id").getAsString(), o.get("countryName").getAsString()));
+            }
+        } catch (Exception e) {
+            log.warning("[FarLandsApi] fetchPendingCountryDeleteRequests failed: " + e);
+        }
+        return out;
+    }
+
+    public void reportCountryDeleteRequestResult(String requestId, boolean success, String message) {
+        JsonObject body = new JsonObject();
+        body.addProperty("success", success);
+        if (message != null) body.addProperty("message", message);
+        send("POST", "/plugin/country-delete-requests/" + encode(requestId) + "/result", body);
+    }
+
+    /** A pending country-sync request — groups is the raw JSON array from CountrySyncRequest.groupsJson (see schema.prisma). */
+    public record PendingCountrySyncRequest(String id, String countryName, JsonArray groups) {}
+
+    public List<PendingCountrySyncRequest> fetchPendingCountrySyncRequests() {
+        List<PendingCountrySyncRequest> out = new ArrayList<>();
+        if (!isEnabled()) return out;
+
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/plugin/country-sync-requests/pending"))
+                    .timeout(Duration.ofSeconds(10))
+                    .header("Authorization", "Bearer " + token)
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 300) {
+                log.warning("[FarLandsApi] GET /plugin/country-sync-requests/pending -> HTTP " + response.statusCode());
+                return out;
+            }
+
+            JsonObject body = GSON.fromJson(response.body(), JsonObject.class);
+            JsonArray requests = body.getAsJsonArray("requests");
+            for (JsonElement el : requests) {
+                JsonObject o = el.getAsJsonObject();
+                out.add(new PendingCountrySyncRequest(
+                        o.get("id").getAsString(), o.get("countryName").getAsString(), o.getAsJsonArray("groups")));
+            }
+        } catch (Exception e) {
+            log.warning("[FarLandsApi] fetchPendingCountrySyncRequests failed: " + e);
+        }
+        return out;
+    }
+
+    public void reportCountrySyncRequestResult(String requestId, boolean success, String message) {
+        JsonObject body = new JsonObject();
+        body.addProperty("success", success);
+        if (message != null) body.addProperty("message", message);
+        send("POST", "/plugin/country-sync-requests/" + encode(requestId) + "/result", body);
+    }
+
     private static String encode(String s) {
         return java.net.URLEncoder.encode(s, java.nio.charset.StandardCharsets.UTF_8);
     }

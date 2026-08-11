@@ -387,6 +387,13 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         // UpgradeCondition entirely. See infra/game-integration-architecture.md.
         new com.frammy.unitylauncher.auth.CountryCreateRequestPoller(this, farLandsApi, getLogger()).start(40L); // ~2s
 
+        // --- site-initiated country disband/settings edits (GH #10) — the
+        // create poller above only ever covered creation; delete/rename/
+        // prefix-change on the site never reached this plugin's own
+        // Countries table at all until these two. ---
+        new com.frammy.unitylauncher.auth.CountryDeleteRequestPoller(this, farLandsApi, getLogger()).start(40L); // ~2s
+        new com.frammy.unitylauncher.auth.CountrySyncRequestPoller(this, farLandsApi, getLogger()).start(40L); // ~2s
+
         // --- chunk activity heatmap reporting (feeds the site's /stats) ---
         new com.frammy.unitylauncher.chunkactivity.HeatmapReporter(this, farLandsApi, activityTracker).start(6000L); // 5min
 
