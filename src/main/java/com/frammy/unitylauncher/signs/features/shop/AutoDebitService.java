@@ -357,19 +357,16 @@ public final class AutoDebitService {
                 + " fromOwnInv=" + fromOwnInv + " inChestBefore=" + inChestBefore + " inChestAtCompute=" + inChest
                 + " wantFromChest=" + wantFromChest + " affordable=" + affordable + " takeFromChest=" + takeFromChest
                 + " totalCursor=" + totalCursor);
-        if (totalCursor > 0) {
-            if (takeFromChest > 0) removeMaterialFromChest(topInv, mat, takeFromChest);
-            p.setItemOnCursor(new ItemStack(mat, totalCursor));
-        } else {
-            // GH #14 round 2: the "0 money" report — when nothing at all
-            // could be afforded, totalCursor is 0 and this branch used to
-            // just be skipped, leaving whatever cursor state the client had
-            // already predicted locally untouched. setItemOnCursor(null)
-            // wasn't being called at all in that case, unlike every other
-            // outcome here, which is why only the broke-player path kept
-            // losing the item: nothing ever told the client's phantom
-            // cursor prediction it was wrong.
-            p.setItemOnCursor(null);
+        // GH #14 round 4: removing from the chest is real game-state, stays
+        // synchronous — only the CLIENT-VISIBLE correction (cursor + resend,
+        // see the deferred block below) needs to wait a tick. setItemOnCursor
+        // used to be called right here, same tick as the chest-slot resend
+        // fix round 3 deliberately moved OFF this tick — round 3 only moved
+        // half of the visual correction, the cursor itself was still exactly
+        // as vulnerable to being clobbered by Paper's post-event container
+        // sync as the chest slots were before that fix.
+        if (totalCursor > 0 && takeFromChest > 0) {
+            removeMaterialFromChest(topInv, mat, takeFromChest);
         }
         if (takeFromChest > 0) {
             trackPickup(p, chestLoc, mat, takeFromChest, pricePerUnit);
@@ -378,7 +375,6 @@ public final class AutoDebitService {
             p.sendMessage(ChatColor.YELLOW + "Не хватило средств добрать до полного стака — взято "
                     + ChatColor.WHITE + totalCursor + "x" + ChatColor.YELLOW + " вместо " + (cursorNow + need) + "x.");
         }
-        plugin.getLogger().info("[AutoDebit#14] after: cursorOnServer=" + describeCursor(p) + " inChestAfter=" + countMaterialInChestBlock(chestLoc, mat));
         // GH #14: cancelling a DOUBLE_CLICK InventoryClickEvent doesn't
         // reliably stop the client from having already predicted/applied
         // vanilla's own multi-slot "collect matching items" merge locally
@@ -408,12 +404,24 @@ public final class AutoDebitService {
         // after that, so it can no longer be the one getting overwritten —
         // the two prior fixes only failed for the exact case they were both
         // synchronous for.
+        //
+        // GH #14 round 4: setItemOnCursor moved in here too (see above) —
+        // the cursor is exactly as much "client-visible state Paper's
+        // post-event sync can clobber" as the chest slots are, and round 3
+        // only deferred the latter.
+        final int finalTotalCursor = totalCursor;
         Bukkit.getScheduler().runTask(plugin, () -> {
             if (!p.isOnline()) return;
+            p.setItemOnCursor(finalTotalCursor > 0 ? new ItemStack(mat, finalTotalCursor) : null);
             for (int i = 0; i < topInv.getSize(); i++) {
                 p.getOpenInventory().setItem(i, topInv.getItem(i));
             }
             p.updateInventory();
+            // GH #14 round 4: logged AFTER the correction above now runs —
+            // logging it synchronously (like round 3 did) showed the
+            // pre-correction cursor, not what the player actually ends up
+            // seeing, which is the whole point of checking these numbers.
+            plugin.getLogger().info("[AutoDebit#14] after: cursorOnServer=" + describeCursor(p) + " inChestAfter=" + countMaterialInChestBlock(chestLoc, mat));
         });
     }
 
