@@ -96,11 +96,22 @@ public final class LuckPermsPrefixService {
                 return;
             }
 
-            // убираем наши старые prefix-ноды
-            user.data().clear(node ->
-                    (node instanceof PrefixNode) &&
-                            node.getMetadata(META_SOURCE_KEY).map(META_SOURCE_VAL::equals).orElse(false)
-            );
+            // GH #10 round 4: the metadata tag (META_SOURCE_KEY) is a
+            // NodeMetadataKey — LuckPerms keeps that as in-memory-only
+            // bookkeeping on the Node instance, it does NOT round-trip
+            // through storage. loadUser() above rebuilds every Node fresh
+            // from the DB/YAML backend each call, so on any change AFTER
+            // the very first one, every node here — including our own
+            // previously-saved prefix — comes back with an EMPTY metadata
+            // map. The clear() below matched nothing (not even our own old
+            // node), so it never actually removed anything past the first
+            // apply — every later change just piled a new PrefixNode on top
+            // of the untouched old one, exactly "старый висит, новый
+            // заливается сверху". PRIORITY is a real field of PrefixNode
+            // itself (persisted, not metadata) and this service is the only
+            // thing that ever sets a prefix at exactly this priority, so
+            // matching on it survives the reload where metadata doesn't.
+            user.data().clear(node -> (node instanceof PrefixNode pn) && pn.getPriority() == PRIORITY);
 
             // ставим новый, если есть
             if (now != null && !now.trim().isEmpty()) {

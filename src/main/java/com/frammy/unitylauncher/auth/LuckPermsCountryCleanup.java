@@ -5,7 +5,6 @@ import net.luckperms.api.LuckPerms;
 import net.luckperms.api.LuckPermsProvider;
 import net.luckperms.api.model.user.User;
 import net.luckperms.api.node.Node;
-import net.luckperms.api.node.metadata.NodeMetadataKey;
 import net.luckperms.api.node.types.InheritanceNode;
 import net.luckperms.api.node.types.PrefixNode;
 import org.bukkit.Bukkit;
@@ -43,8 +42,15 @@ public final class LuckPermsCountryCleanup {
 
     private LuckPermsCountryCleanup() {}
 
-    private static final NodeMetadataKey<String> META_SOURCE_KEY = NodeMetadataKey.of("source", String.class);
-    private static final String META_SOURCE_VAL = "unitylauncher";
+    // GH #10 round 4: mirrors LuckPermsPrefixService.PRIORITY — a
+    // NodeMetadataKey tag (what this used to filter on) doesn't survive
+    // loadUser() rebuilding nodes from storage, so it never actually
+    // matched anything past a node's very first in-memory instance.
+    // Priority is a real, persisted field of PrefixNode and this is the
+    // only priority this codebase ever writes a prefix at, so it's what
+    // both cleanup passes below actually need to match on to find real
+    // leftover nodes.
+    private static final int PREFIX_PRIORITY = 1000;
 
     /**
      * GH #10 round 3 — strips EVERY country_* inheritance node and our own
@@ -68,8 +74,7 @@ public final class LuckPermsCountryCleanup {
         for (Node node : user.data().toCollection()) {
             if (node instanceof InheritanceNode inh && inh.getGroupName().toLowerCase().startsWith("country_")) {
                 toRemove.add(node);
-            } else if (node instanceof PrefixNode
-                    && node.getMetadata(META_SOURCE_KEY).map(META_SOURCE_VAL::equals).orElse(false)) {
+            } else if (node instanceof PrefixNode pn && pn.getPriority() == PREFIX_PRIORITY) {
                 toRemove.add(node);
             }
         }
@@ -136,11 +141,11 @@ public final class LuckPermsCountryCleanup {
                     if (!isDefault && !isCorrect) {
                         toRemove.add(node);
                     }
-                } else if (node instanceof PrefixNode
-                        && node.getMetadata(META_SOURCE_KEY).map(META_SOURCE_VAL::equals).orElse(false)) {
-                    // Duplicates from the pre-fix race — keep none here, the
-                    // next legit apply (periodic reapply / next join) adds
-                    // back exactly one.
+                } else if (node instanceof PrefixNode pn && pn.getPriority() == PREFIX_PRIORITY) {
+                    // Duplicates from the metadata-doesn't-survive-reload bug
+                    // (see PREFIX_PRIORITY above) — keep none here, the next
+                    // legit apply (periodic reapply / next join) adds back
+                    // exactly one.
                     toRemove.add(node);
                 }
             }
