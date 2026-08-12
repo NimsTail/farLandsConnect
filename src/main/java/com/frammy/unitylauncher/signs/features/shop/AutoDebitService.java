@@ -333,6 +333,16 @@ public final class AutoDebitService {
             return;
         }
 
+        // GH #14 round 3: two rounds of "resync the client" fixes (updateInventory,
+        // then also forcing the chest slots) didn't stop the report — logging every
+        // computed value here so the next repro gives real numbers instead of a third
+        // guess. clickedAmount/inChestBefore let us tell apart "server never touched
+        // the chest, client mispredicted" from "server actually removed more than it
+        // gave back", which is the one distinction static reading of this method can't
+        // settle on its own.
+        int clickedAmountBefore = (clicked != null) ? clicked.getAmount() : 0;
+        int inChestBefore = countMaterialInChestBlock(chestLoc, mat);
+
         int fromOwnInv = takeFromPlayerInventory(p.getInventory(), mat, need);
         int stillNeed = need - fromOwnInv;
 
@@ -342,6 +352,11 @@ public final class AutoDebitService {
         int takeFromChest = Math.min(wantFromChest, affordable);
 
         int totalCursor = cursorNow + fromOwnInv + takeFromChest;
+        plugin.getLogger().info("[AutoDebit#14] player=" + p.getName() + " mat=" + mat
+                + " clickedSlotAmountBefore=" + clickedAmountBefore + " cursorNow=" + cursorNow + " need=" + need
+                + " fromOwnInv=" + fromOwnInv + " inChestBefore=" + inChestBefore + " inChestAtCompute=" + inChest
+                + " wantFromChest=" + wantFromChest + " affordable=" + affordable + " takeFromChest=" + takeFromChest
+                + " totalCursor=" + totalCursor);
         if (totalCursor > 0) {
             if (takeFromChest > 0) removeMaterialFromChest(topInv, mat, takeFromChest);
             p.setItemOnCursor(new ItemStack(mat, totalCursor));
@@ -363,6 +378,7 @@ public final class AutoDebitService {
             p.sendMessage(ChatColor.YELLOW + "Не хватило средств добрать до полного стака — взято "
                     + ChatColor.WHITE + totalCursor + "x" + ChatColor.YELLOW + " вместо " + (cursorNow + need) + "x.");
         }
+        plugin.getLogger().info("[AutoDebit#14] after: cursorOnServer=" + describeCursor(p) + " inChestAfter=" + countMaterialInChestBlock(chestLoc, mat));
         // GH #14: cancelling a DOUBLE_CLICK InventoryClickEvent doesn't
         // reliably stop the client from having already predicted/applied
         // vanilla's own multi-slot "collect matching items" merge locally
@@ -381,10 +397,24 @@ public final class AutoDebitService {
         // something) never actually got corrected by it. Force a resend of
         // every chest slot explicitly through the open view, which does
         // send a packet even when the value hasn't actually changed.
-        for (int i = 0; i < topInv.getSize(); i++) {
-            p.getOpenInventory().setItem(i, topInv.getItem(i));
-        }
-        p.updateInventory();
+        //
+        // GH #14 round 3: rounds 1-2 both did this resync SYNCHRONOUSLY,
+        // inside the same tick/packet-handling frame that's processing this
+        // very click. Paper still runs its own post-event container sync
+        // right after every click packet — for DOUBLE_CLICK specifically
+        // that internal sync can fire AFTER our handler returns and
+        // re-broadcast the (still client-mispredicted) view, clobbering a
+        // same-tick correction. Deferring one tick puts our resend strictly
+        // after that, so it can no longer be the one getting overwritten —
+        // the two prior fixes only failed for the exact case they were both
+        // synchronous for.
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            if (!p.isOnline()) return;
+            for (int i = 0; i < topInv.getSize(); i++) {
+                p.getOpenInventory().setItem(i, topInv.getItem(i));
+            }
+            p.updateInventory();
+        });
     }
 
     // ===== drag handling =====
@@ -787,6 +817,11 @@ public final class AutoDebitService {
         for (ItemStack extra : leftover.values()) {
             p.getWorld().dropItemNaturally(p.getLocation(), extra);
         }
+    }
+
+    private static String describeCursor(Player p) {
+        ItemStack cur = p.getItemOnCursor();
+        return (cur == null || cur.getType().isAir()) ? "empty" : cur.getType() + "x" + cur.getAmount();
     }
 
     private static double round2(double v) {
