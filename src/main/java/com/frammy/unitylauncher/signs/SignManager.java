@@ -13,6 +13,7 @@ import com.frammy.unitylauncher.signs.render.SignRenderer;
 import com.frammy.unitylauncher.signs.render.SignScrollService;
 import com.frammy.unitylauncher.signs.storage.SignStore;
 import com.frammy.unitylauncher.zones.ZoneManager;
+import com.frammy.unitylauncher.zones.geom.ZoneGeometry;
 import org.bukkit.*;
 import org.bukkit.block.*;
 import org.bukkit.block.data.BlockData;
@@ -519,7 +520,22 @@ public final class SignManager implements Listener {
         SignVariables sv = store.get(loc);
         if (sv == null) return;
 
-        // остановить скролл
+        deactivateSignAt(loc, sv);
+    }
+
+    /**
+     * Same cleanup a physical break already does (stop scroll, unbind shop
+     * containers, unindex, redstone cleanup, drop the store entry, remove
+     * the BlueMap marker) — factored out so it's callable without an actual
+     * BlockBreakEvent. GH #11: a deleted/dissolved zone used to leave every
+     * sign inside it fully intact and still "live" — a shop sign kept
+     * accepting purchases against a chest/zone that no longer existed,
+     * which is what the report called "всё посыпалось". The physical sign
+     * block itself is left standing either way (same as a real break —
+     * this class never touches the block's text on removal, only the
+     * bookkeeping that makes it functional), just no longer tracked.
+     */
+    private void deactivateSignAt(Location loc, SignVariables sv) {
         scroll.stopScrollingTask(loc);
         if (sv.getScrollLines() != null) {
             for (int idx : sv.getScrollLines()) {
@@ -527,7 +543,6 @@ public final class SignManager implements Listener {
             }
         }
 
-        // отбиндить ВСЕ контейнеры, если это source (важно для double chest)
         if (sv.getSignCategory() == SignCategory.SHOP_SOURCE) {
             store.unbindAllForSourceSign(loc);
         }
@@ -538,20 +553,38 @@ public final class SignManager implements Listener {
             redstone.onSignRemoved(loc);
         }
 
-        // убрать запись
         store.remove(loc);
 
-        // пересобрать списки магазина после удаления источника
-//        try { shopLists.rebuildAllListsLater(); } catch (Throwable ignored) {}
-
-        // убрать маркер
         if (sv.getMarkerID() != null && !sv.getMarkerID().isBlank()) {
             try {
-                World w = e.getBlock().getWorld();
-                blueMapIntegration.removeBlueMapMarker(sv.getMarkerID(), w.getName(), "services");
+                World w = loc.getWorld();
+                if (w != null) blueMapIntegration.removeBlueMapMarker(sv.getMarkerID(), w.getName(), "services");
             } catch (Throwable ignored) {}
         }
+    }
 
+    /**
+     * GH #11: called from ZoneManager right after a zone is actually removed
+     * (deleted, or a country dissolved) — deactivates every sign whose
+     * location falls inside any of that zone's shapes, same cleanup as a
+     * physical break. Y range is intentionally wide (whole build-height) —
+     * this only needs to match the zone's X/Z footprint, a sign's exact Y
+     * inside that column is irrelevant.
+     */
+    public void deactivateSignsInZone(List<List<Location>> shapes) {
+        if (shapes == null || shapes.isEmpty() || store.signs().isEmpty()) return;
+
+        List<Location> toRemove = new ArrayList<>();
+        for (Location loc : store.signs().keySet()) {
+            if (loc == null || loc.getWorld() == null) continue;
+            if (ZoneGeometry.pointInAnyShape(loc, shapes, -512, 512)) {
+                toRemove.add(loc);
+            }
+        }
+        for (Location loc : toRemove) {
+            SignVariables sv = store.get(loc);
+            if (sv != null) deactivateSignAt(loc, sv);
+        }
     }
 
     private void repairAllShopSourcesFromWorld() {

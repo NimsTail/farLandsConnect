@@ -938,6 +938,16 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
             blueMapService.remove(zi);
         }
 
+        // GH #11: signs (shop or otherwise) sitting inside this zone used to
+        // keep working after the zone itself was gone — a SHOP zone
+        // disappearing left its signs fully "live" against a chest/owner
+        // that no longer resolved to anything, which is what the report
+        // called "всё посыпалось". Deactivate them the same way a physical
+        // break would, right as the zone stops existing.
+        if (signManager != null) {
+            signManager.deactivateSignsInZone(zi.getShapes());
+        }
+
         deleteZoneFromWebView(zi.getMarkerID());
     }
 
