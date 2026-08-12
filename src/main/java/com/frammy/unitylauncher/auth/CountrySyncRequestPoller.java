@@ -107,6 +107,9 @@ public class CountrySyncRequestPoller {
             perms.addProperty("upgrades", g.get("canManageUpgrades").getAsBoolean());
             perms.addProperty("permissions", g.get("canManagePermissions").getAsBoolean());
             perms.addProperty("buildZones", g.get("canBuildZones").getAsBoolean());
+            // military-diplomacy-design.md §3.2/§13 Фаза 2. canManageDiplomacy
+            // deliberately NOT included — it's website-only, no in-game effect.
+            perms.addProperty("viewMilitary", g.has("viewMilitary") && g.get("viewMilitary").getAsBoolean());
             role.add("Permissions", perms);
 
             // null on the site means "∞" (see GH #4/CountryDetailPage's zoneLimit

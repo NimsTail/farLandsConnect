@@ -10,5 +10,6 @@ public record UpgradesCfg(
         BankCfg bank,
         HospitalCfg hospital,
         LibraryCfg library,
-        ParkCfg park
+        ParkCfg park,
+        MilitaryCfg military
 ) {}

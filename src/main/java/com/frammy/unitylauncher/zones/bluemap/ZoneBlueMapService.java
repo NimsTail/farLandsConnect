@@ -38,6 +38,10 @@ public final class ZoneBlueMapService {
     public void upsert(ZoneInfo z, org.bukkit.Color bukkitColor) {
         if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
         if (z == null) return;
+        // military-diplomacy-design.md §3.2/§11 — BlueMap has no per-viewer
+        // auth, so the only way to keep military zones secret there is to
+        // never publish a marker for them at all, unconditionally.
+        if (z.getType() == ZoneType.MILITARY) return;
         List<List<Location>> shapes = z.getShapes();
         if (shapes.isEmpty() || shapes.get(0).isEmpty()) return;
         if (shapes.get(0).getFirst().getWorld() == null) return;

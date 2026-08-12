@@ -139,7 +139,7 @@ public class CountryCreateRequestPoller {
         role.addProperty("Index", index);
         role.addProperty("Prefix", "&f");
         JsonObject perms = new JsonObject();
-        for (String key : new String[]{"invite", "players", "settings", "upgrades", "permissions", "buildZones"}) {
+        for (String key : new String[]{"invite", "players", "settings", "upgrades", "permissions", "buildZones", "viewMilitary"}) {
             perms.addProperty(key, allPerms);
         }
         role.add("Permissions", perms);

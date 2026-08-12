@@ -78,7 +78,7 @@ public class CountryRegistryJdbc {
     /**
      * @param prefix как "§o§d❉Президент" или "&f"
      */ // простая структура одной роли
-        public record RoleInfo(int id, String name, String prefix, int index, boolean buildZones, int zoneLimit) {}
+        public record RoleInfo(int id, String name, String prefix, int index, boolean buildZones, int zoneLimit, boolean viewMilitary) {}
 
     /** Комиссия страны (проценты, напр. 1.25 = 1.25%). Если нет — вернёт fallbackPct. */
     public double getCountryTransferFeePctOr(String countryName, double fallbackPct) {
@@ -456,6 +456,29 @@ public class CountryRegistryJdbc {
         RoleInfo ri = roles.get(rid);
         if (ri == null || !ri.buildZones()) return ZoneBuildPermission.DENIED;
         return new ZoneBuildPermission(true, ri.zoneLimit());
+    }
+
+    /**
+     * Может ли этот игрок видеть военные зоны СВОЕЙ страны (§3.2). Не
+     * проверяет союзников с расшариванием (§11 "плюс союзникам, если
+     * владелец явно расшарил") — этого переключателя в Zone-модели сейчас
+     * нет, оставлено на потом.
+     */
+    public boolean getPlayerViewMilitaryPermission(String playerName) {
+        if (playerName == null || playerName.isBlank()) return false;
+        refreshCacheIfExpired();
+
+        String countryName = playerToCountry.get(playerName.toLowerCase(Locale.ROOT));
+        if (countryName == null || countryName.isBlank()) return false;
+
+        Integer rid = playerToRoleId.get(playerName.toLowerCase(Locale.ROOT));
+        if (rid == null) return false;
+
+        Map<Integer, RoleInfo> roles = countryRoleMeta.get(countryName.toLowerCase(Locale.ROOT));
+        if (roles == null) return false;
+
+        RoleInfo ri = roles.get(rid);
+        return ri != null && ri.viewMilitary();
     }
 
     /* ===================== КЭШ СТРАН ===================== */
@@ -905,8 +928,25 @@ public class CountryRegistryJdbc {
             }
         } catch (Exception ignored) {}
 
+        // Permissions.viewMilitary — military-diplomacy-design.md §3.2/§13
+        // Фаза 2: видит зоны MILITARY своей страны (GET /zones, BlueMap,
+        // в игре title/actionbar). Тот же паттерн парсинга, что и buildZones.
+        boolean viewMilitary = false;
+        try {
+            if (o.has("Permissions") && o.get("Permissions").isJsonObject()) {
+                JsonObject perms = o.getAsJsonObject("Permissions");
+                if (perms.has("viewMilitary") && !perms.get("viewMilitary").isJsonNull()) {
+                    JsonElement el = perms.get("viewMilitary");
+                    if (el.isJsonPrimitive()) {
+                        var prim = el.getAsJsonPrimitive();
+                        viewMilitary = prim.isBoolean() ? prim.getAsBoolean() : Boolean.parseBoolean(prim.getAsString());
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+
         if (id == null) return null;
-        return new RoleInfo(id, name, prefix, idx, buildZones, zoneLimit);
+        return new RoleInfo(id, name, prefix, idx, buildZones, zoneLimit, viewMilitary);
     }
 
     public int getPlayerRoleIndex(String playerName) {

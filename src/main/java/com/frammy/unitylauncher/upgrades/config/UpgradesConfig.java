@@ -27,6 +27,7 @@ public final class UpgradesConfig {
         dirty |= HospitalCfg.addDefaults(yml);
         dirty |= LibraryCfg.addDefaults(yml);
         dirty |= ParkCfg.addDefaults(yml);
+        dirty |= MilitaryCfg.addDefaults(yml);
 
         if (!existed || dirty) {
             try {
@@ -48,7 +49,8 @@ public final class UpgradesConfig {
         HospitalCfg hospital = HospitalCfg.read(yml);
         LibraryCfg library = LibraryCfg.read(yml);
         ParkCfg park = ParkCfg.read(yml);
+        MilitaryCfg military = MilitaryCfg.read(yml);
 
-        return new UpgradesCfg(core, country, colony, industrial, bank, hospital, library, park);
+        return new UpgradesCfg(core, country, colony, industrial, bank, hospital, library, park, military);
     }
 }

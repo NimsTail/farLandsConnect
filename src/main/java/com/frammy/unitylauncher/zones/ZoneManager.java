@@ -73,7 +73,8 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
     /** Типы, до которых можно бесплатно "повысить" PLOT (Участок) — при наличии квоты и подходящей площади. */
     private static final EnumSet<ZoneType> UPGRADEABLE_FROM_PLOT = EnumSet.of(
             ZoneType.SHOP, ZoneType.BANK, ZoneType.HOSPITAL, ZoneType.INDUSTRIAL,
-            ZoneType.PARK, ZoneType.CHURCH, ZoneType.LIBRARY, ZoneType.GREENHOUSE
+            ZoneType.PARK, ZoneType.CHURCH, ZoneType.LIBRARY, ZoneType.GREENHOUSE,
+            ZoneType.MILITARY
     );
 
     /** Иммутабельная копия всех зон для безопасного чтения. */
@@ -215,6 +216,10 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
         zoneLimits.put(ZoneType.CHURCH,     new ZoneTypeData("Церковь",       500.0, 4,  10.0, false, 1.0,  20, "unityLauncher.createZone.church"));
         zoneLimits.put(ZoneType.LIBRARY,    new ZoneTypeData("Библиотека",    500.0, 4,  10.0, false, 1.0,  20, "unityLauncher.createZone.library"));
         zoneLimits.put(ZoneType.GREENHOUSE, new ZoneTypeData("Теплица",       900.0, 4,   5.0, false, 1.0,  20, "unityLauncher.createZone.greenhouse"));
+        // infra/military-diplomacy-design.md §3.1: находится только в стране/колонии,
+        // как HOSPITAL/BANK — квота/лимиты по той же логике, чисел пока не утверждено,
+        // взяты на паритет с HOSPITAL.
+        zoneLimits.put(ZoneType.MILITARY,   new ZoneTypeData("Военный объект", 700.0, 4,  15.0, false, 1.0, 200, "unityLauncher.createZone.military"));
 
         zoneLimits.put(ZoneType.SHOP,       new ZoneTypeData("Торговая точка", 500.0, 10, 3.0, true, 1.0, 10, "unityLauncher.createZone.shop"));
         zoneLimits.put(ZoneType.PLOT,       new ZoneTypeData("Участок",        500.0, 10, 3.0, true, 1.0, 10, "unityLauncher.createZone.plot"));
@@ -1237,6 +1242,15 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
         return (own != null && !own.isBlank()) ? own : "—";
     }
 
+    /** military-diplomacy-design.md §3.2 — гражданин своей страны с правом viewMilitary. Союзники с расшариванием — не реализовано, см. CountryRegistryJdbc.getPlayerViewMilitaryPermission. */
+    private boolean canSeeMilitaryZone(Player p, ZoneInfo z) {
+        String owner = zoneCountry(z);
+        if (owner == null || owner.isBlank()) return false;
+        String playerCountry = ul.countryRegistryJdbc.getCountryOfPlayer(p.getName());
+        if (playerCountry == null || !playerCountry.equalsIgnoreCase(owner)) return false;
+        return ul.countryRegistryJdbc.getPlayerViewMilitaryPermission(p.getName());
+    }
+
     // ==== Player location → zone ====
     public void checkPlayerZone(Player p) {
         ZoneInfo prev = playerLastZone.get(p.getUniqueId());
@@ -1246,8 +1260,10 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
 
         String barText;
 
-        if (next == null) {
-            // Вышли из любых зон
+        if (next == null || (next.getType() == ZoneType.MILITARY && !canSeeMilitaryZone(p, next))) {
+            // Вышли из любых зон — военная зона без права viewMilitary
+            // неотличима от дикой местности (military-diplomacy-design.md
+            // §3.2): ни тайтла, ни action bar, ничего.
             barText = ChatColor.DARK_GRAY + "Зона: " + ChatColor.GRAY + "—";
         } else {
             ZoneType type = next.getType();

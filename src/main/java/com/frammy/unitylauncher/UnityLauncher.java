@@ -852,7 +852,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                 PondBedsUpgrade.class, QuietHourUpgrade.class, BenchesUpgrade.class,
                 DepositInterestUpgrade.class, AtmFeesUpgrade.class, SafeDepositUpgrade.class,
                 EnergySavingUpgrade.class, FestivalOfLightsUpgrade.class, TruePondsAndFlowerbedsUpgrade.class,
-                ReturnOfTheSparkUpgrade.class, HolyAuraUpgrade.class, CitizenBenefitsUpgrade.class
+                ReturnOfTheSparkUpgrade.class, HolyAuraUpgrade.class, CitizenBenefitsUpgrade.class,
+                // military-diplomacy-design.md §3.3/§13 Фаза 2 — не завязаны на войну
+                DefensePatrolUpgrade.class, MilitaryHospitalRegenUpgrade.class
             };
 
             int registered = 0;

@@ -99,6 +99,7 @@ public final class ZoneQuotaService {
             case COUNTRY -> "country";
             case SHOP -> "shop";
             case PLOT -> "plot";
+            case MILITARY -> "military";
         };
     }
 
