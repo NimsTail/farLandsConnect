@@ -643,14 +643,12 @@ public final class ShopController {
 
                 scroll.resumeScrolling(loc);
 
-                if (sv.getMarkerID() == null) {
-                    String markerId = "marker_" + UUID.randomUUID();
-                    sv.setMarkerID(markerId);
-                    store.put(loc, sv);             // <<< ещё раз после markerId (или один раз в конце)
-                    if (onStored != null) onStored.accept(loc, sv);
-
-                    blueMap.addBlueMapMarker(markerId, loc, "services", "Сервисы", "point_shop", null, p);
-                }
+                // GH #21 point 1: this used to also drop a "point_shop" POI
+                // marker on the sign itself — redundant on top of the SHOP
+                // zone's own extrude marker (which already outlines the
+                // whole shop's territory on the map), and it even reused
+                // the ATM icon/generic "Табличка о продаже" label, so it
+                // never read as anything more useful than clutter.
 
                 p.sendMessage(ChatColor.GREEN + "Табличка товара подтверждена.");
 

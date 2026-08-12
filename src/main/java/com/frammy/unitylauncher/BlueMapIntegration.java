@@ -280,6 +280,28 @@ public class BlueMapIntegration {
         };
     }
 
+    /**
+     * GH #21 point 3: fills in a POI marker's label/detail after creation —
+     * point_atm/point_shop's addBlueMapMarker case only ever set a generic
+     * fixed label ("ATM") with no detail at all, the caller-side context
+     * (which country, which sign) never made it into what the visitor
+     * actually sees on click. markerKey must be the PREFIXED key the marker
+     * was actually stored under (e.g. "atm_" + markerID for point_atm — see
+     * that case's `mid` — not the bare id the caller thinks of it as).
+     */
+    public void setPoiMarkerDetail(String markerSetKey, String markerKey, String worldName, String label, String detailHtml) {
+        if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
+        BlueMapAPI.getInstance().flatMap(api -> api.getMap(worldName)).ifPresent(map -> {
+            MarkerSet set = map.getMarkerSets().get(markerSetKey);
+            if (set == null) return;
+            Marker m = set.getMarkers().get(markerKey);
+            if (m instanceof POIMarker poi) {
+                if (label != null) poi.setLabel(label);
+                if (detailHtml != null) poi.setDetail(detailHtml);
+            }
+        });
+    }
+
     public void removeBlueMapMarker(String id, String worldName, String markerSetKey) {
         if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
         BlueMapAPI.getInstance().flatMap(blueMapAPI -> blueMapAPI.getMap(worldName)).ifPresent(map -> {
@@ -400,7 +422,7 @@ public class BlueMapIntegration {
         return s == null ? "" : s;
     }
 
-    private static String escapeHtml(String s) {
+    public static String escapeHtml(String s) {
         if (s == null) return "";
         return s.replace("&", "&amp;")
                 .replace("<", "&lt;")

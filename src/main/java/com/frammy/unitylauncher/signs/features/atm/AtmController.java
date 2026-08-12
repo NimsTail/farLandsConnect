@@ -149,6 +149,15 @@ public final class AtmController {
         ));
 
         blueMap.addBlueMapMarker(markerID, loc, "services", "Сервисы", "point_atm", null, p);
+        // GH #21 point 3: "point_atm" used to only ever get the fixed label
+        // "ATM" with no detail at all — fill in the actual ID/country now
+        // that we know them (both static at creation time, unlike a live
+        // per-viewer commission rate, which would need the popup itself to
+        // fetch from the site — a bigger, separate piece of work).
+        String atmDetail = "<b>ATM</b><br>"
+                + "<b>ID:</b> " + com.frammy.unitylauncher.BlueMapIntegration.escapeHtml(markerID) + "<br>"
+                + "<b>Страна:</b> " + com.frammy.unitylauncher.BlueMapIntegration.escapeHtml(countryName);
+        blueMap.setPoiMarkerDetail("services", "atm_" + markerID, loc.getWorld().getName(), "ATM [" + countryName + "]", atmDetail);
 
         p.sendMessage(ChatColor.GREEN + "Банкомат установлен." + ChatColor.GRAY + " (" + need + "/" + allowed + ")");
 

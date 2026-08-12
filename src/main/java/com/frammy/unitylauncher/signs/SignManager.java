@@ -231,13 +231,14 @@ public final class SignManager implements Listener {
                 if (!m.isEmpty()) Bukkit.getScheduler().runTask(plugin, () -> scroll.makeSignScrollingLines(loc, m, 6, 13));
             }
 
+            // GH #21 point 1: SHOP_SOURCE signs no longer get their own POI
+            // marker (redundant on top of the SHOP zone's own extrude
+            // marker) — this restore-on-boot pass is what would otherwise
+            // keep resurrecting markerIds saved on signs from before that
+            // change on every server restart.
             String markerId = sv.getMarkerID();
-            if (markerId != null && !markerId.isBlank()) {
-                if (sv.getSignCategory() == SignCategory.ATM) {
-                    blueMapIntegration.addBlueMapMarker(markerId, loc, "services", "Сервисы", "point_atm", null, null);
-                } else if (sv.getSignCategory() == SignCategory.SHOP_SOURCE) {
-                    blueMapIntegration.addBlueMapMarker(markerId, loc, "services", "Сервисы", "point_shop", null, null);
-                }
+            if (markerId != null && !markerId.isBlank() && sv.getSignCategory() == SignCategory.ATM) {
+                blueMapIntegration.addBlueMapMarker(markerId, loc, "services", "Сервисы", "point_atm", null, null);
             }
         }
 
@@ -558,7 +559,18 @@ public final class SignManager implements Listener {
         if (sv.getMarkerID() != null && !sv.getMarkerID().isBlank()) {
             try {
                 World w = loc.getWorld();
-                if (w != null) blueMapIntegration.removeBlueMapMarker(sv.getMarkerID(), w.getName(), "services");
+                if (w != null) {
+                    // GH #21 point 5: the marker is stored in its MarkerSet
+                    // under a PREFIXED key ("atm_" + markerID — see
+                    // AtmController.addBlueMapMarker/BlueMapIntegration's
+                    // "point_atm" case), but this removal call was passing
+                    // the bare markerID — a key that was never actually
+                    // used, so the remove() was a silent no-op and the
+                    // marker just stayed on the map forever after breaking
+                    // the sign.
+                    String markerKey = sv.getSignCategory() == SignCategory.ATM ? "atm_" + sv.getMarkerID() : sv.getMarkerID();
+                    blueMapIntegration.removeBlueMapMarker(markerKey, w.getName(), "services");
+                }
             } catch (Throwable ignored) {}
         }
     }
