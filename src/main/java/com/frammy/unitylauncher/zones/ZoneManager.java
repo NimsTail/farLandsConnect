@@ -890,6 +890,23 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
         syncZoneToWebView(zi);
         saveZonesToConfig();
 
+        // GH #8/#11: shop signs cache the zone owner's name on SignVariables
+        // (see ZoneSignOwnershipService) and it was previously only ever
+        // recalculated on server start or /ul reload — a transfer changed
+        // zi.getOwner() right above, but every SHOP/SHOP_SOURCE sign sitting
+        // in this zone kept pointing at the PREVIOUS owner's name until the
+        // next reload/restart. AutoDebitService/ShopController.
+        // resolveShopOwnerName() reads straight off that stale cache and
+        // hands it to applyMoneyDelta, which looks the name up in the
+        // plugin's own Users table — if the previous owner's row doesn't
+        // resolve (renamed, never played, whatever), every sale at that shop
+        // fails with "Оплата не прошла (владелец недоступен)" until someone
+        // happens to run /ul reload. Recalculating right after a transfer
+        // closes that window instead of relying on it.
+        if (signManager != null) {
+            signOwnershipService.scheduleSignOwnershipRecalc(signManager, 400);
+        }
+
         return ZoneOpResult.ok(ChatColor.GREEN + "Владение зоной \"" + zi.getName() + "\" передано игроку " + canonicalName + ".", zi.getMarkerID());
     }
 
