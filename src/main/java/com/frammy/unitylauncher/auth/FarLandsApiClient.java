@@ -520,6 +520,67 @@ public class FarLandsApiClient {
         send("POST", "/plugin/country-sync-requests/" + encode(requestId) + "/result", body);
     }
 
+    // ===== military-diplomacy-design.md §2.2.1/§14/§13 Фаза 4 (see
+    // routes/plugin.ts in the farlandsconnect repo, "/plugin/military/*") =====
+
+    /** kind: "pvp_kill" | "pvp_damage" — fire-and-forget, silently no-ops server-side if either player has no country. */
+    public void reportMilitaryIncident(String kind, String attackerUsername, String victimUsername) {
+        JsonObject body = new JsonObject();
+        body.addProperty("kind", kind);
+        body.addProperty("attackerUsername", attackerUsername);
+        body.addProperty("victimUsername", victimUsername);
+        send("POST", "/plugin/military/incident", body);
+    }
+
+    /** targetCountryName = the COUNTRY zone's owning country (whose territory was trespassed). */
+    public void reportBorderViolation(String intruderUsername, String targetCountryName) {
+        JsonObject body = new JsonObject();
+        body.addProperty("intruderUsername", intruderUsername);
+        body.addProperty("targetCountryName", targetCountryName);
+        send("POST", "/plugin/military/border-violation", body);
+    }
+
+    /** zoneMarkerId = the MILITARY zone's ZoneInfo.getMarkerID(); attackerCountryName = whoever gets War Score credit. */
+    public void reportMilitaryNeutralize(String zoneMarkerId, String attackerCountryName) {
+        JsonObject body = new JsonObject();
+        body.addProperty("zoneMarkerId", zoneMarkerId);
+        body.addProperty("attackerCountryName", attackerCountryName);
+        send("POST", "/plugin/military/neutralize", body);
+    }
+
+    public record WarPair(String countryA, String countryB) {}
+
+    /** Blocking GET — called from WarStatusCache's own scheduler thread (mirrors fetchPendingCountryCreateRequests). Country NAMES, not site cuids — see routes/plugin.ts. */
+    public List<WarPair> fetchActiveWars() {
+        List<WarPair> out = new ArrayList<>();
+        if (!isEnabled()) return out;
+
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/plugin/military/active-wars"))
+                    .timeout(Duration.ofSeconds(10))
+                    .header("Authorization", "Bearer " + token)
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 300) {
+                log.warning("[FarLandsApi] GET /plugin/military/active-wars -> HTTP " + response.statusCode());
+                return out;
+            }
+
+            JsonObject body = GSON.fromJson(response.body(), JsonObject.class);
+            JsonArray wars = body.getAsJsonArray("wars");
+            for (JsonElement el : wars) {
+                JsonObject o = el.getAsJsonObject();
+                out.add(new WarPair(o.get("countryA").getAsString(), o.get("countryB").getAsString()));
+            }
+        } catch (Exception e) {
+            log.warning("[FarLandsApi] fetchActiveWars failed: " + e);
+        }
+        return out;
+    }
+
     private static String encode(String s) {
         return java.net.URLEncoder.encode(s, java.nio.charset.StandardCharsets.UTF_8);
     }

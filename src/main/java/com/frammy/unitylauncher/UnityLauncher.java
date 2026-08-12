@@ -72,6 +72,8 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
 
     public DiplomacyService diplomacy;
     public CountryRegistryJdbc countryRegistryJdbc;
+    // military-diplomacy-design.md §13 Фаза 4.
+    public com.frammy.unitylauncher.auth.WarStatusCache warStatusCache;
     public CountryRelationshipDao countryRelationshipDao;
 
     public AuthService authService;
@@ -143,6 +145,10 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         safeRegisterListener(activityTracker); // если ActivityTracker оставляешь Listener
         Bukkit.getPluginManager().registerEvents(new ChunkTimeListener(activityTracker), this);
         safeRegisterListener(new ChunkActivityEventsListener(activityTracker));
+
+        // military-diplomacy-design.md §2.2.1/§13 Фаза 4 — always-on, not
+        // gated by any upgrade (the incident log itself is a base mechanic).
+        Bukkit.getPluginManager().registerEvents(new com.frammy.unitylauncher.military.MilitaryIncidentListener(), this);
 
         bankInvoicesDao = new BankInvoicesDao(this);
 
@@ -404,6 +410,11 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         // site's /stats "Мой перформанс"/"Игроки" tabs) — no-ops quietly
         // until the Plan plugin is actually installed on the server.
         new com.frammy.unitylauncher.auth.PlanStatsReporter(this, farLandsApi, getLogger()).start(12000L); // 10min
+
+        // --- military-diplomacy-design.md §13 Фаза 4: which country pairs
+        // are currently at war (consumed by AttackSupportUpgrade etc.) ---
+        warStatusCache = new com.frammy.unitylauncher.auth.WarStatusCache(this, farLandsApi);
+        warStatusCache.start(200L); // ~10s — war status doesn't need second-level freshness
 
         // --- server messages (join/quit/advancement phrases) ---
         this.serverMessagesListener = ServerMessagesListener.init(this);
@@ -854,7 +865,8 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                 EnergySavingUpgrade.class, FestivalOfLightsUpgrade.class, TruePondsAndFlowerbedsUpgrade.class,
                 ReturnOfTheSparkUpgrade.class, HolyAuraUpgrade.class, CitizenBenefitsUpgrade.class,
                 // military-diplomacy-design.md §3.3/§13 Фаза 2 — не завязаны на войну
-                DefensePatrolUpgrade.class, MilitaryHospitalRegenUpgrade.class
+                DefensePatrolUpgrade.class, MilitaryHospitalRegenUpgrade.class,
+                AttackSupportUpgrade.class, LogisticsUpgrade.class
             };
 
             int registered = 0;

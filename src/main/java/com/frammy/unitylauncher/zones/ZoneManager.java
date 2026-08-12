@@ -1242,6 +1242,18 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
         return (own != null && !own.isBlank()) ? own : "—";
     }
 
+    /** military-diplomacy-design.md §2.2/§13 Фаза 4 — "Нарушение границы": член другой страны в чужой COUNTRY-зоне без прав. One report per fresh entry (checkPlayerZone already only calls this on an actual zone change, not every tick). */
+    private void reportBorderViolationIfApplicable(Player p, ZoneInfo next) {
+        if (next == null || next.getType() != ZoneType.COUNTRY) return;
+        String zoneCountry = zoneCountry(next);
+        if (zoneCountry == null || zoneCountry.isBlank()) return;
+        String playerCountry = ul.countryRegistryJdbc.getCountryOfPlayer(p.getName());
+        if (playerCountry != null && playerCountry.equalsIgnoreCase(zoneCountry)) return; // own country, not a violation
+
+        var api = UnityLauncher.getInstance().getFarLandsApi();
+        if (api != null) api.reportBorderViolation(p.getName(), zoneCountry);
+    }
+
     /** military-diplomacy-design.md §3.2 — гражданин своей страны с правом viewMilitary. Союзники с расшариванием — не реализовано, см. CountryRegistryJdbc.getPlayerViewMilitaryPermission. */
     private boolean canSeeMilitaryZone(Player p, ZoneInfo z) {
         String owner = zoneCountry(z);
@@ -1257,6 +1269,8 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
         ZoneInfo next = getZoneAt(p.getLocation());
 
         if (Objects.equals(prev, next)) return;
+
+        reportBorderViolationIfApplicable(p, next);
 
         String barText;
 
