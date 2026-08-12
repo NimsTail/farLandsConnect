@@ -416,6 +416,10 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         warStatusCache = new com.frammy.unitylauncher.auth.WarStatusCache(this, farLandsApi);
         warStatusCache.start(200L); // ~10s — war status doesn't need second-level freshness
 
+        // military-diplomacy-design.md §16/§13 Фаза 5 — must match the
+        // backend's FRONTIER_REPORT_PERIOD_MS (lib/frontierPressure.ts).
+        new com.frammy.unitylauncher.military.FrontierPresenceReporter(this, zoneManager, farLandsApi).start(1200L); // ~60s
+
         // --- server messages (join/quit/advancement phrases) ---
         this.serverMessagesListener = ServerMessagesListener.init(this);
 

@@ -548,6 +548,13 @@ public class FarLandsApiClient {
         send("POST", "/plugin/military/neutralize", body);
     }
 
+    /** infra/military-diplomacy-design.md §16/§13 Фаза 5 — body = {"presences": [{username, zoneMarkerId, x, z}, ...]}, see FrontierPresenceReporter. */
+    public void reportFrontierPresence(JsonArray presences) {
+        JsonObject body = new JsonObject();
+        body.add("presences", presences);
+        send("POST", "/plugin/military/frontier-presence", body);
+    }
+
     public record WarPair(String countryA, String countryB) {}
 
     /** Blocking GET — called from WarStatusCache's own scheduler thread (mirrors fetchPendingCountryCreateRequests). Country NAMES, not site cuids — see routes/plugin.ts. */
