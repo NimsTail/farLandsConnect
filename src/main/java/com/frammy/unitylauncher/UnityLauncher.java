@@ -885,7 +885,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                 ReturnOfTheSparkUpgrade.class, HolyAuraUpgrade.class, CitizenBenefitsUpgrade.class,
                 // military-diplomacy-design.md §3.3/§13 Фаза 2 — не завязаны на войну
                 DefensePatrolUpgrade.class, MilitaryHospitalRegenUpgrade.class,
-                AttackSupportUpgrade.class, LogisticsUpgrade.class
+                AttackSupportUpgrade.class, LogisticsUpgrade.class,
+                // GH#24 — оборонительные сооружения (саб-роли под DEFENSE), идеи 1-4 (5-я отложена)
+                LiveDefensePostUpgrade.class, AuraUpgrade.class, ScorchUpgrade.class, CrossbowUpgrade.class
             };
 
             int registered = 0;
