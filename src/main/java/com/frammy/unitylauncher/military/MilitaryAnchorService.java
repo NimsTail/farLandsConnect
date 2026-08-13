@@ -42,6 +42,24 @@ public final class MilitaryAnchorService implements Listener {
         this.specializationService = specializationService;
     }
 
+    // GH#24 (твоя заметка про закапывание) — анкер обязан быть либо выше
+    // уровня моря (Y>=63), либо открыт небу (никто не закопал его выше) —
+    // иначе его можно спрятать так, что враг физически не сможет найти и
+    // сломать (BREAK_ANCHOR, §14.2), что убивает саму нейтрализацию как
+    // механику. "Открыт небу" — самый высокий непустой блок в этом столбце
+    // не выше самого анкера (Bukkit-хайтмап чанка, O(1), без ручного
+    // сканирования колонны). Публичный статик — этим же правилом
+    // проверяется "жив ли якорь" при каждом zones_sync (см.
+    // ZoneRequestPoller.zoneToJson), не только в момент установки: если
+    // анкер закопали ПОСЛЕ того как он уже стоял, он перестаёт считаться
+    // присутствующим на следующем же опросе, без отдельного слушателя на
+    // "кто-то что-то построил над ним".
+    public static boolean isExposed(Location loc) {
+        if (loc.getWorld() == null) return false;
+        if (loc.getBlockY() >= 63) return true;
+        return loc.getBlockY() >= loc.getWorld().getHighestBlockYAt(loc.getBlockX(), loc.getBlockZ());
+    }
+
     @EventHandler(ignoreCancelled = true)
     public void onPlace(BlockPlaceEvent e) {
         if (e.getBlockPlaced().getType() != Material.BELL) return;
@@ -58,11 +76,16 @@ public final class MilitaryAnchorService implements Listener {
             return;
         }
 
+        Player p = e.getPlayer();
+        if (!isExposed(loc)) {
+            p.sendMessage(ChatColor.RED + "Колокол должен стоять выше Y63 либо быть открыт небу (не закопан) — иначе не считается якорем.");
+            return;
+        }
+
         boolean replacing = zone.getMilitaryAnchorLocation() != null;
         zone.setMilitaryAnchorLocation(loc);
         saveZones();
 
-        Player p = e.getPlayer();
         p.sendMessage(ChatColor.GREEN + "Колокол закреплён как якорь разведки для \"" + zone.getName() + "\"."
                 + (replacing ? ChatColor.GRAY + " (заменил предыдущий)" : ""));
     }

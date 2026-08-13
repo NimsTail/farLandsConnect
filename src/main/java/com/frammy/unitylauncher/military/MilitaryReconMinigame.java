@@ -92,6 +92,7 @@ public final class MilitaryReconMinigame implements Listener {
         if (specializationService.current(zone) != MilitarySpecialization.RECON) return false;
         Location anchor = zone.getMilitaryAnchorLocation();
         if (anchor == null || anchor.getWorld() == null) return false;
+        if (!MilitaryAnchorService.isExposed(anchor)) return false; // GH#24 — buried after being placed, no longer counts
 
         Session session = new Session(sessionId, zone, anchor);
         activeByMarkerId.put(zone.getMarkerID(), session);

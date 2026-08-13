@@ -267,7 +267,13 @@ public class ZoneRequestPoller {
         // переключение не идёт. Сайт считает обратный отсчёт сам, не нужно
         // гонять тикающий таймер через опрос.
         o.addProperty("militarySpecializationSwitchLockedUntil", z.isSpecializationSwitching() ? z.getSpecializationSwitchLockedUntil() : 0L);
-        o.addProperty("militaryAnchorPresent", z.getMilitaryAnchorLocation() != null);
+        // GH#24 (защита от закапывания) — анкер считается "живым" только
+        // пока он и стоит, и остаётся выше Y63/открыт небу — см.
+        // MilitaryAnchorService.isExposed. Закопали уже стоявший якорь —
+        // на ближайшем же zones_sync он тихо перестаёт засчитываться, без
+        // отдельного слушателя за постройкой над ним.
+        Location anchorLoc = z.getMilitaryAnchorLocation();
+        o.addProperty("militaryAnchorPresent", anchorLoc != null && com.frammy.unitylauncher.military.MilitaryAnchorService.isExposed(anchorLoc));
 
         return o;
     }
