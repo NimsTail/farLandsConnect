@@ -149,7 +149,7 @@ public class ZoneRequestPoller {
         JsonObject result = new JsonObject();
         for (ZoneType t : new ZoneType[] {
                 ZoneType.BANK, ZoneType.HOSPITAL, ZoneType.INDUSTRIAL, ZoneType.PARK,
-                ZoneType.CHURCH, ZoneType.LIBRARY, ZoneType.GREENHOUSE,
+                ZoneType.CHURCH, ZoneType.LIBRARY, ZoneType.GREENHOUSE, ZoneType.MILITARY,
         }) {
             result.addProperty(t.name(), quotaService.getAvailableCountryQuota(countryName, t));
         }
