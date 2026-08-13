@@ -201,6 +201,29 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
         p.sendMessage((outcome.success() ? ChatColor.GREEN : ChatColor.RED) + outcome.message());
     }
 
+    // Веб-заявка (сайт → эта же логика, что и militarySpecializeCmd, только
+    // вход по UUID+markerId вместо Player+"зона под ногами" — сайт уже знает
+    // ТОЧНО какую зону редактирует, резолвить её не нужно.
+    private ZoneOpResult setMilitarySpecializationWebCore(UUID playerUuid, String markerId, String specializationRaw) {
+        String playerName = Bukkit.getOfflinePlayer(playerUuid).getName();
+        if (playerName == null) return ZoneOpResult.fail("Не удалось определить игрока по UUID.");
+        if (markerId == null) return ZoneOpResult.fail("Не указана зона.");
+        ZoneInfo zi = zoneList.get(markerId);
+        if (zi == null) return ZoneOpResult.fail("Зона не найдена.");
+        if (zi.getType() != ZoneType.MILITARY) return ZoneOpResult.fail("Специализация есть только у военных объектов.");
+        if (!NameUtil.eqCi(zi.getOwner(), playerName)) return ZoneOpResult.fail("Вы не владелец этого объекта.");
+
+        com.frammy.unitylauncher.military.MilitarySpecialization target;
+        try {
+            target = com.frammy.unitylauncher.military.MilitarySpecialization.valueOf(String.valueOf(specializationRaw));
+        } catch (Exception ex) {
+            return ZoneOpResult.fail("Неизвестная специализация: " + specializationRaw);
+        }
+
+        var outcome = com.frammy.unitylauncher.UnityLauncher.getInstance().militarySpecializationService.requestSwitch(zi, target);
+        return outcome.success() ? ZoneOpResult.ok(outcome.message(), markerId) : ZoneOpResult.fail(outcome.message());
+    }
+
     public void handleCommand(Player p, String[] args) {
         commands.handle(p, args);
     }
@@ -1572,6 +1595,16 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
 
         // CREATE поддерживает мульти-полигон (несколько отдельных фигур зоны сразу) —
         // обрабатываем его отдельной веткой с payload.shapes вместо payload.points.
+        // GH#24 п.2-3/§4.1 — не мультиполигон, не связана с points/shapes,
+        // короче обработать отдельной веткой до общего handleWebRequest,
+        // как и CREATE ниже.
+        if (request.action() == ZoneWebRequestService.Action.SET_MILITARY_SPECIALIZATION) {
+            String specRaw = (request.payload() != null && request.payload().has("specialization"))
+                    ? request.payload().get("specialization").getAsString() : null;
+            ZoneOpResult r = setMilitarySpecializationWebCore(request.playerUuid(), request.markerId(), specRaw);
+            return r.success() ? Result.ok(r.markerId()) : Result.error(stripColor(r.message()));
+        }
+
         if (request.action() == ZoneWebRequestService.Action.CREATE) {
             World world = (request.worldName() != null) ? Bukkit.getWorld(request.worldName()) : null;
             List<List<double[]>> shapesXZ = parseShapesFromPayload(request.payload());

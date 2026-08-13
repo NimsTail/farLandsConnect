@@ -216,6 +216,18 @@ public class ZoneRequestPoller {
         for (String m : z.getMembers()) members.add(m);
         o.add("members", members);
 
+        // military-diplomacy-design.md §4.1/§14.2, GH#24 п.2-3 — только
+        // осмысленно у type == MILITARY, но поле шлём всегда (null у
+        // остальных типов — как и с остальными military-only полями ниже).
+        // militarySpecialization уже учитывает окно переключения — во время
+        // него specService.current() отдаёт null, то есть сайт видит
+        // "временно без специализации", ровно как это отражается в игре.
+        var specService = com.frammy.unitylauncher.UnityLauncher.getInstance().militarySpecializationService;
+        var currentSpec = specService.current(z);
+        o.addProperty("militarySpecialization", currentSpec != null ? currentSpec.name() : null);
+        o.addProperty("militarySpecializationSwitching", z.isSpecializationSwitching());
+        o.addProperty("militaryAnchorPresent", z.getMilitaryAnchorLocation() != null);
+
         return o;
     }
 

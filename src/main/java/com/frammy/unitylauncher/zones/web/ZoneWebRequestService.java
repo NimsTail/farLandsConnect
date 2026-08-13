@@ -14,7 +14,8 @@ import static com.frammy.unitylauncher.UnityLauncher.DBConnect;
 
 public class ZoneWebRequestService {
 
-    public enum Action { CREATE, UPDATE_CORNERS, UPDATE_NAME, UPDATE_COLOR, DELETE, UPGRADE_TYPE, ADD_SHAPE, ADD_MEMBER, REMOVE_MEMBER, TRANSFER_OWNERSHIP }
+    // SET_MILITARY_SPECIALIZATION — GH#24 п.2-3/§4.1: payload = {"specialization": "DEFENSE"|"HOSPITAL"|"RECON"|"ATTACK_SUPPORT"|"LOGISTICS"}.
+    public enum Action { CREATE, UPDATE_CORNERS, UPDATE_NAME, UPDATE_COLOR, DELETE, UPGRADE_TYPE, ADD_SHAPE, ADD_MEMBER, REMOVE_MEMBER, TRANSFER_OWNERSHIP, SET_MILITARY_SPECIALIZATION }
 
     public record ZoneWebRequest(
             long id,
