@@ -130,7 +130,7 @@ public final class MilitaryReconMinigame implements Listener {
     @EventHandler(ignoreCancelled = true)
     public void onRing(BellRingEvent e) {
         if (activeByMarkerId.isEmpty()) return; // cheap early-exit — see class javadoc re: load
-        Location loc = e.getBell().getLocation();
+        Location loc = e.getBlock().getLocation();
         Entity ringer = e.getEntity();
 
         for (Session s : activeByMarkerId.values()) {

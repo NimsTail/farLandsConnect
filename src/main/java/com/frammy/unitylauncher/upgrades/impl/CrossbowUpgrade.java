@@ -18,7 +18,9 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.Listener;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.potion.PotionEffect;
+import org.bukkit.FluidCollisionMode;
 import org.bukkit.scheduler.BukkitTask;
+import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
 
 import java.util.Map;
@@ -102,12 +104,23 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
             double d = p.getLocation().distance(origin);
             if (d > bestDist) continue;
             if (!isWithinFiringAngle(origin, p.getLocation(), cfg.blindSpotDegrees())) continue;
-            if (!p.hasLineOfSight(origin.getBlock())) continue;
+            if (!hasLineOfSight(origin, p)) continue;
 
             bestDist = d;
             best = p;
         }
         return best;
+    }
+
+    /** Видимость от якоря до игрока — Location у Player.hasLineOfSight(Block) нет подходящей перегрузки, трассируем блоки сами. */
+    private boolean hasLineOfSight(Location origin, Player target) {
+        Location eye = target.getEyeLocation();
+        Vector dir = eye.toVector().subtract(origin.toVector());
+        double dist = dir.length();
+        if (dist < 1e-6) return true;
+        dir.normalize();
+        RayTraceResult hit = origin.getWorld().rayTraceBlocks(origin, dir, dist, FluidCollisionMode.NEVER, true);
+        return hit == null;
     }
 
     /** Слепая зона снизу: угол между направлением на цель и горизонтом не должен быть ниже -blindSpotDegrees. */

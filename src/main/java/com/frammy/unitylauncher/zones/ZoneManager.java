@@ -1772,6 +1772,9 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
             case ADD_MEMBER -> addMemberCore(playerName, zoneList.get(markerId), targetPlayer);
             case REMOVE_MEMBER -> removeMemberCore(playerName, zoneList.get(markerId), targetPlayer);
             case TRANSFER_OWNERSHIP -> transferOwnershipCore(playerName, zoneList.get(markerId), targetPlayer);
+            // Перехватывается раньше, в handleWebRequest-обёртке (см. выше по файлу) — сюда не доходит,
+            // но switch-выражение всё равно требует ветку на все значения enum.
+            case SET_MILITARY_SPECIALIZATION -> ZoneOpResult.fail("Внутренняя ошибка: SET_MILITARY_SPECIALIZATION должен обрабатываться раньше.");
         };
     }
 
