@@ -1,6 +1,7 @@
 package com.frammy.unitylauncher.upgrades.impl;
 
-import com.frammy.unitylauncher.upgrades.UpgradeCondition;
+import com.frammy.unitylauncher.UnityLauncher;
+import com.frammy.unitylauncher.military.MilitarySpecialization;
 import com.frammy.unitylauncher.upgrades.config.types.MilitaryCfg;
 import com.frammy.unitylauncher.upgrades.core.BaseUpgrade;
 import com.frammy.unitylauncher.upgrades.core.UpgradeContext;
@@ -44,9 +45,9 @@ public final class LogisticsUpgrade extends BaseUpgrade implements Listener {
         task = Bukkit.getScheduler().runTaskTimer(plugin(), () -> {
             for (ZoneInfo z : zones().getAllZonesSnapshot()) {
                 if (z.getType() != ZoneType.MILITARY) continue;
-                String canonicalCountry = UpgradeCondition.zoneCountryCanonical(z);
-                if (canonicalCountry == null) continue;
-                if (UpgradeCondition.countryMaxLevel(canonicalCountry, cfg.permBase(), 1) < 1) continue;
+
+                // GH#24 п.2 — только объект, реально специализированный под Логистику (§4.1).
+                if (!UnityLauncher.getInstance().militarySpecializationService.isActiveAs(z, MilitarySpecialization.LOGISTICS)) continue;
 
                 Location center = z.getCenter();
                 if (center == null || center.getWorld() == null) continue;

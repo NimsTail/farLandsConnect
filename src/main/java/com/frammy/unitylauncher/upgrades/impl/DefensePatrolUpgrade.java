@@ -1,6 +1,7 @@
 package com.frammy.unitylauncher.upgrades.impl;
 
 import com.frammy.unitylauncher.UnityLauncher;
+import com.frammy.unitylauncher.military.MilitarySpecialization;
 import com.frammy.unitylauncher.upgrades.UpgradeCondition;
 import com.frammy.unitylauncher.upgrades.config.types.MilitaryCfg;
 import com.frammy.unitylauncher.upgrades.core.BaseUpgrade;
@@ -80,9 +81,11 @@ public final class DefensePatrolUpgrade extends BaseUpgrade implements Listener 
         for (ZoneInfo z : zones().getAllZonesSnapshot()) {
             if (z.getType() != ZoneType.MILITARY) continue;
 
-            String canonicalCountry = UpgradeCondition.zoneCountryCanonical(z);
-            if (canonicalCountry == null) continue;
-            if (UpgradeCondition.countryMaxLevel(canonicalCountry, cfg.permBase(), 1) < 1) continue;
+            // GH#24 п.2: раньше Оборона работала на ЛЮБОМ военном объекте
+            // страны с купленным апгрейдом — теперь только на объекте,
+            // реально специализированном под неё (см. §4.1). isActiveAs уже
+            // включает в себя и проверку countryMaxLevel(cfg.permBase()).
+            if (!UnityLauncher.getInstance().militarySpecializationService.isActiveAs(z, MilitarySpecialization.DEFENSE)) continue;
 
             String markerId = z.getMarkerID();
             List<UUID> alive = guardsByZone.computeIfAbsent(markerId, k -> new ArrayList<>());

@@ -1,5 +1,6 @@
 package com.frammy.unitylauncher.zones;
 
+import com.frammy.unitylauncher.military.MilitarySpecialization;
 import org.bukkit.Color;
 import org.bukkit.Location;
 import org.bukkit.World;
@@ -49,6 +50,41 @@ public class ZoneInfo {
      * (строительство и т.п.) сейчас не влияет.
      */
     private final Set<String> members = new LinkedHashSet<>();
+
+    // ===== Военная специализация/якорь (GH#24, military-diplomacy-design.md §4.1/§14.2) =====
+    // Только для type == MILITARY, но храним прямо на ZoneInfo (не отдельной
+    // мапой) — тот же выбор, что и для остальных полей, специфичных для
+    // конкретного типа зоны (billing, members) в этом классе.
+    /** Текущий (уже применённый/устоявшийся) "главный тип" объекта. null = не назначено. Актуален только когда !isSpecializationSwitching(). */
+    private MilitarySpecialization militarySpecialization;
+    /** Цель незавершённого переключения — применяется вместо militarySpecialization, когда истечёт specializationSwitchLockedUntil. */
+    private MilitarySpecialization pendingMilitarySpecialization;
+    /** Пока > System.currentTimeMillis() — объект СЕЙЧАС переключается и временно неактивен (GH#24 п.3), никакая специализация не работает. */
+    private long specializationSwitchLockedUntil;
+    /** Когда последний раз ЗАВЕРШИЛОСЬ переключение специализации — основа кулдауна на следующее. 0 = ни разу не переключали. */
+    private long specializationChangedAt;
+    /** Физический анкер текущей специализации (например, Колокол у Разведпункта) — игрок ставит сам, null = якоря нет/сломан. */
+    private Location militaryAnchorLocation;
+
+    public MilitarySpecialization getMilitarySpecialization() { return militarySpecialization; }
+    public void setMilitarySpecialization(MilitarySpecialization s) { this.militarySpecialization = s; }
+
+    public MilitarySpecialization getPendingMilitarySpecialization() { return pendingMilitarySpecialization; }
+    public void setPendingMilitarySpecialization(MilitarySpecialization s) { this.pendingMilitarySpecialization = s; }
+
+    public long getSpecializationSwitchLockedUntil() { return specializationSwitchLockedUntil; }
+    public void setSpecializationSwitchLockedUntil(long ts) { this.specializationSwitchLockedUntil = ts; }
+
+    public long getSpecializationChangedAt() { return specializationChangedAt; }
+    public void setSpecializationChangedAt(long ts) { this.specializationChangedAt = ts; }
+
+    public Location getMilitaryAnchorLocation() { return militaryAnchorLocation; }
+    public void setMilitaryAnchorLocation(Location loc) { this.militaryAnchorLocation = loc; }
+
+    /** true пока идёт окно переключения (GH#24 п.3) — специализация временно не в счёт, объект неактивен. */
+    public boolean isSpecializationSwitching() {
+        return System.currentTimeMillis() < specializationSwitchLockedUntil;
+    }
 
     // ===== Billing (последние 14 дней) =====
     public record DailyEntry(LocalDate date, double cost) {}

@@ -75,6 +75,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     // military-diplomacy-design.md §13 Фаза 4.
     public com.frammy.unitylauncher.auth.WarStatusCache warStatusCache;
     public CountryRelationshipDao countryRelationshipDao;
+    // military-diplomacy-design.md §4.1, GH#24 — per-zone "тип сооружения" +
+    // физический анкер. Конструируется сразу после zoneManager (onEnable).
+    public com.frammy.unitylauncher.military.MilitarySpecializationService militarySpecializationService;
 
     public AuthService authService;
     public AuthListener authListener;
@@ -163,6 +166,13 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         // обратная ссылка — нужна ActivityTracker'у, чтобы приглушать вес визита
         // владельца/согражданина зоны в её же собственный трафик (см. computeVisitorWeight)
         activityTracker.setZoneManager(zoneManager);
+
+        // military-diplomacy-design.md §4.1/§14.2, GH#24 — per-zone военная
+        // специализация + физический анкер (Колокол и т.п.). Anchor-листенер
+        // always-on (не апгрейд сам по себе — как MilitaryIncidentListener выше).
+        militarySpecializationService = new com.frammy.unitylauncher.military.MilitarySpecializationService(zoneManager);
+        Bukkit.getPluginManager().registerEvents(
+                new com.frammy.unitylauncher.military.MilitaryAnchorService(militarySpecializationService), this);
 
         // --- веб-заявки на создание/редактирование зон с сайта ---
         com.frammy.unitylauncher.zones.web.ZoneWebRequestService zoneWebRequestService =

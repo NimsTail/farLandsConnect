@@ -1,19 +1,19 @@
 package com.frammy.unitylauncher.upgrades.impl;
 
+import com.frammy.unitylauncher.UnityLauncher;
+import com.frammy.unitylauncher.military.MilitarySpecialization;
 import com.frammy.unitylauncher.upgrades.UpgradeCondition;
 import com.frammy.unitylauncher.upgrades.config.types.MilitaryCfg;
 import com.frammy.unitylauncher.upgrades.core.BaseUpgrade;
 import com.frammy.unitylauncher.upgrades.core.UpgradeContext;
 import com.frammy.unitylauncher.upgrades.core.UpgradeKey;
 import com.frammy.unitylauncher.upgrades.core.UpgradeScope;
-import com.frammy.unitylauncher.zones.ZoneType;
+import com.frammy.unitylauncher.zones.ZoneInfo;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.event.Listener;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitTask;
-
-import static com.frammy.unitylauncher.upgrades.UpgradeCondition.countryMaxLevel;
 
 // infra/military-diplomacy-design.md §3.3/§13 Фаза 2, §14.2 "Военный
 // госпиталь". Прямая копия RegenPulseUpgrade (hospital.regen_pulse) под
@@ -43,13 +43,15 @@ public final class MilitaryHospitalRegenUpgrade extends BaseUpgrade implements L
         int amp = Math.max(0, cfg.amplifier());
 
         task = Bukkit.getScheduler().runTaskTimer(plugin(), () -> {
+            var specService = UnityLauncher.getInstance().militarySpecializationService;
             for (Player p : Bukkit.getOnlinePlayers()) {
-                if (!UpgradeCondition.isInsideZoneTypeRaw(p.getLocation(), ZoneType.MILITARY)) continue;
-
-                String country = UpgradeCondition.locationCountryOwner(p.getLocation());
-                if (country == null || country.isBlank()) continue;
-
-                if (countryMaxLevel(country, cfg.permBase(), 1) < 1) continue;
+                // GH#24 п.2: раньше проверялось только "стоит ли игрок внутри
+                // КАКОГО-ТО военного объекта страны с купленным апгрейдом" —
+                // теперь нужен конкретный объект (не просто булево "внутри
+                // военной зоны"), чтобы спросить его специализацию (§4.1).
+                ZoneInfo zone = specService.militaryZoneAt(p.getLocation());
+                if (zone == null) continue;
+                if (!specService.isActiveAs(zone, MilitarySpecialization.HOSPITAL)) continue;
 
                 UpgradeCondition.applyPotionSmart(
                         p,

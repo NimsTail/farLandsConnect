@@ -17,7 +17,7 @@ public final class ZoneCommands {
 
     public void handle(Player p, String[] args) {
         if (args == null || args.length < 1) {
-            p.sendMessage(ChatColor.RED + "Использование: /ul zone <addcorner|removecorner|build|update|price|remove|confirmremove|cancelremove|addmember|removemember|transferowner>");
+            p.sendMessage(ChatColor.RED + "Использование: /ul zone <addcorner|removecorner|build|update|price|remove|confirmremove|cancelremove|addmember|removemember|transferowner|military>");
             return;
         }
 
@@ -113,6 +113,24 @@ public final class ZoneCommands {
             case "transferowner" -> {
                 if (args.length != 2) { p.sendMessage(ChatColor.RED + "Использование: /ul zone transferowner <ник>"); return; }
                 zones.transferOwnerCmd(p, args[1]);
+            }
+
+            // GH#24 п.2-3, §4.1 — временная in-game команда, см. комментарий у militarySpecializeCmd.
+            case "military" -> {
+                if (args.length != 2) {
+                    p.sendMessage(ChatColor.RED + "Использование: /ul zone military <defense|hospital|recon|attack_support|logistics>");
+                    return;
+                }
+                com.frammy.unitylauncher.military.MilitarySpecialization target;
+                try {
+                    target = com.frammy.unitylauncher.military.MilitarySpecialization.valueOf(args[1].toUpperCase(Locale.ROOT));
+                } catch (IllegalArgumentException ex) {
+                    p.sendMessage(ChatColor.RED + "Неизвестная специализация: " + ChatColor.YELLOW + args[1]);
+                    p.sendMessage(ChatColor.GRAY + "Доступные: " + ChatColor.WHITE
+                            + Arrays.toString(com.frammy.unitylauncher.military.MilitarySpecialization.values()));
+                    return;
+                }
+                zones.militarySpecializeCmd(p, target);
             }
 
             default -> p.sendMessage(ChatColor.RED + "Неизвестная команда!");

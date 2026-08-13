@@ -176,6 +176,31 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
         if (r.message() != null) p.sendMessage(r.message());
     }
 
+    // military-diplomacy-design.md §4.1/§14.2, GH#24 п.2-3 — переключить
+    // "главный тип" (специализацию) военного объекта. Временная in-game
+    // команда — когда военная карта на сайте (GH#24 п.4) научится слать
+    // это же действие через zone-request очередь, дропдаун там должен
+    // вызывать ровно этот же MilitarySpecializationService.requestSwitch,
+    // просто с другой точки входа.
+    void militarySpecializeCmd(Player p, com.frammy.unitylauncher.military.MilitarySpecialization target) {
+        ZoneInfo zi = resolvePlayerZoneForUpdate(p);
+        if (zi == null) {
+            p.sendMessage(ChatColor.RED + "Не удалось определить, какую из ваших зон редактировать. Зайдите в нужную зону ещё раз.");
+            return;
+        }
+        if (zi.getType() != ZoneType.MILITARY) {
+            p.sendMessage(ChatColor.RED + "Специализация есть только у военных объектов.");
+            return;
+        }
+        if (!NameUtil.eqCi(zi.getOwner(), p.getName())) {
+            p.sendMessage(ChatColor.RED + "Вы не владелец этого объекта.");
+            return;
+        }
+
+        var outcome = com.frammy.unitylauncher.UnityLauncher.getInstance().militarySpecializationService.requestSwitch(zi, target);
+        p.sendMessage((outcome.success() ? ChatColor.GREEN : ChatColor.RED) + outcome.message());
+    }
+
     public void handleCommand(Player p, String[] args) {
         commands.handle(p, args);
     }

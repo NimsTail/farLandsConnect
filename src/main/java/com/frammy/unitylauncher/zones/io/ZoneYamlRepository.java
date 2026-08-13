@@ -1,5 +1,6 @@
 package com.frammy.unitylauncher.zones.io;
 
+import com.frammy.unitylauncher.military.MilitarySpecialization;
 import com.frammy.unitylauncher.zones.ZoneInfo;
 import com.frammy.unitylauncher.zones.ZoneType;
 import org.bukkit.Bukkit;
@@ -143,6 +144,34 @@ public final class ZoneYamlRepository {
                         zi.setMembers(membersYaml);
                     }
 
+                    // GH#24/§4.1 — военная специализация/якорь, только реально
+                    // заполнено у type == MILITARY, но поле читаем всегда (нет
+                    // смысла проверять тип — у остальных зон секций просто нет).
+                    String specRaw = z.getString("militarySpecialization", null);
+                    if (specRaw != null) {
+                        try {
+                            zi.setMilitarySpecialization(MilitarySpecialization.valueOf(specRaw));
+                        } catch (IllegalArgumentException ignore) { }
+                    }
+                    String pendingSpecRaw = z.getString("pendingMilitarySpecialization", null);
+                    if (pendingSpecRaw != null) {
+                        try {
+                            zi.setPendingMilitarySpecialization(MilitarySpecialization.valueOf(pendingSpecRaw));
+                        } catch (IllegalArgumentException ignore) { }
+                    }
+                    zi.setSpecializationSwitchLockedUntil(z.getLong("specializationSwitchLockedUntil", 0L));
+                    zi.setSpecializationChangedAt(z.getLong("specializationChangedAt", 0L));
+
+                    ConfigurationSection anchorSec = z.getConfigurationSection("militaryAnchor");
+                    if (anchorSec != null) {
+                        String wName = (worldOverride != null ? worldOverride : anchorSec.getString("world"));
+                        World w = Bukkit.getWorld(wName);
+                        if (w != null) {
+                            zi.setMilitaryAnchorLocation(new Location(w,
+                                    anchorSec.getDouble("x"), anchorSec.getDouble("y"), anchorSec.getDouble("z")));
+                        }
+                    }
+
                     targetMap.put(markerID, zi);
                 }
             }
@@ -216,6 +245,31 @@ public final class ZoneYamlRepository {
             Set<String> members = z.getMembers();
             if (!members.isEmpty()) {
                 zonesConfig.set(path + ".members", new ArrayList<>(members));
+            }
+
+            // GH#24/§4.1 — военная специализация/якорь (только MILITARY
+            // реально их использует, но пишем не глядя на тип — у остальных
+            // зон эти геттеры просто всегда вернут null/0).
+            if (z.getMilitarySpecialization() != null) {
+                zonesConfig.set(path + ".militarySpecialization", z.getMilitarySpecialization().name());
+            }
+            if (z.getPendingMilitarySpecialization() != null) {
+                zonesConfig.set(path + ".pendingMilitarySpecialization", z.getPendingMilitarySpecialization().name());
+            }
+            if (z.getSpecializationSwitchLockedUntil() > 0) {
+                zonesConfig.set(path + ".specializationSwitchLockedUntil", z.getSpecializationSwitchLockedUntil());
+            }
+            if (z.getSpecializationChangedAt() > 0) {
+                zonesConfig.set(path + ".specializationChangedAt", z.getSpecializationChangedAt());
+            }
+            if (z.getMilitaryAnchorLocation() != null) {
+                Location a = z.getMilitaryAnchorLocation();
+                Map<String, Object> anchor = new HashMap<>();
+                anchor.put("world", a.getWorld().getName());
+                anchor.put("x", a.getX());
+                anchor.put("y", a.getY());
+                anchor.put("z", a.getZ());
+                zonesConfig.set(path + ".militaryAnchor", anchor);
             }
         }
 
