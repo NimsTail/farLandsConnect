@@ -548,6 +548,14 @@ public class FarLandsApiClient {
         send("POST", "/plugin/military/neutralize", body);
     }
 
+    /** military-diplomacy-design.md §4.1 п.3, GH#24 п.1/вопрос №15 — see MilitaryReconMinigame. qualityBonusPercent is 0-5. */
+    public void reportReconQuality(String sessionId, double qualityBonusPercent) {
+        JsonObject body = new JsonObject();
+        body.addProperty("sessionId", sessionId);
+        body.addProperty("qualityBonusPercent", qualityBonusPercent);
+        send("POST", "/plugin/military/recon-quality", body);
+    }
+
     /** infra/military-diplomacy-design.md §16/§13 Фаза 5 — body = {"presences": [{username, zoneMarkerId, x, z}, ...]}, see FrontierPresenceReporter. */
     public void reportFrontierPresence(JsonArray presences) {
         JsonObject body = new JsonObject();

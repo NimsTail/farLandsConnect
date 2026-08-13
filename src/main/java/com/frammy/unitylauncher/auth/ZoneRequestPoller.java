@@ -2,6 +2,7 @@ package com.frammy.unitylauncher.auth;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.frammy.unitylauncher.UnityLauncher;
 import com.frammy.unitylauncher.zones.ZoneInfo;
 import com.frammy.unitylauncher.zones.ZoneManager;
 import com.frammy.unitylauncher.zones.ZoneType;
@@ -70,6 +71,10 @@ public class ZoneRequestPoller {
             }
             if ("zone_quota_sync".equals(req.action())) {
                 processZoneQuotaSync(req);
+                return;
+            }
+            if ("START_RECON_MINIGAME".equals(req.action())) {
+                processStartReconMinigame(req);
                 return;
             }
             processMutation(req);
@@ -156,6 +161,38 @@ public class ZoneRequestPoller {
         JsonArray wrapper = new JsonArray();
         wrapper.add(result);
         api.reportZoneRequestResult(req.id(), true, null, null, wrapper);
+    }
+
+    /**
+     * military-diplomacy-design.md §4.1 п.3, GH#24 п.1/вопрос №15 — the site
+     * just started a MilitaryReconSession and wants the Колокол-timing
+     * minigame running at this zone. Fire-and-forget from the site's
+     * perspective (see routes/zones.ts's comment on this call) — "success"
+     * here only means "the minigame actually started", not "recon
+     * succeeded"; the real result comes later via
+     * FarLandsApiClient.reportReconQuality once the window ends.
+     */
+    private void processStartReconMinigame(FarLandsApiClient.PendingZoneRequest req) {
+        String markerId = req.markerId();
+        String sessionId = (req.payload() != null && req.payload().has("sessionId"))
+                ? req.payload().get("sessionId").getAsString()
+                : null;
+        if (markerId == null || sessionId == null) {
+            api.reportZoneRequestResult(req.id(), false, "missing_params", null);
+            return;
+        }
+
+        ZoneInfo zone = zoneManager.getAllZonesSnapshot().stream()
+                .filter(z -> markerId.equals(z.getMarkerID()))
+                .findFirst()
+                .orElse(null);
+        if (zone == null) {
+            api.reportZoneRequestResult(req.id(), false, "zone_not_found", null);
+            return;
+        }
+
+        boolean started = UnityLauncher.getInstance().militaryReconMinigame.start(zone, sessionId);
+        api.reportZoneRequestResult(req.id(), started, started ? null : "not_specialized_or_no_anchor", null);
     }
 
     private JsonObject zoneToJson(ZoneInfo z) {
