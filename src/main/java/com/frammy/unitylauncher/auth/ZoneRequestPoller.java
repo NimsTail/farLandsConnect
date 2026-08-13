@@ -226,6 +226,10 @@ public class ZoneRequestPoller {
         var currentSpec = specService.current(z);
         o.addProperty("militarySpecialization", currentSpec != null ? currentSpec.name() : null);
         o.addProperty("militarySpecializationSwitching", z.isSpecializationSwitching());
+        // Абсолютная метка (epoch ms) конца окна переключения — 0, если
+        // переключение не идёт. Сайт считает обратный отсчёт сам, не нужно
+        // гонять тикающий таймер через опрос.
+        o.addProperty("militarySpecializationSwitchLockedUntil", z.isSpecializationSwitching() ? z.getSpecializationSwitchLockedUntil() : 0L);
         o.addProperty("militaryAnchorPresent", z.getMilitaryAnchorLocation() != null);
 
         return o;
