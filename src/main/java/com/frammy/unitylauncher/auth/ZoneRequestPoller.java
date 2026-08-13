@@ -73,6 +73,10 @@ public class ZoneRequestPoller {
                 processZoneQuotaSync(req);
                 return;
             }
+            if ("military_specialization_quota_sync".equals(req.action())) {
+                processMilitarySpecQuotaSync(req);
+                return;
+            }
             if ("START_RECON_MINIGAME".equals(req.action())) {
                 processStartReconMinigame(req);
                 return;
@@ -157,6 +161,34 @@ public class ZoneRequestPoller {
                 ZoneType.CHURCH, ZoneType.LIBRARY, ZoneType.GREENHOUSE, ZoneType.MILITARY,
         }) {
             result.addProperty(t.name(), quotaService.getAvailableCountryQuota(countryName, t));
+        }
+        JsonArray wrapper = new JsonArray();
+        wrapper.add(result);
+        api.reportZoneRequestResult(req.id(), true, null, null, wrapper);
+    }
+
+    /**
+     * Read-only — GH#24 (правки из комментария, п.3): та же идея, что
+     * processZoneQuotaSync, но для военных специализаций — "сколько ещё
+     * объектов страны можно назначить на специализацию X прямо сейчас"
+     * (unity.military.<slug>.<N> квота минус уже занятые слоты, см.
+     * MilitarySpecializationService.availableQuota). Сайт показывает это в
+     * дропдауне специализации объекта, как "(N доступно)".
+     */
+    private void processMilitarySpecQuotaSync(FarLandsApiClient.PendingZoneRequest req) {
+        String countryName = (req.payload() != null && req.payload().has("countryName"))
+                ? req.payload().get("countryName").getAsString()
+                : null;
+        if (countryName == null) {
+            api.reportZoneRequestResult(req.id(), false, "missing_country_name", null);
+            return;
+        }
+
+        String canonical = com.frammy.unitylauncher.upgrades.UpgradeCondition.resolveCountryGroupId(countryName);
+        var specService = com.frammy.unitylauncher.UnityLauncher.getInstance().militarySpecializationService;
+        JsonObject result = new JsonObject();
+        for (var spec : com.frammy.unitylauncher.military.MilitarySpecialization.values()) {
+            result.addProperty(spec.name(), specService.availableQuota(canonical, spec));
         }
         JsonArray wrapper = new JsonArray();
         wrapper.add(result);
@@ -267,6 +299,19 @@ public class ZoneRequestPoller {
         // переключение не идёт. Сайт считает обратный отсчёт сам, не нужно
         // гонять тикающий таймер через опрос.
         o.addProperty("militarySpecializationSwitchLockedUntil", z.isSpecializationSwitching() ? z.getSpecializationSwitchLockedUntil() : 0L);
+        // GH#24 п.2 (правки из комментария) — сайт хочет показывать "с X на Y",
+        // а не просто погашенный дропдаун во время переключения — цель
+        // переключения плагин уже хранит (pendingMilitarySpecialization),
+        // просто раньше не зеркалил её на сайт.
+        var pendingSpec = z.getPendingMilitarySpecialization();
+        o.addProperty("militarySpecializationPending", z.isSpecializationSwitching() && pendingSpec != null ? pendingSpec.name() : null);
+        // Тот же п.2 — "с X" половина: сырое (немаскированное) значение
+        // z.getMilitarySpecialization() всё время окна переключения остаётся
+        // старым (меняется только внутри resolvePending, когда окно уже
+        // прошло) — в отличие от currentSpec выше, который замаскирован в
+        // null всё это время. Осмысленно только вместе с militarySpecializationSwitching.
+        var rawSpec = z.getMilitarySpecialization();
+        o.addProperty("militarySpecializationPrevious", z.isSpecializationSwitching() && rawSpec != null ? rawSpec.name() : null);
         // GH#24 (защита от закапывания) — анкер считается "живым" только
         // пока он и стоит, и остаётся выше Y63/открыт небу — см.
         // MilitaryAnchorService.isExposed. Закопали уже стоявший якорь —

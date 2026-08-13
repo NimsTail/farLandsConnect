@@ -21,6 +21,17 @@ public enum MilitarySpecialization {
     ATTACK_SUPPORT("unity.military.attack_support"),
     LOGISTICS("unity.military.logistics");
 
+    // GH#24 (правки из комментария, п.3) — сайт хочет показывать в дропдауне
+    // специализации "сколько доступно (куплено)", как у типов зон
+    // (unity.zone.<type>.<N>). Раньше permBase был вкл/выкл-флагом (level
+    // >= 1 = разрешено на ЛЮБОЕ число объектов одновременно) — теперь это
+    // тот же паттерн уровневой квоты: unity.military.<slug>.<N> = максимум N
+    // военных объектов страны одновременно с этой специализацией.
+    // ВАЖНО (эксплуатация): старый флаг unity.military.<slug> (без числа)
+    // больше НЕ считается — странам, у кого он уже выдан, нужно перевыдать
+    // как unity.military.<slug>.<N> (например .2), иначе квота станет 0.
+    private static final int MAX_QUOTA_LEVEL = 5;
+
     /** Country-level LuckPerms permission base gating this specialization at all (see upgrades_country.json). */
     private final String permBase;
 
@@ -28,8 +39,14 @@ public enum MilitarySpecialization {
         this.permBase = permBase;
     }
 
+    /** Максимум объектов страны, которые могут одновременно нести эту специализацию — 0, если апгрейд не куплен вообще. */
+    public int purchasedQuota(String canonicalCountryId) {
+        if (canonicalCountryId == null) return 0;
+        return UpgradeCondition.countryMaxLevel(canonicalCountryId, permBase, MAX_QUOTA_LEVEL);
+    }
+
     /** True if the zone's country has actually bought (level >= 1) the upgrade this specialization requires. */
     public boolean unlockedFor(String canonicalCountryId) {
-        return canonicalCountryId != null && UpgradeCondition.countryMaxLevel(canonicalCountryId, permBase, 1) >= 1;
+        return purchasedQuota(canonicalCountryId) >= 1;
     }
 }

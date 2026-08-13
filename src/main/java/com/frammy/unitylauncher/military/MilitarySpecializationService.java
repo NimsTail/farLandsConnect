@@ -100,6 +100,19 @@ public final class MilitarySpecializationService {
                     + target.name().toLowerCase(Locale.ROOT) + ".");
         }
 
+        // GH#24 (правки из комментария, п.3) — квота на специализацию, та же
+        // логика, что и квота типов зон: N куплено -> максимум N объектов
+        // страны одновременно с этой специализацией. Эта же зона исключена
+        // из подсчёта (она либо не несёт target вовсе — раннее возвращение
+        // выше отсекло "уже эта специализация" — либо переключается на
+        // target прямо сейчас, что не должно блокировать само себя).
+        int quota = target.purchasedQuota(country);
+        int inUse = countInUse(country, target, zone.getMarkerID());
+        if (inUse >= quota) {
+            return SwitchOutcome.fail("Лимит объектов страны со специализацией "
+                    + target.name().toLowerCase(Locale.ROOT) + " достигнут: " + inUse + "/" + quota + ".");
+        }
+
         long now = System.currentTimeMillis();
         if (zone.getSpecializationChangedAt() > 0) {
             long sinceLast = now - zone.getSpecializationChangedAt();
@@ -116,6 +129,33 @@ public final class MilitarySpecializationService {
         long lockMin = SWITCH_LOCK_MS / 60000L;
         return SwitchOutcome.ok("Переключение на " + target.name().toLowerCase(Locale.ROOT)
                 + " начато. Объект неактивен ~" + lockMin + " мин, затем специализация применится сама.");
+    }
+
+    /**
+     * Сколько военных объектов страны прямо сейчас числятся под этой
+     * специализацией — считает и устоявшиеся (getMilitarySpecialization),
+     * и те, что уже переключаются НА неё (getPendingMilitarySpecialization),
+     * чтобы нельзя было гонкой запросов проскочить квоту через два
+     * одновременных переключения. excludeMarkerId — сама зона-инициатор
+     * запроса, не должна сама себя блокировать.
+     */
+    public int countInUse(String canonicalCountry, MilitarySpecialization spec, String excludeMarkerId) {
+        if (canonicalCountry == null || spec == null) return 0;
+        int count = 0;
+        for (ZoneInfo z : zoneManager.getAllZonesSnapshot()) {
+            if (z.getType() != ZoneType.MILITARY) continue;
+            if (excludeMarkerId != null && excludeMarkerId.equals(z.getMarkerID())) continue;
+            if (!canonicalCountry.equals(UpgradeCondition.zoneCountryCanonical(z))) continue;
+            if (z.getMilitarySpecialization() == spec || z.getPendingMilitarySpecialization() == spec) count++;
+        }
+        return count;
+    }
+
+    /** Сколько ещё объектов страны можно назначить на эту специализацию прямо сейчас (для дропдауна на сайте). */
+    public int availableQuota(String canonicalCountry, MilitarySpecialization spec) {
+        if (canonicalCountry == null || spec == null) return 0;
+        int quota = spec.purchasedQuota(canonicalCountry);
+        return Math.max(0, quota - countInUse(canonicalCountry, spec, null));
     }
 
     /** Военная зона, физически содержащая эту точку (без учёта приоритета типов — только MILITARY). */
