@@ -22,20 +22,63 @@ import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.RayTraceResult;
 import org.bukkit.util.Vector;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 
 // infra/military-diplomacy-design.md GH#24 идея 4 "Арбалет" — стреляет по
-// ближайшему видимому врагу в радиусе от якоря объекта (или центра, если
-// якоря нет — реализация не требует именно колокола, "якорь-зона" общая
-// концепция). Слепая зона: цель ниже blindSpotDegrees от горизонтали не
-// обстреливается. На макс. уровне (2) стрелы несут эффект (Слабость).
+// ближайшим видимым врагам в радиусе от якоря объекта. Слепая зона: цель
+// ниже blindSpotDegrees от горизонтали не обстреливается.
+//
+// GH#29 — переработка по фидбеку:
+//  1. Прицел раньше промахивался на "голову выше" — направление считалось от
+//     origin (точка якоря), а стрела спавнилась на 0.5 блока выше origin;
+//     прямая от смещённой точки СПАВНА в направлении, посчитанном от точки
+//     БЕЗ смещения, идёт параллельно нужной линии, но на те же 0.5 блока
+//     выше по всей траектории — почти ровно "голова" по хитбоксу игрока.
+//     Фикс: направление теперь считается от той же точки, где стрела
+//     реально спавнится.
+//  2. Раньше стрелял только в одну, ближайшую цель. Теперь — до 3 разных
+//     целей одним тиком, по одной стреле на каждую (если целей меньше 3 —
+//     соответственно меньше стрел).
+//  3. "Усиление" разделено на три отдельных узла апгрейдов вместо одного
+//     общего (см. militaryCrossbowRate/Effects/EffectChance в seed-данных):
+//     скорострельность, слоты эффектов и шанс эффекта на стреле — каждый
+//     прокачивается независимо.
 public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
 
     private static final UpgradeKey KEY = UpgradeKey.of("military.crossbow");
     private static final double ARROW_SPEED = 3.0;
+    private static final int MAX_TARGETS = 3;
 
-    // markerId -> когда последний раз стреляли (мс) — один выстрел за period, простейший кулдаун на объект.
+    // GH#29 п.1 "Скорострельность" — 3 уровня (0 — база, 1, 2), множитель на
+    // период стрельбы из cfg.periodTicks(). Черновые числа — баланс можно
+    // подправить конфигом позже, сама механика уже полностью рабочая.
+    private static final double[] RATE_MULTIPLIER = {1.0, 0.67, 0.4};
+
+    // GH#29 п.2а "Шанс стрелы с эффектом" — 3 уровня, максимум держим в
+    // запрошенном диапазоне (~50-60%), чтобы не каждая стрела летела с
+    // эффектом.
+    private static final double[] EFFECT_CHANCE = {0.20, 0.35, 0.55};
+
+    // GH#29 п.2 "Эффекты" — 0: эффекта нет вообще; 1: один "слот" из слабого
+    // пула; 2: три слота, любой эффект из полного пула. Пока выбор эффекта
+    // из пула случайный при каждом выстреле, а не ручной выбор страной —
+    // сознательное упрощение первого захода (полноценный пикер — отдельная
+    // UI-задача, не в этом тикете).
+    private static final List<PotionEffectType> WEAK_EFFECT_POOL = List.of(PotionEffectType.SLOWNESS);
+    private static final List<PotionEffectType> FULL_EFFECT_POOL =
+            List.of(PotionEffectType.SLOWNESS, PotionEffectType.WEAKNESS, PotionEffectType.NAUSEA);
+    private static final int EFFECT_DURATION_TICKS = 20 * 4;
+
+    private static final String RATE_PERM_BASE = "unity.military.crossbow_rate";
+    private static final String EFFECTS_PERM_BASE = "unity.military.crossbow_effects";
+    private static final String CHANCE_PERM_BASE = "unity.military.crossbow_chance";
+
+    // markerId -> когда последний раз стреляли (мс) — один залп за (динамический) период, простейший кулдаун на объект.
     private final Map<String, Long> lastShotByZone = new ConcurrentHashMap<>();
     private BukkitTask task;
 
@@ -69,51 +112,41 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
             // GH#24 (фидбек 2026-08-14 п.1/4) — только на объекте, реально вкачанном в CROSSBOW.
             if (!subtypeService.isActiveAs(z, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.CROSSBOW)) continue;
 
-            // GH#26 (фидбек — "при покупке сооружения он должен уже работать
-            // на самом простом уровне, а улучшения должны его прокачивать —
-            // а не то, что сейчас первое улучшение только заставляет его
-            // работать") — level (усиление, отдельный узел от квоты выше)
-            // used to GATE whether this fires at all (level<1 → skip) —
-            // базовая покупка самого типа обороны (isActiveAs выше) уже
-            // подтверждает, что объект вкачан в CROSSBOW; level ниже влияет
-            // только на БОНУС (эффект на стрелах, level>=2 — см. shoot()),
-            // не на то, стреляет оно вообще или нет.
             String canonicalCountry = UpgradeCondition.zoneCountryCanonical(z);
-            int level = canonicalCountry == null ? 0 : UpgradeCondition.countryMaxLevel(
-                    canonicalCountry, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.CROSSBOW.levelPermBase(), 2);
+            // GH#29 — три независимых уровня прокачки вместо одного общего "усиления".
+            int rateLevel = canonicalCountry == null ? 0 : UpgradeCondition.countryMaxLevel(canonicalCountry, RATE_PERM_BASE, 2);
+            int effectsLevel = canonicalCountry == null ? 0 : UpgradeCondition.countryMaxLevel(canonicalCountry, EFFECTS_PERM_BASE, 2);
+            int chanceLevel = canonicalCountry == null ? 0 : UpgradeCondition.countryMaxLevel(canonicalCountry, CHANCE_PERM_BASE, 2);
 
-            // GH#24 (фидбек 2026-08-14 п.4) — якорь (тот же Колокол, что у
-            // Разведпункта — см. MilitaryAnchorService.isAnchorCapable)
-            // теперь ОБЯЗАТЕЛЕН, не просто "предпочтителен": без него
-            // Арбалет не стреляет вообще, никакого фоллбека на центр зоны
-            // больше нет — сайт (MilitaryMapPage) прямо предупреждает об
-            // этом в статусе якоря, так что здесь это должно быть правдой.
+            // GH#24 (фидбек 2026-08-14 п.4) — якорь обязателен, без него не стреляет вообще.
             Location origin = z.getMilitaryAnchorLocation();
             if (origin == null || origin.getWorld() == null) continue;
 
-            Player target = findTarget(origin, cfg, z.getCountryName());
-            if (target == null) continue;
+            List<Player> targets = findTargets(origin, cfg, z.getCountryName(), MAX_TARGETS);
+            if (targets.isEmpty()) continue;
 
             String markerId = z.getMarkerID();
             long now = System.currentTimeMillis();
+            long effectivePeriodTicks = Math.max(1L, Math.round(cfg.periodTicks() * RATE_MULTIPLIER[rateLevel]));
             Long last = lastShotByZone.get(markerId);
-            if (last != null && now - last < cfg.periodTicks() * 50L) continue;
+            if (last != null && now - last < effectivePeriodTicks * 50L) continue;
             lastShotByZone.put(markerId, now);
 
-            shoot(origin, target, cfg, level);
+            for (Player target : targets) {
+                shoot(origin, target, cfg, effectsLevel, chanceLevel);
+            }
         }
     }
 
     // GH#24 (вопрос "арбалет стреляет только во врагов, с кем страна в
-    // войне?") — раньше НЕТ: цель считалась просто "не гражданин этой
-    // страны", то есть Арбалет одинаково стрелял и по союзникам, и по
-    // нейтралам, и по просто гостям — не только по тем, с чьей страной
-    // реально идёт война. DefensePatrolUpgrade (соседняя оборонительная
-    // механика, см. warStatusCache.isAtWar) уже требует именно войны — эта
-    // проверка была тут пропущена по недосмотру, не специально.
-    private Player findTarget(Location origin, MilitaryCfg.CrossbowCfg cfg, String countryName) {
-        Player best = null;
-        double bestDist = cfg.radius();
+    // войне?") — цель обязана и не быть гражданином этой страны, и её страна
+    // обязана реально воевать с этой (DefensePatrolUpgrade — соседняя
+    // оборонительная механика — уже требует именно войны).
+    //
+    // GH#29 п.2 — раньше искал только одну, ближайшую цель. Теперь собирает
+    // всех подходящих в радиусе и возвращает до `max` ближайших.
+    private List<Player> findTargets(Location origin, MilitaryCfg.CrossbowCfg cfg, String countryName, int max) {
+        List<Player> candidates = new ArrayList<>();
         for (Player p : origin.getWorld().getPlayers()) {
             String playerCountry = UnityLauncher.getInstance().countryRegistryJdbc.getCountryOfPlayer(p.getName());
             if (playerCountry == null) continue; // без страны — не с кем воевать
@@ -121,14 +154,14 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
             if (!UnityLauncher.getInstance().warStatusCache.isAtWar(countryName, playerCountry)) continue; // не воюем — не враг
 
             double d = p.getLocation().distance(origin);
-            if (d > bestDist) continue;
+            if (d > cfg.radius()) continue;
             if (!isWithinFiringAngle(origin, p.getLocation(), cfg.blindSpotDegrees())) continue;
             if (!hasLineOfSight(origin, p)) continue;
 
-            bestDist = d;
-            best = p;
+            candidates.add(p);
         }
-        return best;
+        candidates.sort(Comparator.comparingDouble(p -> p.getLocation().distance(origin)));
+        return candidates.size() > max ? candidates.subList(0, max) : candidates;
     }
 
     /** Видимость от якоря до игрока — Location у Player.hasLineOfSight(Block) нет подходящей перегрузки, трассируем блоки сами. */
@@ -151,13 +184,21 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
         return verticalAngleDeg >= -blindSpotDegrees;
     }
 
-    private void shoot(Location origin, Player target, MilitaryCfg.CrossbowCfg cfg, int level) {
-        Vector direction = target.getEyeLocation().toVector().subtract(origin.toVector()).normalize();
-        Arrow arrow = (Arrow) origin.getWorld().spawnEntity(origin.clone().add(0, 0.5, 0), EntityType.ARROW);
+    private void shoot(Location origin, Player target, MilitaryCfg.CrossbowCfg cfg, int effectsLevel, int chanceLevel) {
+        // GH#29 п.1 — направление считаем от той же точки, где стрела реально
+        // спавнится (не от origin без смещения) — раньше это расхождение в
+        // 0.5 блока по всей траектории читалось как "целится на голову выше".
+        Location spawnLoc = origin.clone().add(0, 0.5, 0);
+        Vector direction = target.getEyeLocation().toVector().subtract(spawnLoc.toVector()).normalize();
+        Arrow arrow = (Arrow) origin.getWorld().spawnEntity(spawnLoc, EntityType.ARROW);
         arrow.setVelocity(direction.multiply(ARROW_SPEED));
         arrow.setDamage(cfg.damage());
-        if (level >= 2) {
-            arrow.addCustomEffect(new PotionEffect(PotionEffectType.WEAKNESS, 20 * 5, 0), true);
+
+        if (effectsLevel >= 1 && ThreadLocalRandom.current().nextDouble() < EFFECT_CHANCE[chanceLevel]) {
+            List<PotionEffectType> pool = effectsLevel >= 2 ? FULL_EFFECT_POOL : WEAK_EFFECT_POOL;
+            PotionEffectType type = pool.get(ThreadLocalRandom.current().nextInt(pool.size()));
+            int amplifier = effectsLevel >= 2 ? 1 : 0;
+            arrow.addCustomEffect(new PotionEffect(type, EFFECT_DURATION_TICKS, amplifier), true);
         }
     }
 
