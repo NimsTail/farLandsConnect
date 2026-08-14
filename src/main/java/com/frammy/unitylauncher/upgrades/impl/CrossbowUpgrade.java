@@ -96,12 +96,21 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
         }
     }
 
+    // GH#24 (вопрос "арбалет стреляет только во врагов, с кем страна в
+    // войне?") — раньше НЕТ: цель считалась просто "не гражданин этой
+    // страны", то есть Арбалет одинаково стрелял и по союзникам, и по
+    // нейтралам, и по просто гостям — не только по тем, с чьей страной
+    // реально идёт война. DefensePatrolUpgrade (соседняя оборонительная
+    // механика, см. warStatusCache.isAtWar) уже требует именно войны — эта
+    // проверка была тут пропущена по недосмотру, не специально.
     private Player findTarget(Location origin, MilitaryCfg.CrossbowCfg cfg, String countryName) {
         Player best = null;
         double bestDist = cfg.radius();
         for (Player p : origin.getWorld().getPlayers()) {
             String playerCountry = UnityLauncher.getInstance().countryRegistryJdbc.getCountryOfPlayer(p.getName());
-            if (playerCountry != null && playerCountry.equalsIgnoreCase(countryName)) continue; // не враг
+            if (playerCountry == null) continue; // без страны — не с кем воевать
+            if (playerCountry.equalsIgnoreCase(countryName)) continue; // свой — не враг
+            if (!UnityLauncher.getInstance().warStatusCache.isAtWar(countryName, playerCountry)) continue; // не воюем — не враг
 
             double d = p.getLocation().distance(origin);
             if (d > bestDist) continue;
