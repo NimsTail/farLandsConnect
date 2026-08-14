@@ -435,6 +435,12 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         warStatusCache = new com.frammy.unitylauncher.auth.WarStatusCache(this, farLandsApi);
         warStatusCache.start(200L); // ~10s — war status doesn't need second-level freshness
 
+        // GH #27 "Географические объекты" — infra/geographic-landmarks-
+        // design.md §8 п.4. Website-authoritative, this is the plugin
+        // mirroring the current list onto BlueMap on a slow timer (changes
+        // rarely — no second-level freshness needed, unlike war status).
+        new com.frammy.unitylauncher.military.LandmarkSyncService(this, farLandsApi, blueMapIntegration, getLogger()).start(1200L); // ~60s
+
         // military-diplomacy-design.md §16/§13 Фаза 5 — must match the
         // backend's FRONTIER_REPORT_PERIOD_MS (lib/frontierPressure.ts).
         new com.frammy.unitylauncher.military.FrontierPresenceReporter(this, zoneManager, farLandsApi).start(1200L); // ~60s

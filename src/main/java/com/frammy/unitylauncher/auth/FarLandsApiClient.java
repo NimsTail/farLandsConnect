@@ -596,6 +596,82 @@ public class FarLandsApiClient {
         return out;
     }
 
+    // GH #27 "Географические объекты" — infra/geographic-landmarks-design.md
+    // §8 п.4. Website-authoritative, this is a pure read poll (see
+    // LandmarkSyncService), same shape as fetchActiveWars above.
+    public record LandmarkDto(
+            String id, String world, String category, String markerKind,
+            Double px, Double py, Double pz,
+            List<double[]> points, List<List<double[]>> extraShapes,
+            String officialName
+    ) {}
+
+    public List<LandmarkDto> fetchLandmarks() {
+        List<LandmarkDto> out = new ArrayList<>();
+        if (!isEnabled()) return out;
+
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/plugin/landmarks"))
+                    .timeout(Duration.ofSeconds(10))
+                    .header("Authorization", "Bearer " + token)
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 300) {
+                log.warning("[FarLandsApi] GET /plugin/landmarks -> HTTP " + response.statusCode());
+                return out;
+            }
+
+            JsonObject body = GSON.fromJson(response.body(), JsonObject.class);
+            JsonArray arr = body.getAsJsonArray("landmarks");
+            for (JsonElement el : arr) {
+                JsonObject o = el.getAsJsonObject();
+                String id = o.get("id").getAsString();
+                String world = o.get("world").getAsString();
+                String category = o.get("category").getAsString();
+                String markerKind = o.get("markerKind").getAsString();
+
+                Double px = null, py = null, pz = null;
+                if (o.has("point") && !o.get("point").isJsonNull()) {
+                    JsonObject p = o.getAsJsonObject("point");
+                    px = p.get("x").getAsDouble();
+                    py = p.get("y").getAsDouble();
+                    pz = p.get("z").getAsDouble();
+                }
+
+                List<double[]> points = new ArrayList<>();
+                if (o.has("points") && !o.get("points").isJsonNull()) {
+                    for (JsonElement pe : o.getAsJsonArray("points")) {
+                        JsonObject pp = pe.getAsJsonObject();
+                        points.add(new double[]{pp.get("x").getAsDouble(), pp.get("z").getAsDouble()});
+                    }
+                }
+
+                List<List<double[]>> extraShapes = new ArrayList<>();
+                if (o.has("extraShapes") && !o.get("extraShapes").isJsonNull()) {
+                    for (JsonElement shapeEl : o.getAsJsonArray("extraShapes")) {
+                        List<double[]> shape = new ArrayList<>();
+                        for (JsonElement pe : shapeEl.getAsJsonArray()) {
+                            JsonObject pp = pe.getAsJsonObject();
+                            shape.add(new double[]{pp.get("x").getAsDouble(), pp.get("z").getAsDouble()});
+                        }
+                        extraShapes.add(shape);
+                    }
+                }
+
+                String officialName = (o.has("officialName") && !o.get("officialName").isJsonNull())
+                        ? o.get("officialName").getAsString() : null;
+
+                out.add(new LandmarkDto(id, world, category, markerKind, px, py, pz, points, extraShapes, officialName));
+            }
+        } catch (Exception e) {
+            log.warning("[FarLandsApi] fetchLandmarks failed: " + e);
+        }
+        return out;
+    }
+
     private static String encode(String s) {
         return java.net.URLEncoder.encode(s, java.nio.charset.StandardCharsets.UTF_8);
     }

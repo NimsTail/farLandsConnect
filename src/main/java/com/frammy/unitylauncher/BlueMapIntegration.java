@@ -10,6 +10,7 @@ import de.bluecolored.bluemap.api.markers.ExtrudeMarker;
 import de.bluecolored.bluemap.api.markers.Marker;
 import de.bluecolored.bluemap.api.markers.MarkerSet;
 import de.bluecolored.bluemap.api.markers.POIMarker;
+import de.bluecolored.bluemap.api.markers.ShapeMarker;
 import de.bluecolored.bluemap.api.math.Color;
 import de.bluecolored.bluemap.api.math.Shape;
 import org.bukkit.Bukkit;
@@ -129,6 +130,66 @@ public class BlueMapIntegration {
             poi.setLabel(label);
 
             set.getMarkers().put(id, poi);
+        });
+    }
+
+    // GH #27 "Географические объекты" — infra/geographic-landmarks-design.md
+    // §8 п.4. Website-authoritative (see LandmarkSyncService) — this class
+    // only mirrors whatever the site currently has onto BlueMap, one marker
+    // set for the whole feature, refreshed wholesale on each sync (small
+    // dataset, simplest-correct beats incremental diffing here).
+    private static final String LANDMARK_SET_ID = "geo_landmarks";
+
+    /** Точечный геообъект (пик и т.п.) — обычный POI-маркер, тот же паттерн, что и таблички. */
+    public void applyLandmarkPointMarker(String id, Location loc, String label) {
+        if (loc == null || loc.getWorld() == null || !Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
+        BlueMapAPI.getInstance().flatMap(api -> api.getMap(loc.getWorld().getName())).ifPresent(map -> {
+            Map<String, MarkerSet> sets = map.getMarkerSets();
+            if (sets == null) return;
+            MarkerSet set = sets.computeIfAbsent(LANDMARK_SET_ID, k -> new MarkerSet("Markers"));
+            set.setLabel("Геообъекты");
+
+            POIMarker poi = new POIMarker(id, new Vector3d(loc.getX(), loc.getY(), loc.getZ()));
+            poi.setLabel(label);
+            set.getMarkers().put(id, poi);
+        });
+    }
+
+    /**
+     * Площадной геообъект (река/океан/хребет) — плоский контур без объёма
+     * (в отличие от зон, ExtrudeMarker), почти без заливки/линии — это
+     * подпись, не территория (design doc §1: "не блокирует", "ничья").
+     */
+    public void applyLandmarkAreaMarker(String id, String world, List<Vector3d> points, String label) {
+        if (world == null || points == null || points.size() < 3 || !Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
+        BlueMapAPI.getInstance().flatMap(api -> api.getMap(world)).ifPresent(map -> {
+            Map<String, MarkerSet> sets = map.getMarkerSets();
+            if (sets == null) return;
+            MarkerSet set = sets.computeIfAbsent(LANDMARK_SET_ID, k -> new MarkerSet("Markers"));
+            set.setLabel("Геообъекты");
+
+            Shape shape = blueMapShapeFromExtrude(points);
+            if (shape == null) return;
+            float y = (float) points.getFirst().getY();
+            ShapeMarker marker = new ShapeMarker(id, shape, y);
+            marker.setLabel(label);
+            marker.setLineColor(new Color(244, 207, 78, 0.5f));
+            marker.setFillColor(new Color(244, 207, 78, 0.03f));
+            set.getMarkers().put(id, marker);
+        });
+    }
+
+    /** Убирает маркеры geo_landmarks, которых больше нет на сайте (переименовали/удалили) — вызывается перед повторной проливкой актуального списка. */
+    public void pruneLandmarkMarkers(java.util.Set<String> currentIds) {
+        if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
+        BlueMapAPI.getInstance().ifPresent(api -> {
+            for (BlueMapMap map : api.getMaps()) {
+                Map<String, MarkerSet> sets = map.getMarkerSets();
+                if (sets == null) continue;
+                MarkerSet set = sets.get(LANDMARK_SET_ID);
+                if (set == null || set.getMarkers() == null) continue;
+                set.getMarkers().keySet().removeIf(id -> !currentIds.contains(id));
+            }
         });
     }
 
