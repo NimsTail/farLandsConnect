@@ -1376,6 +1376,14 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
                     ZoneTypeData ztd = zoneLimits.get(type);
                     String typeName = (ztd != null ? ztd.displayName() : type.name());
 
+                    // GH#24 (фидбек 2026-08-14 п.2) — военная зона с назначенной
+                    // специализацией показывает её вместо общего "Военный объект"
+                    // (например "Разведпункт" вместо "Военный объект"); без
+                    // специализации — как и раньше, generic-название типа.
+                    if (type == ZoneType.MILITARY && next.getMilitarySpecialization() != null) {
+                        typeName = next.getMilitarySpecialization().displayName();
+                    }
+
                     barText = ChatColor.GOLD + typeName + ": " +
                             ChatColor.YELLOW + next.getName();
 

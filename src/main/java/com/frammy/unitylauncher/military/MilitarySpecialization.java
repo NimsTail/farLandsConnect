@@ -49,4 +49,16 @@ public enum MilitarySpecialization {
     public boolean unlockedFor(String canonicalCountryId) {
         return purchasedQuota(canonicalCountryId) >= 1;
     }
+
+    /** GH#24 (фидбек 2026-08-14 п.2) — русское имя для action bar при входе в зону.
+     *  Зеркалит frontend/src/locales/ru.json militaryMap.specialization.* — держать в синхроне. */
+    public String displayName() {
+        return switch (this) {
+            case DEFENSE -> "Оборона";
+            case HOSPITAL -> "Военный госпиталь";
+            case RECON -> "Разведпункт";
+            case ATTACK_SUPPORT -> "Поддержка атаки";
+            case LOGISTICS -> "Логистика";
+        };
+    }
 }
