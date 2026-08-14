@@ -44,10 +44,17 @@ import java.util.concurrent.ThreadLocalRandom;
 //  2. Раньше стрелял только в одну, ближайшую цель. Теперь — до 3 разных
 //     целей одним тиком, по одной стреле на каждую (если целей меньше 3 —
 //     соответственно меньше стрел).
-//  3. "Усиление" разделено на три отдельных узла апгрейдов вместо одного
-//     общего (см. militaryCrossbowRate/Effects/EffectChance в seed-данных):
-//     скорострельность, слоты эффектов и шанс эффекта на стреле — каждый
-//     прокачивается независимо.
+//  3. "Усиление" разделено на независимые узлы апгрейдов вместо одного
+//     общего (см. militaryCrossbowRate/Effects/EffectChance/Accuracy в
+//     seed-данных): скорострельность, слоты эффектов, шанс эффекта и
+//     точность — каждый прокачивается независимо.
+//  4. (Фидбек раунда 2) — раньше стрела летела точно по прямой на цель,
+//     уклониться было можно только теоретически; точность (Accuracy) теперь
+//     реальный конус разброса, сужающийся с уровнем.
+//  5. (Фидбек раунда 2) — эффект-пикер: страна выбирает КОНКРЕТНЫЙ набор
+//     эффектов (см. choices в 3_militaryCrossbowEffects) вместо случайного
+//     эффекта из всего пула; если ничего не выбрано — старое поведение
+//     (случайный эффект из пула по уровню) как фоллбек.
 public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
 
     private static final UpgradeKey KEY = UpgradeKey.of("military.crossbow");
@@ -64,19 +71,45 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
     // эффектом.
     private static final double[] EFFECT_CHANCE = {0.20, 0.35, 0.55};
 
-    // GH#29 п.2 "Эффекты" — 0: эффекта нет вообще; 1: один "слот" из слабого
-    // пула; 2: три слота, любой эффект из полного пула. Пока выбор эффекта
-    // из пула случайный при каждом выстреле, а не ручной выбор страной —
-    // сознательное упрощение первого захода (полноценный пикер — отдельная
-    // UI-задача, не в этом тикете).
+    // GH#29 п.2 "Эффекты" — 0: эффекта нет вообще; 1: один "слот" (выбор из
+    // WEAK_EFFECT_POOL, только для фоллбека — см. EFFECT_PRESETS ниже для
+    // выбора страной); 2: три слота (FULL_EFFECT_POOL, тоже фоллбек).
     private static final List<PotionEffectType> WEAK_EFFECT_POOL = List.of(PotionEffectType.SLOWNESS);
     private static final List<PotionEffectType> FULL_EFFECT_POOL =
             List.of(PotionEffectType.SLOWNESS, PotionEffectType.WEAKNESS, PotionEffectType.NAUSEA);
     private static final int EFFECT_DURATION_TICKS = 20 * 4;
 
+    // Фидбек 2026-08-14 (раунд 2) — "я как раз таки и подразумевал пикер
+    // эффектов, добавь его" — точный аналог permission-based выбора, что уже
+    // используют другие choices-апгрейды (см. computePermissionSets на
+    // бэкенде: активному choiceId соответствует ровно одна permission-нода,
+    // остальные снимаются). Набор эффектов подобран на моё усмотрение по
+    // содержимому seed-данных 3_militaryCrossbowEffects.choices — страна
+    // направит, что оставить.
+    private record EffectSpec(PotionEffectType type, int amplifier) {}
+    private record EffectPreset(String permission, List<EffectSpec> specs) {}
+    private static final List<EffectPreset> EFFECT_PRESETS = List.of(
+            new EffectPreset("unity.military.crossbow_effect.weak_slow", List.of(new EffectSpec(PotionEffectType.SLOWNESS, 0))),
+            new EffectPreset("unity.military.crossbow_effect.weak_weakness", List.of(new EffectSpec(PotionEffectType.WEAKNESS, 0))),
+            new EffectPreset("unity.military.crossbow_effect.weak_poison", List.of(new EffectSpec(PotionEffectType.POISON, 0))),
+            new EffectPreset("unity.military.crossbow_effect.full_control", List.of(
+                    new EffectSpec(PotionEffectType.SLOWNESS, 1), new EffectSpec(PotionEffectType.BLINDNESS, 0), new EffectSpec(PotionEffectType.NAUSEA, 0))),
+            new EffectPreset("unity.military.crossbow_effect.full_attrition", List.of(
+                    new EffectSpec(PotionEffectType.POISON, 0), new EffectSpec(PotionEffectType.WEAKNESS, 1), new EffectSpec(PotionEffectType.HUNGER, 0))),
+            new EffectPreset("unity.military.crossbow_effect.full_reveal", List.of(
+                    new EffectSpec(PotionEffectType.GLOWING, 0), new EffectSpec(PotionEffectType.SLOWNESS, 0), new EffectSpec(PotionEffectType.MINING_FATIGUE, 0)))
+    );
+
+    // GH#29 (фидбек раунд 2) "Точность" — раньше выстрел шёл идеально по
+    // прямой (уклониться нельзя было практически). Угол (градусы)
+    // максимального случайного отклонения направления стрелы от идеальной
+    // прямой на цель — сужается с уровнем. Черновые числа.
+    private static final double[] INACCURACY_DEGREES = {9.0, 4.0, 1.0};
+
     private static final String RATE_PERM_BASE = "unity.military.crossbow_rate";
     private static final String EFFECTS_PERM_BASE = "unity.military.crossbow_effects";
     private static final String CHANCE_PERM_BASE = "unity.military.crossbow_chance";
+    private static final String ACCURACY_PERM_BASE = "unity.military.crossbow_accuracy";
 
     // markerId -> когда последний раз стреляли (мс) — один залп за (динамический) период, простейший кулдаун на объект.
     private final Map<String, Long> lastShotByZone = new ConcurrentHashMap<>();
@@ -113,10 +146,11 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
             if (!subtypeService.isActiveAs(z, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.CROSSBOW)) continue;
 
             String canonicalCountry = UpgradeCondition.zoneCountryCanonical(z);
-            // GH#29 — три независимых уровня прокачки вместо одного общего "усиления".
+            // GH#29 — независимые уровни прокачки вместо одного общего "усиления".
             int rateLevel = canonicalCountry == null ? 0 : UpgradeCondition.countryMaxLevel(canonicalCountry, RATE_PERM_BASE, 2);
             int effectsLevel = canonicalCountry == null ? 0 : UpgradeCondition.countryMaxLevel(canonicalCountry, EFFECTS_PERM_BASE, 2);
             int chanceLevel = canonicalCountry == null ? 0 : UpgradeCondition.countryMaxLevel(canonicalCountry, CHANCE_PERM_BASE, 2);
+            int accuracyLevel = canonicalCountry == null ? 0 : UpgradeCondition.countryMaxLevel(canonicalCountry, ACCURACY_PERM_BASE, 2);
 
             // GH#24 (фидбек 2026-08-14 п.4) — якорь обязателен, без него не стреляет вообще.
             Location origin = z.getMilitaryAnchorLocation();
@@ -133,7 +167,7 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
             lastShotByZone.put(markerId, now);
 
             for (Player target : targets) {
-                shoot(origin, target, cfg, effectsLevel, chanceLevel);
+                shoot(origin, target, cfg, canonicalCountry, effectsLevel, chanceLevel, accuracyLevel);
             }
         }
     }
@@ -184,22 +218,57 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
         return verticalAngleDeg >= -blindSpotDegrees;
     }
 
-    private void shoot(Location origin, Player target, MilitaryCfg.CrossbowCfg cfg, int effectsLevel, int chanceLevel) {
+    private void shoot(Location origin, Player target, MilitaryCfg.CrossbowCfg cfg, String canonicalCountry, int effectsLevel, int chanceLevel, int accuracyLevel) {
         // GH#29 п.1 — направление считаем от той же точки, где стрела реально
         // спавнится (не от origin без смещения) — раньше это расхождение в
         // 0.5 блока по всей траектории читалось как "целится на голову выше".
         Location spawnLoc = origin.clone().add(0, 0.5, 0);
         Vector direction = target.getEyeLocation().toVector().subtract(spawnLoc.toVector()).normalize();
+        // GH#29 (фидбек раунд 2) — реальный разброс вместо идеальной прямой.
+        direction = applySpread(direction, INACCURACY_DEGREES[accuracyLevel]);
         Arrow arrow = (Arrow) origin.getWorld().spawnEntity(spawnLoc, EntityType.ARROW);
         arrow.setVelocity(direction.multiply(ARROW_SPEED));
         arrow.setDamage(cfg.damage());
 
         if (effectsLevel >= 1 && ThreadLocalRandom.current().nextDouble() < EFFECT_CHANCE[chanceLevel]) {
-            List<PotionEffectType> pool = effectsLevel >= 2 ? FULL_EFFECT_POOL : WEAK_EFFECT_POOL;
-            PotionEffectType type = pool.get(ThreadLocalRandom.current().nextInt(pool.size()));
-            int amplifier = effectsLevel >= 2 ? 1 : 0;
-            arrow.addCustomEffect(new PotionEffect(type, EFFECT_DURATION_TICKS, amplifier), true);
+            EffectPreset preset = resolveActivePreset(canonicalCountry);
+            if (preset != null) {
+                EffectSpec spec = preset.specs().get(ThreadLocalRandom.current().nextInt(preset.specs().size()));
+                arrow.addCustomEffect(new PotionEffect(spec.type(), EFFECT_DURATION_TICKS, spec.amplifier()), true);
+            } else {
+                // Ничего не выбрано (choiceId ещё не установлен) — старое
+                // поведение как фоллбек: случайный эффект из пула по уровню.
+                List<PotionEffectType> pool = effectsLevel >= 2 ? FULL_EFFECT_POOL : WEAK_EFFECT_POOL;
+                PotionEffectType type = pool.get(ThreadLocalRandom.current().nextInt(pool.size()));
+                int amplifier = effectsLevel >= 2 ? 1 : 0;
+                arrow.addCustomEffect(new PotionEffect(type, EFFECT_DURATION_TICKS, amplifier), true);
+            }
         }
+    }
+
+    /** Какой из выбираемых наборов эффектов сейчас активен у страны — первый, чья permission-нода реально выдана (см. класс-javadoc). */
+    private EffectPreset resolveActivePreset(String canonicalCountry) {
+        if (canonicalCountry == null) return null;
+        for (EffectPreset preset : EFFECT_PRESETS) {
+            if (UpgradeCondition.countryHasNode(canonicalCountry, preset.permission())) return preset;
+        }
+        return null;
+    }
+
+    /** Случайно отклоняет направление в пределах конуса maxDegrees — равномерно по площади (sqrt), не только по углу, иначе выстрелы кучкуются у центра. */
+    private Vector applySpread(Vector dir, double maxDegrees) {
+        if (maxDegrees <= 0) return dir;
+        Vector arbitrary = Math.abs(dir.getY()) < 0.99 ? new Vector(0, 1, 0) : new Vector(1, 0, 0);
+        Vector right = dir.clone().crossProduct(arbitrary).normalize();
+        Vector up = dir.clone().crossProduct(right).normalize();
+
+        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+        double angle = Math.toRadians(maxDegrees) * Math.sqrt(rnd.nextDouble());
+        double rotation = rnd.nextDouble() * 2 * Math.PI;
+        double spreadMagnitude = Math.tan(angle);
+
+        Vector offset = right.multiply(Math.cos(rotation) * spreadMagnitude).add(up.multiply(Math.sin(rotation) * spreadMagnitude));
+        return dir.clone().add(offset).normalize();
     }
 
     @Override

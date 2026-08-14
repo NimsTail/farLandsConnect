@@ -11,15 +11,20 @@ import com.frammy.unitylauncher.zones.ZoneInfo;
 import com.frammy.unitylauncher.zones.ZoneType;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.Zombie;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.EntityTargetLivingEntityEvent;
+import org.bukkit.inventory.EntityEquipment;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.metadata.FixedMetadataValue;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.BoundingBox;
@@ -35,28 +40,37 @@ import java.util.concurrent.ThreadLocalRandom;
 // пост" — в отличие от DefensePatrolUpgrade (постоянный патруль), этот
 // работает по триггеру: враг ТОЛЬКО ЧТО пересёк границу объекта (переход
 // "не было рядом" -> "стал рядом" на предыдущем/текущем тике, не факт
-// нахождения каждый тик) — спавнит одну волну и уходит на кулдаун. Тип/
-// сила волны растут с уровнем. Мобы без дропа/опыта — это защита, не ферма.
+// нахождения каждый тик) — спавнит одну волну и уходит на кулдаун.
 //
-// GH#30 — доработка по фидбеку:
-//  1. Дроп/опыт уже были отключены с самого начала (onDeath ниже) — вопрос
-//     "есть ли способ" был скорее уточняющим, чем багом; оставил как есть.
-//  2. Мобы волны раньше спавнились все в одной точке (center объекта) —
-//     теперь каждый моб получает свою случайную точку внутри реальной
-//     территории объекта (rejection sampling по AABB + contains2D), а не
-//     одну общую.
-//  3. Раньше "враг" для срабатывания = "не гражданин этой страны" (любой
-//     чужак), и заспавненные мобы атаковали вообще любого не-своего —
-//     теперь и триггер, и таргетинг требуют реальной войны (как и
-//     DefensePatrolUpgrade/CrossbowUpgrade) — вне войны пост неактивен.
-//  4. "Интенсивность" волны теперь зависит от того, сколько граждан страны
-//     сейчас онлайн — некому защищаться самим, значит пост компенсирует
-//     дополнительным мобом; чем больше живых защитников на месте, тем
-//     меньше нужен буст (но не ниже 1 моба, чтобы совсем не пропадал).
+// GH#30 — доработка по фидбеку (раунд 1):
+//  1. Дроп/опыт уже были отключены с самого начала (onDeath ниже).
+//  2. Мобы волны получают каждый свою случайную точку внутри реальной
+//     территории объекта (rejection sampling по AABB + contains2D).
+//  3. И триггер, и таргетинг заспавненных мобов требуют реальной войны.
+//  4. "Интенсивность" волны зависит от числа онлайн-защитников страны.
+//
+// GH#30 (раунд 2) — по фидбеку "мобы дают дроп и опыт" (пункт 2, при том что
+// onDeath их явно чистит) и "накидай пачки мобов сам":
+//  5. Состав волны — теперь настоящий выбор страны (см. 3_militaryLiveDefensePack
+//     choices в seed-данных): страна выбирает конкретную "пачку" мобов,
+//     разблокированную уровнем узла; без выбора — старый фоллбек (1 моб по
+//     биому). Наборы — на моё усмотрение по примеру, который дал пользователь
+//     в фидбеке (зомби/скелеты на 1 уровне, усиленные варианты на 2-3).
+//  6. onDeath поднят до EventPriority.HIGHEST — если другой плагин слушает
+//     EntityDeathEvent на более раннем приоритете и что-то добавляет в
+//     drops/exp уже ПОСЛЕ нашей чистки, это шло бы вразрез с "без дропа/
+//     опыта"; на HIGHEST мы почти наверняка последние. Код самой очистки не
+//     менялся — он был технически верным с самого начала, так что если баг
+//     воспроизводился именно на СВЕЖЕМ джарнике (не предыдущем, ещё не
+//     учитывающем фиксы этой сессии), тут может быть именно конфликт с
+//     другим плагином/приоритетом, а не логическая ошибка в самой очистке.
+//  7. Мобы поста теперь именованы (видимый CustomName) — видно, что это
+//     защита объекта, не случайный моб.
 public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listener {
 
     private static final UpgradeKey KEY = UpgradeKey.of("military.live_defense");
     private static final String META_KEY = "unityLiveDefensePost";
+    private static final String MOB_NAME = "§c⚔ Оборона поста";
 
     // GH#30 п.4 — черновые числа: при 0 онлайн-защитников волна получает
     // +1 моба сверху; каждый онлайн-защитник после первого снимает по
@@ -69,10 +83,26 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
     private static final int RANDOM_POINT_ATTEMPTS = 12;
 
     // GH#30 (Улучшения п.2) "Время между спавном" — независимый
-    // параметрический апгрейд, множитель на cfg.cooldownTicks(). Черновые
-    // числа, не сильно драматичные, как и просили.
+    // параметрический апгрейд, множитель на cfg.cooldownTicks().
     private static final String COOLDOWN_PERM_BASE = "unity.military.live_defense_cooldown";
     private static final double[] COOLDOWN_MULTIPLIER = {1.0, 0.75, 0.55};
+
+    // GH#30 (раунд 2, Улучшения п.1) "Состав волны" — permission-выбор, тот
+    // же приём, что и у CrossbowUpgrade.EFFECT_PRESETS (см. её javadoc).
+    // Наборы подобраны по примеру из фидбека: 1 уровень — простые
+    // зомби/скелеты, 2 — усиленные варианты, 3 — ведьмы/разбойники.
+    private record MobSpec(EntityType type, int count, boolean baby, double armorChance) {}
+    private record Pack(String permission, List<MobSpec> mobs) {}
+    private static final List<Pack> PACKS = List.of(
+            new Pack("unity.military.live_defense_pack.zombie_pack", List.of(new MobSpec(EntityType.ZOMBIE, 3, false, 0.0))),
+            new Pack("unity.military.live_defense_pack.skeleton_small", List.of(new MobSpec(EntityType.SKELETON, 2, false, 0.0))),
+            new Pack("unity.military.live_defense_pack.skeleton_large", List.of(new MobSpec(EntityType.SKELETON, 4, false, 0.0))),
+            new Pack("unity.military.live_defense_pack.zombie_armored", List.of(new MobSpec(EntityType.ZOMBIE, 3, false, 0.5))),
+            new Pack("unity.military.live_defense_pack.witch_duo", List.of(
+                    new MobSpec(EntityType.WITCH, 2, false, 0.0), new MobSpec(EntityType.ZOMBIE, 2, false, 0.5))),
+            new Pack("unity.military.live_defense_pack.raid_mix", List.of(
+                    new MobSpec(EntityType.WITCH, 1, false, 0.0), new MobSpec(EntityType.PILLAGER, 2, false, 0.0), new MobSpec(EntityType.ZOMBIE, 3, true, 0.0)))
+    );
 
     @Override public UpgradeKey key() { return KEY; }
     @Override public UpgradeScope scope() { return UpgradeScope.COUNTRY; }
@@ -115,12 +145,6 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
 
             String canonicalCountry = UpgradeCondition.zoneCountryCanonical(z);
             if (canonicalCountry == null) continue; // объект без страны — быть не должно, но на всякий случай
-            // Фидбек 2026-08-14 — общий узел "усиление" (тип/размер волны по
-            // уровню) убран целиком; состав волны пока фиксирован на базовом
-            // (level=1 — только биомный моб) до отдельного апгрейда "выбор
-            // пачки мобов" (GH#30, Улучшения п.1), который ещё ждёт
-            // подтверждения конкретных наборов от пользователя.
-            int level = 1;
 
             Location center = z.getCenter();
             if (center == null || center.getWorld() == null) continue;
@@ -151,16 +175,25 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
             if (lastTrigger != null && now - lastTrigger < cooldownMs) continue;
 
             lastTriggerByZone.put(markerId, now);
-            spawnWave(z, center, markerId, countryName, level);
+            spawnWave(z, center, markerId, countryName, canonicalCountry);
         }
     }
 
-    /** Уровень 1 — зомби/скелет по биому (как у Обороны); 2 — добавляется страж (vindicator); 3 — ещё разбойник (pillager). Черновой набор. */
-    private void spawnWave(ZoneInfo z, Location center, String markerId, String countryName, int level) {
-        List<EntityType> types = new ArrayList<>();
-        types.add(DefensePatrolBiomeMob.forBiome(center));
-        if (level >= 2) types.add(EntityType.VINDICATOR);
-        if (level >= 3) types.add(EntityType.PILLAGER);
+    private void spawnWave(ZoneInfo z, Location center, String markerId, String countryName, String canonicalCountry) {
+        List<MobSpec> mobs = resolveActivePack(canonicalCountry);
+        if (mobs == null) {
+            // Ничего не выбрано (узел не куплен вообще, или куплен но выбор
+            // ещё не сделан) — старый фоллбек: 1 моб по биому.
+            mobs = List.of(new MobSpec(DefensePatrolBiomeMob.forBiome(center), 1, false, 0.0));
+        }
+
+        // Разворачиваем спецификацию пачки в плоский список отдельных мобов —
+        // дальше интенсивность по онлайну применяется к нему целиком, не
+        // заботясь о том, откуда список взялся (пачка или фоллбек).
+        List<MobSpec> flatUnits = new ArrayList<>();
+        for (MobSpec spec : mobs) {
+            for (int i = 0; i < spec.count(); i++) flatUnits.add(new MobSpec(spec.type(), 1, spec.baby(), spec.armorChance()));
+        }
 
         // GH#30 п.4 — интенсивность волны обратно пропорциональна числу
         // онлайн-защитников: некому защищаться -> пост усиливается; чем
@@ -170,22 +203,52 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
                 .filter(p -> countryName.equalsIgnoreCase(UnityLauncher.getInstance().countryRegistryJdbc.getCountryOfPlayer(p.getName())))
                 .count();
         if (ownersOnline == 0) {
-            types.add(types.get(0)); // никто не защищается — усиление волны на 1 моба
+            flatUnits.add(flatUnits.get(0)); // никто не защищается — усиление волны на 1 моба
         } else if (ownersOnline > 1) {
-            int toRemove = Math.min(types.size() - MIN_WAVE_SIZE, ownersOnline - 1);
-            for (int i = 0; i < toRemove; i++) types.remove(types.size() - 1);
+            int toRemove = Math.min(flatUnits.size() - MIN_WAVE_SIZE, ownersOnline - 1);
+            for (int i = 0; i < toRemove; i++) flatUnits.remove(flatUnits.size() - 1);
         }
 
-        for (EntityType type : types) {
+        for (MobSpec spec : flatUnits) {
             // GH#30 п.2 — своя случайная точка внутри территории объекта
             // для каждого моба волны, не общий center на всех.
             Location spawnLoc = randomPointIn(z, center);
-            Entity e = spawnLoc.getWorld().spawnEntity(spawnLoc, type);
-            if (e instanceof LivingEntity mob) {
-                mob.setMetadata(META_KEY, new FixedMetadataValue(plugin(), markerId));
-                mob.setRemoveWhenFarAway(true);
+            Entity e = spawnLoc.getWorld().spawnEntity(spawnLoc, spec.type());
+            if (!(e instanceof LivingEntity mob)) continue;
+
+            mob.setMetadata(META_KEY, new FixedMetadataValue(plugin(), markerId));
+            mob.setRemoveWhenFarAway(true);
+            // GH#30 (раунд 2, п.3) — видимое имя, чтобы отличать от случайных мобов.
+            mob.setCustomName(MOB_NAME);
+            mob.setCustomNameVisible(true);
+
+            if (spec.baby() && mob instanceof Zombie zombie) zombie.setBaby(true);
+            if (spec.armorChance() > 0 && ThreadLocalRandom.current().nextDouble() < spec.armorChance()) {
+                equipIronArmor(mob);
+            }
+            if (spec.type() == EntityType.PILLAGER) {
+                EntityEquipment eq = mob.getEquipment();
+                if (eq != null) eq.setItemInMainHand(new ItemStack(Material.CROSSBOW));
             }
         }
+    }
+
+    /** Какая "пачка" сейчас выбрана страной — первая, чья permission-нода реально выдана (см. класс-javadoc). Null, если ничего не выбрано/не куплено. */
+    private List<MobSpec> resolveActivePack(String canonicalCountry) {
+        if (canonicalCountry == null) return null;
+        for (Pack pack : PACKS) {
+            if (UpgradeCondition.countryHasNode(canonicalCountry, pack.permission())) return pack.mobs();
+        }
+        return null;
+    }
+
+    private void equipIronArmor(LivingEntity mob) {
+        EntityEquipment eq = mob.getEquipment();
+        if (eq == null) return;
+        eq.setHelmet(new ItemStack(Material.IRON_HELMET));
+        eq.setChestplate(new ItemStack(Material.IRON_CHESTPLATE));
+        eq.setLeggings(new ItemStack(Material.IRON_LEGGINGS));
+        eq.setBoots(new ItemStack(Material.IRON_BOOTS));
     }
 
     /** Случайная точка внутри реальной территории зоны (rejection sampling по AABB), с фоллбеком на center при неудаче/маленьком полигоне. */
@@ -205,8 +268,8 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
         return fallbackCenter;
     }
 
-    /** Без дропа/опыта — это защита объекта, не источник фарма (GH#24). */
-    @EventHandler(ignoreCancelled = true)
+    /** Без дропа/опыта — это защита объекта, не источник фарма (GH#24). HIGHEST — см. класс-javadoc п.6. */
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onDeath(EntityDeathEvent e) {
         if (e.getEntity().getMetadata(META_KEY).isEmpty()) return;
         e.getDrops().clear();
