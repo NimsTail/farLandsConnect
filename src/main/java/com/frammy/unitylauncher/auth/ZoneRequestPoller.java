@@ -77,6 +77,10 @@ public class ZoneRequestPoller {
                 processMilitarySpecQuotaSync(req);
                 return;
             }
+            if ("military_defense_subtype_quota_sync".equals(req.action())) {
+                processMilitaryDefenseSubtypeQuotaSync(req);
+                return;
+            }
             if ("START_RECON_MINIGAME".equals(req.action())) {
                 processStartReconMinigame(req);
                 return;
@@ -189,6 +193,30 @@ public class ZoneRequestPoller {
         JsonObject result = new JsonObject();
         for (var spec : com.frammy.unitylauncher.military.MilitarySpecialization.values()) {
             result.addProperty(spec.name(), specService.availableQuota(canonical, spec));
+        }
+        JsonArray wrapper = new JsonArray();
+        wrapper.add(result);
+        api.reportZoneRequestResult(req.id(), true, null, null, wrapper);
+    }
+
+    /**
+     * Read-only — GH#24 (фидбек 2026-08-14 п.1/4): та же идея, что
+     * processMilitarySpecQuotaSync, но для типов обороны внутри DEFENSE.
+     */
+    private void processMilitaryDefenseSubtypeQuotaSync(FarLandsApiClient.PendingZoneRequest req) {
+        String countryName = (req.payload() != null && req.payload().has("countryName"))
+                ? req.payload().get("countryName").getAsString()
+                : null;
+        if (countryName == null) {
+            api.reportZoneRequestResult(req.id(), false, "missing_country_name", null);
+            return;
+        }
+
+        String canonical = com.frammy.unitylauncher.upgrades.UpgradeCondition.resolveCountryGroupId(countryName);
+        var subtypeService = com.frammy.unitylauncher.UnityLauncher.getInstance().militaryDefenseSubtypeService;
+        JsonObject result = new JsonObject();
+        for (var subtype : com.frammy.unitylauncher.military.MilitaryDefenseSubtype.values()) {
+            result.addProperty(subtype.name(), subtypeService.availableQuota(canonical, subtype));
         }
         JsonArray wrapper = new JsonArray();
         wrapper.add(result);
@@ -312,6 +340,18 @@ public class ZoneRequestPoller {
         // null всё это время. Осмысленно только вместе с militarySpecializationSwitching.
         var rawSpec = z.getMilitarySpecialization();
         o.addProperty("militarySpecializationPrevious", z.isSpecializationSwitching() && rawSpec != null ? rawSpec.name() : null);
+
+        // GH#24 (фидбек 2026-08-14 п.1/4) — тип обороны, тот же паттерн зеркалирования, что и специализация выше.
+        var subtypeService = com.frammy.unitylauncher.UnityLauncher.getInstance().militaryDefenseSubtypeService;
+        var currentSubtype = subtypeService.current(z);
+        o.addProperty("militaryDefenseSubtype", currentSubtype != null ? currentSubtype.name() : null);
+        o.addProperty("militaryDefenseSubtypeSwitching", z.isDefenseSubtypeSwitching());
+        o.addProperty("militaryDefenseSubtypeSwitchLockedUntil", z.isDefenseSubtypeSwitching() ? z.getDefenseSubtypeSwitchLockedUntil() : 0L);
+        var pendingSubtype = z.getPendingMilitaryDefenseSubtype();
+        o.addProperty("militaryDefenseSubtypePending", z.isDefenseSubtypeSwitching() && pendingSubtype != null ? pendingSubtype.name() : null);
+        var rawSubtype = z.getMilitaryDefenseSubtype();
+        o.addProperty("militaryDefenseSubtypePrevious", z.isDefenseSubtypeSwitching() && rawSubtype != null ? rawSubtype.name() : null);
+
         // GH#24 (защита от закапывания) — анкер считается "живым" только
         // пока он и стоит, и остаётся выше Y63/открыт небу — см.
         // MilitaryAnchorService.isExposed. Закопали уже стоявший якорь —

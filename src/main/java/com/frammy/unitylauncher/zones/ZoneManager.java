@@ -224,6 +224,27 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
         return outcome.success() ? ZoneOpResult.ok(outcome.message(), markerId) : ZoneOpResult.fail(outcome.message());
     }
 
+    // GH#24 (фидбек 2026-08-14 п.1/4) — тот же паттерн, что setMilitarySpecializationWebCore выше, одним уровнем ниже.
+    private ZoneOpResult setMilitaryDefenseSubtypeWebCore(UUID playerUuid, String markerId, String subtypeRaw) {
+        String playerName = Bukkit.getOfflinePlayer(playerUuid).getName();
+        if (playerName == null) return ZoneOpResult.fail("Не удалось определить игрока по UUID.");
+        if (markerId == null) return ZoneOpResult.fail("Не указана зона.");
+        ZoneInfo zi = zoneList.get(markerId);
+        if (zi == null) return ZoneOpResult.fail("Зона не найдена.");
+        if (zi.getType() != ZoneType.MILITARY) return ZoneOpResult.fail("Тип обороны есть только у военных объектов.");
+        if (!NameUtil.eqCi(zi.getOwner(), playerName)) return ZoneOpResult.fail("Вы не владелец этого объекта.");
+
+        com.frammy.unitylauncher.military.MilitaryDefenseSubtype target;
+        try {
+            target = com.frammy.unitylauncher.military.MilitaryDefenseSubtype.valueOf(String.valueOf(subtypeRaw));
+        } catch (Exception ex) {
+            return ZoneOpResult.fail("Неизвестный тип обороны: " + subtypeRaw);
+        }
+
+        var outcome = com.frammy.unitylauncher.UnityLauncher.getInstance().militaryDefenseSubtypeService.requestSwitch(zi, target);
+        return outcome.success() ? ZoneOpResult.ok(outcome.message(), markerId) : ZoneOpResult.fail(outcome.message());
+    }
+
     public void handleCommand(Player p, String[] args) {
         commands.handle(p, args);
     }
@@ -1605,6 +1626,13 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
             return r.success() ? Result.ok(r.markerId()) : Result.error(stripColor(r.message()));
         }
 
+        if (request.action() == ZoneWebRequestService.Action.SET_MILITARY_DEFENSE_SUBTYPE) {
+            String subtypeRaw = (request.payload() != null && request.payload().has("defenseSubtype"))
+                    ? request.payload().get("defenseSubtype").getAsString() : null;
+            ZoneOpResult r = setMilitaryDefenseSubtypeWebCore(request.playerUuid(), request.markerId(), subtypeRaw);
+            return r.success() ? Result.ok(r.markerId()) : Result.error(stripColor(r.message()));
+        }
+
         if (request.action() == ZoneWebRequestService.Action.CREATE) {
             World world = (request.worldName() != null) ? Bukkit.getWorld(request.worldName()) : null;
             List<List<double[]>> shapesXZ = parseShapesFromPayload(request.payload());
@@ -1775,6 +1803,7 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
             // Перехватывается раньше, в handleWebRequest-обёртке (см. выше по файлу) — сюда не доходит,
             // но switch-выражение всё равно требует ветку на все значения enum.
             case SET_MILITARY_SPECIALIZATION -> ZoneOpResult.fail("Внутренняя ошибка: SET_MILITARY_SPECIALIZATION должен обрабатываться раньше.");
+            case SET_MILITARY_DEFENSE_SUBTYPE -> ZoneOpResult.fail("Внутренняя ошибка: SET_MILITARY_DEFENSE_SUBTYPE должен обрабатываться раньше.");
         };
     }
 

@@ -2,7 +2,6 @@ package com.frammy.unitylauncher.upgrades.impl;
 
 import com.frammy.unitylauncher.UnityLauncher;
 import com.frammy.unitylauncher.military.MilitaryAnchorService;
-import com.frammy.unitylauncher.military.MilitarySpecialization;
 import com.frammy.unitylauncher.upgrades.UpgradeCondition;
 import com.frammy.unitylauncher.upgrades.config.types.MilitaryCfg;
 import com.frammy.unitylauncher.upgrades.core.BaseUpgrade;
@@ -58,16 +57,18 @@ public final class ScorchUpgrade extends BaseUpgrade implements Listener {
     }
 
     private void tick(MilitaryCfg.ScorchCfg cfg) {
-        var specService = UnityLauncher.getInstance().militarySpecializationService;
+        var subtypeService = UnityLauncher.getInstance().militaryDefenseSubtypeService;
         long cooldownMs = cfg.cooldownTicks() * 50L;
         long now = System.currentTimeMillis();
 
         for (ZoneInfo z : zones().getAllZonesSnapshot()) {
             if (z.getType() != ZoneType.MILITARY) continue;
-            if (!specService.isActiveAs(z, MilitarySpecialization.DEFENSE)) continue;
+            // GH#24 (фидбек 2026-08-14 п.1/4) — только на объекте, реально вкачанном в SCORCH.
+            if (!subtypeService.isActiveAs(z, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.SCORCH)) continue;
 
             String canonicalCountry = UpgradeCondition.zoneCountryCanonical(z);
-            int level = canonicalCountry == null ? 0 : UpgradeCondition.countryMaxLevel(canonicalCountry, cfg.permBase(), 2);
+            int level = canonicalCountry == null ? 0 : UpgradeCondition.countryMaxLevel(
+                    canonicalCountry, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.SCORCH.levelPermBase(), 2);
             if (level < 1) continue;
 
             Location center = z.getCenter();

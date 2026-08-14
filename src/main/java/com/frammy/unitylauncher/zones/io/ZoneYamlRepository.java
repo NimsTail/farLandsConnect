@@ -162,6 +162,22 @@ public final class ZoneYamlRepository {
                     zi.setSpecializationSwitchLockedUntil(z.getLong("specializationSwitchLockedUntil", 0L));
                     zi.setSpecializationChangedAt(z.getLong("specializationChangedAt", 0L));
 
+                    // GH#24 (фидбек 2026-08-14 п.1/4) — тип обороны, тот же паттерн выше.
+                    String subtypeRaw = z.getString("militaryDefenseSubtype", null);
+                    if (subtypeRaw != null) {
+                        try {
+                            zi.setMilitaryDefenseSubtype(com.frammy.unitylauncher.military.MilitaryDefenseSubtype.valueOf(subtypeRaw));
+                        } catch (IllegalArgumentException ignore) { }
+                    }
+                    String pendingSubtypeRaw = z.getString("pendingMilitaryDefenseSubtype", null);
+                    if (pendingSubtypeRaw != null) {
+                        try {
+                            zi.setPendingMilitaryDefenseSubtype(com.frammy.unitylauncher.military.MilitaryDefenseSubtype.valueOf(pendingSubtypeRaw));
+                        } catch (IllegalArgumentException ignore) { }
+                    }
+                    zi.setDefenseSubtypeSwitchLockedUntil(z.getLong("defenseSubtypeSwitchLockedUntil", 0L));
+                    zi.setDefenseSubtypeChangedAt(z.getLong("defenseSubtypeChangedAt", 0L));
+
                     ConfigurationSection anchorSec = z.getConfigurationSection("militaryAnchor");
                     if (anchorSec != null) {
                         String wName = (worldOverride != null ? worldOverride : anchorSec.getString("world"));
@@ -261,6 +277,18 @@ public final class ZoneYamlRepository {
             }
             if (z.getSpecializationChangedAt() > 0) {
                 zonesConfig.set(path + ".specializationChangedAt", z.getSpecializationChangedAt());
+            }
+            if (z.getMilitaryDefenseSubtype() != null) {
+                zonesConfig.set(path + ".militaryDefenseSubtype", z.getMilitaryDefenseSubtype().name());
+            }
+            if (z.getPendingMilitaryDefenseSubtype() != null) {
+                zonesConfig.set(path + ".pendingMilitaryDefenseSubtype", z.getPendingMilitaryDefenseSubtype().name());
+            }
+            if (z.getDefenseSubtypeSwitchLockedUntil() > 0) {
+                zonesConfig.set(path + ".defenseSubtypeSwitchLockedUntil", z.getDefenseSubtypeSwitchLockedUntil());
+            }
+            if (z.getDefenseSubtypeChangedAt() > 0) {
+                zonesConfig.set(path + ".defenseSubtypeChangedAt", z.getDefenseSubtypeChangedAt());
             }
             if (z.getMilitaryAnchorLocation() != null) {
                 Location a = z.getMilitaryAnchorLocation();

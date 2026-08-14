@@ -78,6 +78,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     // military-diplomacy-design.md §4.1, GH#24 — per-zone "тип сооружения" +
     // физический анкер. Конструируется сразу после zoneManager (onEnable).
     public com.frammy.unitylauncher.military.MilitarySpecializationService militarySpecializationService;
+    // GH#24 (фидбек 2026-08-14 п.1/4) — "тип сооружения" под DEFENSE, тот же
+    // паттерн одним уровнем ниже. Конструируется сразу после militarySpecializationService.
+    public com.frammy.unitylauncher.military.MilitaryDefenseSubtypeService militaryDefenseSubtypeService;
     // military-diplomacy-design.md §4.1 п.3, GH#24 п.1 — Колокол-timing
     // мини-игра разведки (см. ZoneRequestPoller.processStartReconMinigame).
     public com.frammy.unitylauncher.military.MilitaryReconMinigame militaryReconMinigame;
@@ -174,6 +177,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         // специализация + физический анкер (Колокол и т.п.). Anchor-листенер
         // always-on (не апгрейд сам по себе — как MilitaryIncidentListener выше).
         militarySpecializationService = new com.frammy.unitylauncher.military.MilitarySpecializationService(zoneManager);
+        militaryDefenseSubtypeService = new com.frammy.unitylauncher.military.MilitaryDefenseSubtypeService(zoneManager);
         Bukkit.getPluginManager().registerEvents(
                 new com.frammy.unitylauncher.military.MilitaryAnchorService(militarySpecializationService), this);
         militaryReconMinigame = new com.frammy.unitylauncher.military.MilitaryReconMinigame(militarySpecializationService);

@@ -1,7 +1,6 @@
 package com.frammy.unitylauncher.upgrades.impl;
 
 import com.frammy.unitylauncher.UnityLauncher;
-import com.frammy.unitylauncher.military.MilitarySpecialization;
 import com.frammy.unitylauncher.upgrades.UpgradeCondition;
 import com.frammy.unitylauncher.upgrades.config.types.MilitaryCfg;
 import com.frammy.unitylauncher.upgrades.core.BaseUpgrade;
@@ -68,14 +67,21 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
     }
 
     private void tick(MilitaryCfg.LiveDefenseCfg cfg) {
-        var specService = UnityLauncher.getInstance().militarySpecializationService;
+        var subtypeService = UnityLauncher.getInstance().militaryDefenseSubtypeService;
 
         for (ZoneInfo z : zones().getAllZonesSnapshot()) {
             if (z.getType() != ZoneType.MILITARY) continue;
-            if (!specService.isActiveAs(z, MilitarySpecialization.DEFENSE)) continue;
+            // GH#24 (фидбек 2026-08-14 п.1/4) — раньше запускался на ЛЮБОЙ
+            // DEFENSE-зоне страны, купившей этот тип, разом со всеми
+            // остальными; теперь только на той, что реально вкачана именно
+            // в LIVE_DEFENSE (см. MilitaryDefenseSubtypeService).
+            if (!subtypeService.isActiveAs(z, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.LIVE_DEFENSE)) continue;
 
             String canonicalCountry = UpgradeCondition.zoneCountryCanonical(z);
-            int level = canonicalCountry == null ? 0 : UpgradeCondition.countryMaxLevel(canonicalCountry, cfg.permBase(), 3);
+            // Сила эффекта — теперь отдельный узел от квоты "сколько объектов
+            // можно" (cfg.permBase()), см. MilitaryDefenseSubtype.levelPermBase().
+            int level = canonicalCountry == null ? 0 : UpgradeCondition.countryMaxLevel(
+                    canonicalCountry, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.LIVE_DEFENSE.levelPermBase(), 3);
             if (level < 1) continue;
 
             Location center = z.getCenter();

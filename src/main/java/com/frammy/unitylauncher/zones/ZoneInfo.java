@@ -1,5 +1,6 @@
 package com.frammy.unitylauncher.zones;
 
+import com.frammy.unitylauncher.military.MilitaryDefenseSubtype;
 import com.frammy.unitylauncher.military.MilitarySpecialization;
 import org.bukkit.Color;
 import org.bukkit.Location;
@@ -65,6 +66,32 @@ public class ZoneInfo {
     private long specializationChangedAt;
     /** Физический анкер текущей специализации (например, Колокол у Разведпункта) — игрок ставит сам, null = якоря нет/сломан. */
     private Location militaryAnchorLocation;
+
+    // ===== Тип обороны (GH#24, фидбек 2026-08-14 п.1/4) =====
+    // Тот же паттерн переключения, что и специализация выше, одним уровнем
+    // ниже — осмысленно только пока militarySpecialization == DEFENSE (см.
+    // MilitaryDefenseSubtypeService), но независимая ось: не сбрасывается
+    // при уходе с DEFENSE и возврате обратно.
+    private MilitaryDefenseSubtype militaryDefenseSubtype;
+    private MilitaryDefenseSubtype pendingMilitaryDefenseSubtype;
+    private long defenseSubtypeSwitchLockedUntil;
+    private long defenseSubtypeChangedAt;
+
+    public MilitaryDefenseSubtype getMilitaryDefenseSubtype() { return militaryDefenseSubtype; }
+    public void setMilitaryDefenseSubtype(MilitaryDefenseSubtype s) { this.militaryDefenseSubtype = s; }
+
+    public MilitaryDefenseSubtype getPendingMilitaryDefenseSubtype() { return pendingMilitaryDefenseSubtype; }
+    public void setPendingMilitaryDefenseSubtype(MilitaryDefenseSubtype s) { this.pendingMilitaryDefenseSubtype = s; }
+
+    public long getDefenseSubtypeSwitchLockedUntil() { return defenseSubtypeSwitchLockedUntil; }
+    public void setDefenseSubtypeSwitchLockedUntil(long ts) { this.defenseSubtypeSwitchLockedUntil = ts; }
+
+    public long getDefenseSubtypeChangedAt() { return defenseSubtypeChangedAt; }
+    public void setDefenseSubtypeChangedAt(long ts) { this.defenseSubtypeChangedAt = ts; }
+
+    public boolean isDefenseSubtypeSwitching() {
+        return System.currentTimeMillis() < defenseSubtypeSwitchLockedUntil;
+    }
 
     public MilitarySpecialization getMilitarySpecialization() { return militarySpecialization; }
     public void setMilitarySpecialization(MilitarySpecialization s) { this.militarySpecialization = s; }

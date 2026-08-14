@@ -23,10 +23,14 @@ import java.util.concurrent.TimeUnit;
  */
 public final class MilitarySpecializationService {
 
-    // Черновые числа (по аналогии с остальным балансом §14.5/§15.5 — не
-    // согласованы жёстко, править по первому фидбеку с реального сервера).
-    public static final long SWITCH_LOCK_MS = TimeUnit.MINUTES.toMillis(10);
-    public static final long SWITCH_COOLDOWN_MS = TimeUnit.HOURS.toMillis(24);
+    // Тестовые значения (GH#24, фидбек 2026-08-14 p.s. — "снизь всё до 10
+    // секунд пока тестируем"). Реальные черновые числа (по аналогии с
+    // остальным балансом §14.5/§15.5 — не согласованы жёстко, править по
+    // первому фидбеку с реального сервера) закомментированы рядом — вернуть их после тестирования.
+    public static final long SWITCH_LOCK_MS = TimeUnit.SECONDS.toMillis(10);
+    // public static final long SWITCH_LOCK_MS = TimeUnit.MINUTES.toMillis(10);
+    public static final long SWITCH_COOLDOWN_MS = TimeUnit.SECONDS.toMillis(10);
+    // public static final long SWITCH_COOLDOWN_MS = TimeUnit.HOURS.toMillis(24);
 
     private final ZoneManager zoneManager;
 
@@ -87,8 +91,8 @@ public final class MilitarySpecializationService {
         resolvePending(zone); // подчистить хвост от прошлого переключения, если окно уже прошло
 
         if (zone.isSpecializationSwitching()) {
-            long remainMin = (zone.getSpecializationSwitchLockedUntil() - System.currentTimeMillis()) / 60000L + 1;
-            return SwitchOutcome.fail("Уже идёт переключение специализации, объект неактивен ещё ~" + remainMin + " мин.");
+            long remainSec = (zone.getSpecializationSwitchLockedUntil() - System.currentTimeMillis()) / 1000L + 1;
+            return SwitchOutcome.fail("Уже идёт переключение специализации, объект неактивен ещё ~" + remainSec + " с.");
         }
         if (target == zone.getMilitarySpecialization()) {
             return SwitchOutcome.fail("У объекта уже эта специализация.");
@@ -117,8 +121,8 @@ public final class MilitarySpecializationService {
         if (zone.getSpecializationChangedAt() > 0) {
             long sinceLast = now - zone.getSpecializationChangedAt();
             if (sinceLast < SWITCH_COOLDOWN_MS) {
-                long remainHrs = (SWITCH_COOLDOWN_MS - sinceLast) / 3_600_000L + 1;
-                return SwitchOutcome.fail("Слишком рано переключать специализацию повторно — ещё ~" + remainHrs + " ч.");
+                long remainSec = (SWITCH_COOLDOWN_MS - sinceLast) / 1000L + 1;
+                return SwitchOutcome.fail("Слишком рано переключать специализацию повторно — ещё ~" + remainSec + " с.");
             }
         }
 
@@ -126,9 +130,9 @@ public final class MilitarySpecializationService {
         zone.setSpecializationSwitchLockedUntil(now + SWITCH_LOCK_MS);
         zoneManager.saveZonesToConfig();
 
-        long lockMin = SWITCH_LOCK_MS / 60000L;
+        long lockSec = SWITCH_LOCK_MS / 1000L;
         return SwitchOutcome.ok("Переключение на " + target.name().toLowerCase(Locale.ROOT)
-                + " начато. Объект неактивен ~" + lockMin + " мин, затем специализация применится сама.");
+                + " начато. Объект неактивен ~" + lockSec + " с, затем специализация применится сама.");
     }
 
     /**

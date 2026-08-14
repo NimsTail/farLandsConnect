@@ -1,7 +1,6 @@
 package com.frammy.unitylauncher.upgrades.impl;
 
 import com.frammy.unitylauncher.UnityLauncher;
-import com.frammy.unitylauncher.military.MilitarySpecialization;
 import com.frammy.unitylauncher.upgrades.UpgradeCondition;
 import com.frammy.unitylauncher.upgrades.config.types.MilitaryCfg;
 import com.frammy.unitylauncher.upgrades.core.BaseUpgrade;
@@ -49,7 +48,7 @@ public final class AuraUpgrade extends BaseUpgrade implements Listener {
 
         task = Bukkit.getScheduler().runTaskTimer(plugin(), () -> {
             var ul = UnityLauncher.getInstance();
-            var specService = ul.militarySpecializationService;
+            var subtypeService = ul.militaryDefenseSubtypeService;
             long pulseMs = (cfg.durationTicks() + cfg.inactivityTicks()) * 50L;
 
             for (Player p : Bukkit.getOnlinePlayers()) {
@@ -59,9 +58,14 @@ public final class AuraUpgrade extends BaseUpgrade implements Listener {
                 String playerCountry = ul.countryRegistryJdbc.getCountryOfPlayer(p.getName());
                 if (playerCountry != null && playerCountry.equalsIgnoreCase(hereCountry)) continue; // свои — не трогаем
 
-                int level = UpgradeCondition.countryMaxLevel(UpgradeCondition.resolveCountryGroupId(hereCountry), cfg.permBase(), 2);
+                // Сила — отдельный узел от квоты (cfg.permBase()), см. MilitaryDefenseSubtype.levelPermBase().
+                int level = UpgradeCondition.countryMaxLevel(
+                        UpgradeCondition.resolveCountryGroupId(hereCountry),
+                        com.frammy.unitylauncher.military.MilitaryDefenseSubtype.AURA.levelPermBase(), 2);
                 if (level < 1) continue;
-                if (!hasActiveAuraZone(specService, hereCountry)) continue;
+                // GH#24 (фидбек 2026-08-14 п.1/4) — раньше срабатывал на ЛЮБОЙ
+                // DEFENSE-зоне страны; теперь только если хоть одна реально вкачана в AURA.
+                if (!hasActiveAuraZone(subtypeService, hereCountry)) continue;
 
                 long now = System.currentTimeMillis();
                 Long last = lastAppliedByPlayer.get(p.getName());
@@ -78,11 +82,11 @@ public final class AuraUpgrade extends BaseUpgrade implements Listener {
     }
 
     /** Считается один раз в тик было бы дешевле, но страна тут не известна заранее (перебираем всех онлайн) — при малом числе военных зон разница не важна. */
-    private boolean hasActiveAuraZone(com.frammy.unitylauncher.military.MilitarySpecializationService specService, String countryName) {
+    private boolean hasActiveAuraZone(com.frammy.unitylauncher.military.MilitaryDefenseSubtypeService subtypeService, String countryName) {
         for (ZoneInfo z : zones().getAllZonesSnapshot()) {
             if (z.getType() != ZoneType.MILITARY) continue;
             if (!countryName.equalsIgnoreCase(z.getCountryName())) continue;
-            if (specService.isActiveAs(z, MilitarySpecialization.DEFENSE)) return true;
+            if (subtypeService.isActiveAs(z, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.AURA)) return true;
         }
         return false;
     }
