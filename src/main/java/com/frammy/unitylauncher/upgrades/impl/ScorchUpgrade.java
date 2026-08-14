@@ -28,7 +28,14 @@ import java.util.concurrent.ConcurrentHashMap;
 public final class ScorchUpgrade extends BaseUpgrade implements Listener {
 
     private static final UpgradeKey KEY = UpgradeKey.of("military.scorch");
-    private static final double LIGHTNING_CHANCE_AT_MAX_LEVEL = 0.25; // черновое число
+
+    // Фидбек 2026-08-14 — общий узел "усиление" убран, длительность поджога
+    // и шанс молнии теперь два независимых параметрических апгрейда (тот же
+    // приём, что GH#29 ввёл для Арбалета).
+    private static final String DURATION_PERM_BASE = "unity.military.scorch_duration";
+    private static final String LIGHTNING_PERM_BASE = "unity.military.scorch_lightning";
+    private static final double[] DURATION_MULTIPLIER = {1.0, 1.5, 2.0};
+    private static final double[] LIGHTNING_CHANCE = {0.0, 0.15, 0.25}; // черновые числа
 
     // playerName -> когда последний раз горел от этого эффекта (мс).
     private final Map<String, Long> lastScorchedByPlayer = new ConcurrentHashMap<>();
@@ -66,14 +73,12 @@ public final class ScorchUpgrade extends BaseUpgrade implements Listener {
             // GH#24 (фидбек 2026-08-14 п.1/4) — только на объекте, реально вкачанном в SCORCH.
             if (!subtypeService.isActiveAs(z, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.SCORCH)) continue;
 
-            // GH#26 (фидбек — "должен уже работать на самом простом уровне,
-            // улучшения должны прокачивать, не включать") — level (сила,
-            // отдельный узел от квоты) больше не гейтит срабатывание —
-            // isActiveAs выше уже подтверждает базовую покупку типа; level
-            // ниже влияет только на бонус (молния, level>=2).
+            // Фидбек 2026-08-14 — длительность поджога и шанс молнии читаются
+            // независимо; isActiveAs выше уже подтверждает базовую покупку
+            // типа, ни один из параметров не гейтит само срабатывание.
             String canonicalCountry = UpgradeCondition.zoneCountryCanonical(z);
-            int level = canonicalCountry == null ? 0 : UpgradeCondition.countryMaxLevel(
-                    canonicalCountry, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.SCORCH.levelPermBase(), 2);
+            int durationLevel = canonicalCountry == null ? 0 : UpgradeCondition.countryMaxLevel(canonicalCountry, DURATION_PERM_BASE, 2);
+            int lightningLevel = canonicalCountry == null ? 0 : UpgradeCondition.countryMaxLevel(canonicalCountry, LIGHTNING_PERM_BASE, 2);
 
             Location center = z.getCenter();
             if (center == null || center.getWorld() == null) continue;
@@ -95,12 +100,14 @@ public final class ScorchUpgrade extends BaseUpgrade implements Listener {
             if (target == null) continue;
 
             lastScorchedByPlayer.put(target.getName(), now);
-            target.setFireTicks(Math.max(target.getFireTicks(), cfg.fireTicks()));
+            int fireTicks = (int) Math.round(cfg.fireTicks() * DURATION_MULTIPLIER[durationLevel]);
+            target.setFireTicks(Math.max(target.getFireTicks(), fireTicks));
 
             // "не под крышей" = открыт небу — переиспользует то же правило,
             // что и якорь разведки (MilitaryAnchorService.isExposed).
             boolean notUnderRoof = MilitaryAnchorService.isExposed(target.getLocation());
-            if (level >= 2 && notUnderRoof && Math.random() < LIGHTNING_CHANCE_AT_MAX_LEVEL) {
+            double lightningChance = LIGHTNING_CHANCE[lightningLevel];
+            if (lightningChance > 0 && notUnderRoof && Math.random() < lightningChance) {
                 target.getWorld().strikeLightning(target.getLocation());
             }
         }

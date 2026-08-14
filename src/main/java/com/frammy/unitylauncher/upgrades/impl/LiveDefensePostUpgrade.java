@@ -68,10 +68,9 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
     // своего же bounding box — L-образные/вытянутые территории).
     private static final int RANDOM_POINT_ATTEMPTS = 12;
 
-    // GH#30 (Улучшения п.2) "Время между спавном" — отдельный узел от
-    // "усиления" волны (levelPermBase), пара уровней, множитель на
-    // cfg.cooldownTicks(). Черновые числа, не сильно драматичные, как и
-    // просили.
+    // GH#30 (Улучшения п.2) "Время между спавном" — независимый
+    // параметрический апгрейд, множитель на cfg.cooldownTicks(). Черновые
+    // числа, не сильно драматичные, как и просили.
     private static final String COOLDOWN_PERM_BASE = "unity.military.live_defense_cooldown";
     private static final double[] COOLDOWN_MULTIPLIER = {1.0, 0.75, 0.55};
 
@@ -116,14 +115,12 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
 
             String canonicalCountry = UpgradeCondition.zoneCountryCanonical(z);
             if (canonicalCountry == null) continue; // объект без страны — быть не должно, но на всякий случай
-            // GH#26 (фидбек — "должен уже работать на самом простом уровне,
-            // улучшения должны прокачивать, не включать") — сила эффекта
-            // (отдельный узел от квоты "сколько объектов можно", cfg.permBase())
-            // больше не гейтит срабатывание вообще — isActiveAs выше уже
-            // подтверждает базовую покупку типа; level ниже клампится к
-            // минимум 1 (spawnWave уже трактует 1 как базовую волну).
-            int level = Math.max(1, UpgradeCondition.countryMaxLevel(
-                    canonicalCountry, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.LIVE_DEFENSE.levelPermBase(), 3));
+            // Фидбек 2026-08-14 — общий узел "усиление" (тип/размер волны по
+            // уровню) убран целиком; состав волны пока фиксирован на базовом
+            // (level=1 — только биомный моб) до отдельного апгрейда "выбор
+            // пачки мобов" (GH#30, Улучшения п.1), который ещё ждёт
+            // подтверждения конкретных наборов от пользователя.
+            int level = 1;
 
             Location center = z.getCenter();
             if (center == null || center.getWorld() == null) continue;

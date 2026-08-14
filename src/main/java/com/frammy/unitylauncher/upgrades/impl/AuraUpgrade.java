@@ -27,6 +27,13 @@ public final class AuraUpgrade extends BaseUpgrade implements Listener {
 
     private static final UpgradeKey KEY = UpgradeKey.of("military.aura");
 
+    // Фидбек 2026-08-14 — общий узел "усиление" убран, интервал и сила
+    // эффекта теперь два независимых параметрических апгрейда (тот же
+    // приём, что GH#29 ввёл для Арбалета: скорострельность/эффекты).
+    private static final String INTERVAL_PERM_BASE = "unity.military.aura_interval";
+    private static final String STRENGTH_PERM_BASE = "unity.military.aura_strength";
+    private static final double[] INTERVAL_MULTIPLIER = {1.0, 0.7, 0.5};
+
     @Override public UpgradeKey key() { return KEY; }
     @Override public UpgradeScope scope() { return UpgradeScope.COUNTRY; }
     @Override public Listener listener() { return null; }
@@ -49,7 +56,6 @@ public final class AuraUpgrade extends BaseUpgrade implements Listener {
         task = Bukkit.getScheduler().runTaskTimer(plugin(), () -> {
             var ul = UnityLauncher.getInstance();
             var subtypeService = ul.militaryDefenseSubtypeService;
-            long pulseMs = (cfg.durationTicks() + cfg.inactivityTicks()) * 50L;
 
             for (Player p : Bukkit.getOnlinePlayers()) {
                 String hereCountry = UpgradeCondition.locationCountryOwner(p.getLocation());
@@ -58,25 +64,24 @@ public final class AuraUpgrade extends BaseUpgrade implements Listener {
                 String playerCountry = ul.countryRegistryJdbc.getCountryOfPlayer(p.getName());
                 if (playerCountry != null && playerCountry.equalsIgnoreCase(hereCountry)) continue; // свои — не трогаем
 
-                // GH#26 (фидбек — "должен уже работать на самом простом
-                // уровне, улучшения должны прокачивать, не включать") —
-                // level (сила, отдельный узел от квоты) больше не гейтит
-                // срабатывание вообще (level<1 → continue убран) — база уже
-                // подтверждена hasActiveAuraZone ниже; level только влияет
-                // на амплификатор эффекта, клампится к минимум 1 (не
-                // купленный уровень — это базовая сила, не "минус сила").
-                int level = Math.max(1, UpgradeCondition.countryMaxLevel(
-                        UpgradeCondition.resolveCountryGroupId(hereCountry),
-                        com.frammy.unitylauncher.military.MilitaryDefenseSubtype.AURA.levelPermBase(), 2));
                 // GH#24 (фидбек 2026-08-14 п.1/4) — раньше срабатывал на ЛЮБОЙ
                 // DEFENSE-зоне страны; теперь только если хоть одна реально вкачана в AURA.
                 if (!hasActiveAuraZone(subtypeService, hereCountry)) continue;
+
+                // Фидбек 2026-08-14 — интервал и сила эффекта читаются
+                // независимо друг от друга (см. класс-javadoc поля выше);
+                // ни один из них не гейтит базовое срабатывание — оба
+                // клампятся к минимум 0 (0 = ещё не куплено = база).
+                String canonicalCountry = UpgradeCondition.resolveCountryGroupId(hereCountry);
+                int intervalLevel = UpgradeCondition.countryMaxLevel(canonicalCountry, INTERVAL_PERM_BASE, 2);
+                int strengthLevel = UpgradeCondition.countryMaxLevel(canonicalCountry, STRENGTH_PERM_BASE, 2);
+                long pulseMs = Math.round((cfg.durationTicks() + cfg.inactivityTicks()) * 50L * INTERVAL_MULTIPLIER[intervalLevel]);
 
                 long now = System.currentTimeMillis();
                 Long last = lastAppliedByPlayer.get(p.getName());
                 if (last != null && now - last < pulseMs) continue;
 
-                UpgradeCondition.applyPotionSmart(p, PotionEffectType.WEAKNESS, cfg.durationTicks(), cfg.amplifier() + (level - 1), true, false, true);
+                UpgradeCondition.applyPotionSmart(p, PotionEffectType.WEAKNESS, cfg.durationTicks(), cfg.amplifier() + strengthLevel, true, false, true);
                 lastAppliedByPlayer.put(p.getName(), now);
             }
         }, period, period);

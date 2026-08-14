@@ -18,30 +18,30 @@ import com.frammy.unitylauncher.upgrades.UpgradeCondition;
  * and back doesn't require re-picking a subtype (ZoneInfo just keeps it).
  */
 public enum MilitaryDefenseSubtype {
-    LIVE_DEFENSE("unity.military.live_defense", "unity.military.live_defense_level"),
-    AURA("unity.military.aura", "unity.military.aura_level"),
-    SCORCH("unity.military.scorch", "unity.military.scorch_level"),
-    CROSSBOW("unity.military.crossbow", "unity.military.crossbow_level");
+    LIVE_DEFENSE("unity.military.live_defense"),
+    AURA("unity.military.aura"),
+    SCORCH("unity.military.scorch"),
+    CROSSBOW("unity.military.crossbow");
 
     // Квота (сколько объектов страны одновременно могут нести этот тип) —
     // тот же паттерн unity.military.<slug>.<N>, что и у MilitarySpecialization
-    // (см. её MAX_QUOTA_LEVEL). Раньше permBase был max_level-апгрейдом,
-    // смешивавшим "сколько объектов можно" и "насколько он силён" в одно
-    // число — фидбек 2026-08-14 п.1/3 требует их разделить: quota остаётся
-    // на permBase (до бесконечности скупаемый), сила переезжает на levelPermBase.
+    // (см. её MAX_QUOTA_LEVEL).
     private static final int MAX_QUOTA_LEVEL = 5;
 
     /** Country-level LuckPerms permission base gating the QUOTA (unity.military.<slug>.<N> = максимум N объектов одновременно). */
     private final String permBase;
-    /** Отдельный узел под "силу" эффекта этого типа — не квота, см. класс-javadoc. */
-    private final String levelPermBase;
 
-    MilitaryDefenseSubtype(String permBase, String levelPermBase) {
+    // Раньше здесь был ещё и levelPermBase — единый узел "усиление" на тип
+    // (сила эффекта, отдельно от квоты). Фидбек 2026-08-14 убрал эту идею
+    // целиком: "усиление" не нужно, прокачка идёт через параметрические
+    // апгрейды конкретно под каждый тип (скорострельность/эффекты у
+    // Арбалета, интервал/сила у Ореола, длительность/молния у Жгучего и
+    // т.д. — см. соответствующие Upgrade-классы, каждый сам читает свои
+    // permission-базы напрямую через UpgradeCondition.countryMaxLevel, без
+    // общего поля в этом enum).
+    MilitaryDefenseSubtype(String permBase) {
         this.permBase = permBase;
-        this.levelPermBase = levelPermBase;
     }
-
-    public String levelPermBase() { return levelPermBase; }
 
     /** Максимум объектов страны, которые могут одновременно нести этот тип обороны — 0, если апгрейд не куплен вообще. */
     public int purchasedQuota(String canonicalCountryId) {
