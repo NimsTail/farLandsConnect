@@ -66,10 +66,14 @@ public final class ScorchUpgrade extends BaseUpgrade implements Listener {
             // GH#24 (фидбек 2026-08-14 п.1/4) — только на объекте, реально вкачанном в SCORCH.
             if (!subtypeService.isActiveAs(z, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.SCORCH)) continue;
 
+            // GH#26 (фидбек — "должен уже работать на самом простом уровне,
+            // улучшения должны прокачивать, не включать") — level (сила,
+            // отдельный узел от квоты) больше не гейтит срабатывание —
+            // isActiveAs выше уже подтверждает базовую покупку типа; level
+            // ниже влияет только на бонус (молния, level>=2).
             String canonicalCountry = UpgradeCondition.zoneCountryCanonical(z);
             int level = canonicalCountry == null ? 0 : UpgradeCondition.countryMaxLevel(
                     canonicalCountry, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.SCORCH.levelPermBase(), 2);
-            if (level < 1) continue;
 
             Location center = z.getCenter();
             if (center == null || center.getWorld() == null) continue;

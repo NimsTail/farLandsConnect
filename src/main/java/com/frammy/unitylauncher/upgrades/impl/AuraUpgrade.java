@@ -58,11 +58,16 @@ public final class AuraUpgrade extends BaseUpgrade implements Listener {
                 String playerCountry = ul.countryRegistryJdbc.getCountryOfPlayer(p.getName());
                 if (playerCountry != null && playerCountry.equalsIgnoreCase(hereCountry)) continue; // свои — не трогаем
 
-                // Сила — отдельный узел от квоты (cfg.permBase()), см. MilitaryDefenseSubtype.levelPermBase().
-                int level = UpgradeCondition.countryMaxLevel(
+                // GH#26 (фидбек — "должен уже работать на самом простом
+                // уровне, улучшения должны прокачивать, не включать") —
+                // level (сила, отдельный узел от квоты) больше не гейтит
+                // срабатывание вообще (level<1 → continue убран) — база уже
+                // подтверждена hasActiveAuraZone ниже; level только влияет
+                // на амплификатор эффекта, клампится к минимум 1 (не
+                // купленный уровень — это базовая сила, не "минус сила").
+                int level = Math.max(1, UpgradeCondition.countryMaxLevel(
                         UpgradeCondition.resolveCountryGroupId(hereCountry),
-                        com.frammy.unitylauncher.military.MilitaryDefenseSubtype.AURA.levelPermBase(), 2);
-                if (level < 1) continue;
+                        com.frammy.unitylauncher.military.MilitaryDefenseSubtype.AURA.levelPermBase(), 2));
                 // GH#24 (фидбек 2026-08-14 п.1/4) — раньше срабатывал на ЛЮБОЙ
                 // DEFENSE-зоне страны; теперь только если хоть одна реально вкачана в AURA.
                 if (!hasActiveAuraZone(subtypeService, hereCountry)) continue;

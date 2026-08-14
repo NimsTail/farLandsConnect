@@ -78,11 +78,15 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
             if (!subtypeService.isActiveAs(z, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.LIVE_DEFENSE)) continue;
 
             String canonicalCountry = UpgradeCondition.zoneCountryCanonical(z);
-            // Сила эффекта — теперь отдельный узел от квоты "сколько объектов
-            // можно" (cfg.permBase()), см. MilitaryDefenseSubtype.levelPermBase().
-            int level = canonicalCountry == null ? 0 : UpgradeCondition.countryMaxLevel(
-                    canonicalCountry, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.LIVE_DEFENSE.levelPermBase(), 3);
-            if (level < 1) continue;
+            if (canonicalCountry == null) continue; // объект без страны — быть не должно, но на всякий случай
+            // GH#26 (фидбек — "должен уже работать на самом простом уровне,
+            // улучшения должны прокачивать, не включать") — сила эффекта
+            // (отдельный узел от квоты "сколько объектов можно", cfg.permBase())
+            // больше не гейтит срабатывание вообще — isActiveAs выше уже
+            // подтверждает базовую покупку типа; level ниже клампится к
+            // минимум 1 (spawnWave уже трактует 1 как базовую волну).
+            int level = Math.max(1, UpgradeCondition.countryMaxLevel(
+                    canonicalCountry, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.LIVE_DEFENSE.levelPermBase(), 3));
 
             Location center = z.getCenter();
             if (center == null || center.getWorld() == null) continue;

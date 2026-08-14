@@ -69,10 +69,18 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
             // GH#24 (фидбек 2026-08-14 п.1/4) — только на объекте, реально вкачанном в CROSSBOW.
             if (!subtypeService.isActiveAs(z, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.CROSSBOW)) continue;
 
+            // GH#26 (фидбек — "при покупке сооружения он должен уже работать
+            // на самом простом уровне, а улучшения должны его прокачивать —
+            // а не то, что сейчас первое улучшение только заставляет его
+            // работать") — level (усиление, отдельный узел от квоты выше)
+            // used to GATE whether this fires at all (level<1 → skip) —
+            // базовая покупка самого типа обороны (isActiveAs выше) уже
+            // подтверждает, что объект вкачан в CROSSBOW; level ниже влияет
+            // только на БОНУС (эффект на стрелах, level>=2 — см. shoot()),
+            // не на то, стреляет оно вообще или нет.
             String canonicalCountry = UpgradeCondition.zoneCountryCanonical(z);
             int level = canonicalCountry == null ? 0 : UpgradeCondition.countryMaxLevel(
                     canonicalCountry, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.CROSSBOW.levelPermBase(), 2);
-            if (level < 1) continue;
 
             // GH#24 (фидбек 2026-08-14 п.4) — якорь (тот же Колокол, что у
             // Разведпункта — см. MilitaryAnchorService.isAnchorCapable)
