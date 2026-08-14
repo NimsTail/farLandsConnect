@@ -92,8 +92,13 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
             new EffectPreset("unity.military.crossbow_effect.weak_slow", List.of(new EffectSpec(PotionEffectType.SLOWNESS, 0))),
             new EffectPreset("unity.military.crossbow_effect.weak_weakness", List.of(new EffectSpec(PotionEffectType.WEAKNESS, 0))),
             new EffectPreset("unity.military.crossbow_effect.weak_poison", List.of(new EffectSpec(PotionEffectType.POISON, 0))),
+            // GH#29 (фидбек раунд 3) — Тошнота заменена на Темноту: экран
+            // Тошноты раскачивается несколько секунд, чтобы дойти до полного
+            // эффекта, а EFFECT_DURATION_TICKS (4с) для этого коротковат —
+            // на практике эффект почти не успевал проявиться. Темнота
+            // работает мгновенно.
             new EffectPreset("unity.military.crossbow_effect.full_control", List.of(
-                    new EffectSpec(PotionEffectType.SLOWNESS, 1), new EffectSpec(PotionEffectType.BLINDNESS, 0), new EffectSpec(PotionEffectType.NAUSEA, 0))),
+                    new EffectSpec(PotionEffectType.SLOWNESS, 1), new EffectSpec(PotionEffectType.BLINDNESS, 0), new EffectSpec(PotionEffectType.DARKNESS, 0))),
             new EffectPreset("unity.military.crossbow_effect.full_attrition", List.of(
                     new EffectSpec(PotionEffectType.POISON, 0), new EffectSpec(PotionEffectType.WEAKNESS, 1), new EffectSpec(PotionEffectType.HUNGER, 0))),
             new EffectPreset("unity.military.crossbow_effect.full_reveal", List.of(
@@ -103,8 +108,11 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
     // GH#29 (фидбек раунд 2) "Точность" — раньше выстрел шёл идеально по
     // прямой (уклониться нельзя было практически). Угол (градусы)
     // максимального случайного отклонения направления стрелы от идеальной
-    // прямой на цель — сужается с уровнем. Черновые числа.
-    private static final double[] INACCURACY_DEGREES = {9.0, 4.0, 1.0};
+    // прямой на цель — сужается с уровнем.
+    // GH#29 (фидбек раунд 3) — "перестарался, теперь почти не попадает,
+    // подними в первых двух апгрейдах" — базовый и первый уровень были
+    // слишком широкими (9°/4°), заметно урезано.
+    private static final double[] INACCURACY_DEGREES = {4.0, 1.5, 0.5};
 
     private static final String RATE_PERM_BASE = "unity.military.crossbow_rate";
     private static final String EFFECTS_PERM_BASE = "unity.military.crossbow_effects";
@@ -222,7 +230,11 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
         // GH#29 п.1 — направление считаем от той же точки, где стрела реально
         // спавнится (не от origin без смещения) — раньше это расхождение в
         // 0.5 блока по всей траектории читалось как "целится на голову выше".
-        Location spawnLoc = origin.clone().add(0, 0.5, 0);
+        // GH#29 (фидбек раунд 3) — "создавай стрелу чуть выше самого блока
+        // колокола, иначе появляется куча механических слепых зон, попадает
+        // сам в себя" — 0.5 блока было мало, стрела спавнилась внутри/у
+        // самого блока якоря и сталкивалась с ним почти сразу после спавна.
+        Location spawnLoc = origin.clone().add(0, 1.2, 0);
         Vector direction = target.getEyeLocation().toVector().subtract(spawnLoc.toVector()).normalize();
         // GH#29 (фидбек раунд 2) — реальный разброс вместо идеальной прямой.
         direction = applySpread(direction, INACCURACY_DEGREES[accuracyLevel]);
@@ -246,11 +258,26 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
         }
     }
 
-    /** Какой из выбираемых наборов эффектов сейчас активен у страны — первый, чья permission-нода реально выдана (см. класс-javadoc). */
+    /**
+     * Какой из выбираемых наборов эффектов сейчас активен у страны — первый,
+     * чья permission-нода реально выдана (см. класс-javadoc).
+     *
+     * GH#29 (фидбек раунд 3) — "изменение в дропдауне ничего не делает на
+     * сервере". Реальная причина: UpgradeGrantPoller.applyBases ВСЕГДА
+     * добавляет ".<level>" к каждой grantBases-ноде, включая choice-ноды —
+     * то есть реально выдаётся "unity.military.crossbow_effect.weak_slow.1"
+     * (число — уровень самого узла "Эффекты"), а не голое
+     * "unity.military.crossbow_effect.weak_slow" без суффикса, которое
+     * проверял countryHasNode здесь. Проверка ВСЕГДА проваливалась, код
+     * ВСЕГДА уходил в фоллбек (случайный эффект из WEAK_EFFECT_POOL — там
+     * один Slowness), что и выглядело как "дропдаун ничего не меняет,
+     * всегда даёт то, что было по умолчанию". countryMaxLevel проверяет
+     * именно нумерованные ноды — с этим уже находит реально выданную.
+     */
     private EffectPreset resolveActivePreset(String canonicalCountry) {
         if (canonicalCountry == null) return null;
         for (EffectPreset preset : EFFECT_PRESETS) {
-            if (UpgradeCondition.countryHasNode(canonicalCountry, preset.permission())) return preset;
+            if (UpgradeCondition.countryMaxLevel(canonicalCountry, preset.permission(), 5) > 0) return preset;
         }
         return null;
     }

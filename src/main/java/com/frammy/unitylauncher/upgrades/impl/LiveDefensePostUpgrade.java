@@ -233,11 +233,21 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
         }
     }
 
-    /** Какая "пачка" сейчас выбрана страной — первая, чья permission-нода реально выдана (см. класс-javadoc). Null, если ничего не выбрано/не куплено. */
+    /**
+     * Какая "пачка" сейчас выбрана страной — первая, чья permission-нода
+     * реально выдана (см. класс-javadoc). Null, если ничего не выбрано/не
+     * куплено.
+     *
+     * GH#29/#30 (тот же баг раунда 3, что и у CrossbowUpgrade — см. её
+     * resolveActivePreset) — UpgradeGrantPoller.applyBases всегда добавляет
+     * ".<level>" к choice-нодам тоже, countryHasNode(голая строка) поэтому
+     * никогда не находил реально выданную; countryMaxLevel проверяет
+     * нумерованные варианты и находит.
+     */
     private List<MobSpec> resolveActivePack(String canonicalCountry) {
         if (canonicalCountry == null) return null;
         for (Pack pack : PACKS) {
-            if (UpgradeCondition.countryHasNode(canonicalCountry, pack.permission())) return pack.mobs();
+            if (UpgradeCondition.countryMaxLevel(canonicalCountry, pack.permission(), 5) > 0) return pack.mobs();
         }
         return null;
     }

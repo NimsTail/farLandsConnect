@@ -218,6 +218,7 @@ public record MilitaryCfg(
     // GH#24 идея 4 "Арбалет" — стрельба по замеченному врагу от якоря/центра
     // объекта, слепая зона под углом снизу (blindSpotDegrees от горизонтали).
     public record CrossbowCfg(boolean enabled, String permBase, long periodTicks, int radius, double damage, double blindSpotDegrees) {
-        public static CrossbowCfg defaults() { return new CrossbowCfg(true, "unity.military.crossbow", 20L * 3, 20, 3.0, 20.0); }
+        // GH#29 (фидбек раунд 3) — "повысь ему немного радиус действия" — было 20.
+        public static CrossbowCfg defaults() { return new CrossbowCfg(true, "unity.military.crossbow", 20L * 3, 26, 3.0, 20.0); }
     }
 }
