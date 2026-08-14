@@ -1,7 +1,7 @@
 package com.frammy.unitylauncher.upgrades.impl;
 
 import com.frammy.unitylauncher.UnityLauncher;
-import com.frammy.unitylauncher.military.MilitarySpecialization;
+import com.frammy.unitylauncher.military.MilitaryDefenseSubtype;
 import com.frammy.unitylauncher.upgrades.UpgradeCondition;
 import com.frammy.unitylauncher.upgrades.config.types.MilitaryCfg;
 import com.frammy.unitylauncher.upgrades.core.BaseUpgrade;
@@ -36,6 +36,21 @@ import java.util.concurrent.ConcurrentHashMap;
 // (routes/plugin.ts "/plugin/military/neutralize"), который сам решает War
 // Score/CONTESTED/HQ-уязвимость (lib/militaryZones.ts) — этот класс только
 // считает волны и шлёт репорт, ничего не решает сам.
+//
+// Фидбек 2026-08-14 — переработка условий срабатывания:
+//  1. Раньше работал на ЛЮБОМ объекте со специализацией DEFENSE, независимо
+//     от того, какой тип обороны (Живой пост/Ореол/Жгучий/Арбалет) реально
+//     выбран — то есть накладывался поверх каждого из них дополнительным,
+//     никак не связанным патрулём. Теперь — только на объекте, у которого
+//     реально активен ОДИН ИЗ типов ("каждое активное оборонительное
+//     сооружение").
+//  2. Раньше спавнил и поддерживал патруль ПОСТОЯННО, независимо от того,
+//     есть ли вообще враг рядом. Теперь — только если в территории страны
+//     (любая её COUNTRY-зона) реально находится игрок вражеской (по войне)
+//     страны, раз в period, а не "поддерживать до потолка".
+//  3. Десинхронизация между объектами — иначе все объекты страны спавнили
+//     бы патруль ровно в одном и том же тике (все качались бы синхронно:
+//     то куча мобов везде, то нигде), т.к. используют общий period.
 public final class DefensePatrolUpgrade extends BaseUpgrade implements Listener {
 
     private static final UpgradeKey KEY = UpgradeKey.of("military.defense");
@@ -57,6 +72,11 @@ public final class DefensePatrolUpgrade extends BaseUpgrade implements Listener 
     // Последний игрок (страна врага), нанёсший урон патрулю этой зоны — тот,
     // кому в итоге засчитается нейтрализация, если стрик дойдёт до 5.
     private final Map<String, String> lastAttackerCountryByZone = new ConcurrentHashMap<>();
+    // Фидбек 2026-08-14 п.3 — следующий момент, когда ЭТОЙ зоне разрешено
+    // (снова) заспавнить патруль. Инициализируется случайным сдвигом в
+    // пределах одного периода при первом появлении зоны — так все объекты
+    // страны расходятся по фазе вместо синхронного тиканья.
+    private final Map<String, Long> nextSpawnAtByZone = new ConcurrentHashMap<>();
     private BukkitTask task;
 
     @Override
@@ -78,14 +98,25 @@ public final class DefensePatrolUpgrade extends BaseUpgrade implements Listener 
     }
 
     private void tick(MilitaryCfg.DefensePatrolCfg cfg) {
+        var subtypeService = UnityLauncher.getInstance().militaryDefenseSubtypeService;
+        long periodMs = cfg.periodTicks() * 50L;
+        // Считаем "враг в территории страны" один раз на страну за тик, не на
+        // каждый объект — сама проверка не зависит от конкретного объекта.
+        Map<String, Boolean> enemyPresentByCountry = new java.util.HashMap<>();
+
         for (ZoneInfo z : zones().getAllZonesSnapshot()) {
             if (z.getType() != ZoneType.MILITARY) continue;
 
-            // GH#24 п.2: раньше Оборона работала на ЛЮБОМ военном объекте
-            // страны с купленным апгрейдом — теперь только на объекте,
-            // реально специализированном под неё (см. §4.1). isActiveAs уже
-            // включает в себя и проверку countryMaxLevel(cfg.permBase()).
-            if (!UnityLauncher.getInstance().militarySpecializationService.isActiveAs(z, MilitarySpecialization.DEFENSE)) continue;
+            // Фидбек 2026-08-14 п.1 — только объект с реально активным типом
+            // обороны, любым из четырёх (не просто специализация DEFENSE).
+            boolean hasActiveSubtype = false;
+            for (MilitaryDefenseSubtype subtype : MilitaryDefenseSubtype.values()) {
+                if (subtypeService.isActiveAs(z, subtype)) { hasActiveSubtype = true; break; }
+            }
+            if (!hasActiveSubtype) continue;
+
+            String countryName = z.getCountryName();
+            if (countryName == null) continue;
 
             String markerId = z.getMarkerID();
             List<UUID> alive = guardsByZone.computeIfAbsent(markerId, k -> new ArrayList<>());
@@ -97,6 +128,20 @@ public final class DefensePatrolUpgrade extends BaseUpgrade implements Listener 
             boolean waveFullyCleared = hadGuardsBefore && alive.isEmpty();
 
             handleWaveOutcome(z, markerId, waveFullyCleared);
+
+            long now = System.currentTimeMillis();
+            // Первое появление этой зоны — случайный сдвиг фазы в пределах
+            // периода, чтобы не спавнить в один тик со всеми остальными.
+            Long nextSpawnAt = nextSpawnAtByZone.computeIfAbsent(markerId,
+                    k -> now + java.util.concurrent.ThreadLocalRandom.current().nextLong(periodMs));
+            if (now < nextSpawnAt) continue;
+
+            // Фидбек 2026-08-14 п.2 — спавним только если враг реально есть
+            // в территории страны прямо сейчас; иначе просто откладываем
+            // следующую попытку на period, ничего не спавня.
+            boolean enemyPresent = enemyPresentByCountry.computeIfAbsent(countryName, this::enemyInCountryTerritory);
+            nextSpawnAtByZone.put(markerId, now + periodMs);
+            if (!enemyPresent) continue;
 
             if (alive.size() < cfg.maxAlive()) {
                 Location center = z.getCenter();
@@ -111,6 +156,22 @@ public final class DefensePatrolUpgrade extends BaseUpgrade implements Listener 
                 }
             }
         }
+    }
+
+    /** Есть ли прямо сейчас в любой COUNTRY-зоне этой страны игрок вражеской (по войне) страны. */
+    private boolean enemyInCountryTerritory(String countryName) {
+        for (ZoneInfo countryZone : zones().getAllZonesSnapshot()) {
+            if (countryZone.getType() != ZoneType.COUNTRY) continue;
+            if (!countryName.equalsIgnoreCase(countryZone.getCountryName())) continue;
+            for (Player p : Bukkit.getOnlinePlayers()) {
+                if (!countryZone.contains2D(p.getLocation())) continue;
+                String playerCountry = UnityLauncher.getInstance().countryRegistryJdbc.getCountryOfPlayer(p.getName());
+                if (playerCountry == null || playerCountry.equalsIgnoreCase(countryName)) continue;
+                if (!UnityLauncher.getInstance().warStatusCache.isAtWar(countryName, playerCountry)) continue;
+                return true;
+            }
+        }
+        return false;
     }
 
     /** §14.4/§14.5 — a fully-cleared wave (with no >3min gap since the last one) advances the streak; anything else resets it. */
@@ -201,5 +262,6 @@ public final class DefensePatrolUpgrade extends BaseUpgrade implements Listener 
         waveStreakByZone.clear();
         lastWaveClearedByZone.clear();
         lastAttackerCountryByZone.clear();
+        nextSpawnAtByZone.clear();
     }
 }

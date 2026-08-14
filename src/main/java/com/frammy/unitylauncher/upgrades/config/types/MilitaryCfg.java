@@ -167,8 +167,14 @@ public record MilitaryCfg(
     }
 
     // §14.5: волна = 3 моба, новая волна раз в 90с (черновые числа).
+    // Фидбек 2026-08-14 — "оборона как отдельный апгрейд, дефолтные
+    // настройки: если есть враг на зоне государства — спавнить 2 слабеньких
+    // моба раз в 130 секунд на каждое АКТИВНОЕ оборонительное сооружение;
+    // оно никак не улучшается, просто дефолтный минимум". periodTicks
+    // 90с→130с, mobsPerWave 3→2, maxAlive 6→2 (больше не "поддерживать до
+    // потолка", а именно burst раз в период).
     public record DefensePatrolCfg(boolean enabled, String permBase, long periodTicks, int mobsPerWave, int maxAlive) {
-        public static DefensePatrolCfg defaults() { return new DefensePatrolCfg(true, "unity.military.defense", 20L * 90, 3, 6); }
+        public static DefensePatrolCfg defaults() { return new DefensePatrolCfg(true, "unity.military.defense", 20L * 130, 2, 2); }
     }
 
     // Тот же паттерн, что и hospital.regenPulse (RegenPulseUpgrade) — только
