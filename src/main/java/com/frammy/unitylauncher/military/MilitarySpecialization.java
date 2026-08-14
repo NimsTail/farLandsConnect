@@ -15,11 +15,19 @@ import com.frammy.unitylauncher.upgrades.UpgradeCondition;
  * has no in-game representation at all; this is what the object DOES.
  */
 public enum MilitarySpecialization {
-    DEFENSE("unity.military.defense"),
-    HOSPITAL("unity.military.hospital_regen"),
-    RECON("unity.military.recon"),
-    ATTACK_SUPPORT("unity.military.attack_support"),
-    LOGISTICS("unity.military.logistics");
+    // Фидбек 2026-08-14 ("зачем вообще ограничивать? мы же отказались от
+    // уровней у Обороны и Опорного пункта") — Оборона/Госпиталь/Поддержка
+    // атаки/Логистика это плоские одноразовые покупки на сайте (max_level:1,
+    // без costs-прогрессии) — квота "куплен уровень N = максимум N объектов"
+    // для них никогда не была осмысленной, а из-за max_level:1 фактически
+    // навсегда запирала их на 1 объект страны. Разведка — единственная,
+    // у которой реально есть 3 уровня (costs: 80/160/260 в seed-данных) —
+    // там квота настоящая, оставлена как была.
+    DEFENSE("unity.military.defense", true),
+    HOSPITAL("unity.military.hospital_regen", true),
+    RECON("unity.military.recon", false),
+    ATTACK_SUPPORT("unity.military.attack_support", true),
+    LOGISTICS("unity.military.logistics", true);
 
     // GH#24 (правки из комментария, п.3) — сайт хочет показывать в дропдауне
     // специализации "сколько доступно (куплено)", как у типов зон
@@ -34,20 +42,29 @@ public enum MilitarySpecialization {
 
     /** Country-level LuckPerms permission base gating this specialization at all (see upgrades_country.json). */
     private final String permBase;
+    /** См. class-javadoc выше и комментарий у каждой константы. */
+    private final boolean unlimitedOnceUnlocked;
 
-    MilitarySpecialization(String permBase) {
+    MilitarySpecialization(String permBase, boolean unlimitedOnceUnlocked) {
         this.permBase = permBase;
+        this.unlimitedOnceUnlocked = unlimitedOnceUnlocked;
     }
 
-    /** Максимум объектов страны, которые могут одновременно нести эту специализацию — 0, если апгрейд не куплен вообще. */
+    /**
+     * Максимум объектов страны, которые могут одновременно нести эту
+     * специализацию — 0, если апгрейд не куплен вообще; -1 ("без лимита"),
+     * если это плоская специализация (unlimitedOnceUnlocked) и апгрейд куплен.
+     */
     public int purchasedQuota(String canonicalCountryId) {
         if (canonicalCountryId == null) return 0;
-        return UpgradeCondition.countryMaxLevel(canonicalCountryId, permBase, MAX_QUOTA_LEVEL);
+        int level = UpgradeCondition.countryMaxLevel(canonicalCountryId, permBase, MAX_QUOTA_LEVEL);
+        if (level <= 0) return 0;
+        return unlimitedOnceUnlocked ? -1 : level;
     }
 
     /** True if the zone's country has actually bought (level >= 1) the upgrade this specialization requires. */
     public boolean unlockedFor(String canonicalCountryId) {
-        return purchasedQuota(canonicalCountryId) >= 1;
+        return purchasedQuota(canonicalCountryId) != 0;
     }
 
     /** GH#24 (фидбек 2026-08-14 п.2) — русское имя для action bar при входе в зону.

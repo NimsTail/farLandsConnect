@@ -110,11 +110,17 @@ public final class MilitarySpecializationService {
         // из подсчёта (она либо не несёт target вовсе — раннее возвращение
         // выше отсекло "уже эта специализация" — либо переключается на
         // target прямо сейчас, что не должно блокировать само себя).
+        // Фидбек 2026-08-14 — quota == -1 значит "без лимита" (плоские
+        // одноразовые специализации, см. MilitarySpecialization.javadoc) —
+        // пропускаем проверку количества вообще, а не сравниваем с -1
+        // (иначе inUse >= -1 всегда true и блокировало бы вообще всё).
         int quota = target.purchasedQuota(country);
-        int inUse = countInUse(country, target, zone.getMarkerID());
-        if (inUse >= quota) {
-            return SwitchOutcome.fail("Лимит объектов страны со специализацией "
-                    + target.name().toLowerCase(Locale.ROOT) + " достигнут: " + inUse + "/" + quota + ".");
+        if (quota != -1) {
+            int inUse = countInUse(country, target, zone.getMarkerID());
+            if (inUse >= quota) {
+                return SwitchOutcome.fail("Лимит объектов страны со специализацией "
+                        + target.name().toLowerCase(Locale.ROOT) + " достигнут: " + inUse + "/" + quota + ".");
+            }
         }
 
         long now = System.currentTimeMillis();
@@ -155,10 +161,16 @@ public final class MilitarySpecializationService {
         return count;
     }
 
-    /** Сколько ещё объектов страны можно назначить на эту специализацию прямо сейчас (для дропдауна на сайте). */
+    /**
+     * Сколько ещё объектов страны можно назначить на эту специализацию прямо
+     * сейчас (для дропдауна на сайте) — -1 значит "без лимита" (см.
+     * MilitarySpecialization.unlimitedOnceUnlocked), фронтенд трактует это
+     * отдельно, не как обычное число.
+     */
     public int availableQuota(String canonicalCountry, MilitarySpecialization spec) {
         if (canonicalCountry == null || spec == null) return 0;
         int quota = spec.purchasedQuota(canonicalCountry);
+        if (quota == -1) return -1;
         return Math.max(0, quota - countInUse(canonicalCountry, spec, null));
     }
 
