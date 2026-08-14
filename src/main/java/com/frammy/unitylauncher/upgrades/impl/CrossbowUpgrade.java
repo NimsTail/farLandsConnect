@@ -74,12 +74,13 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
                     canonicalCountry, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.CROSSBOW.levelPermBase(), 2);
             if (level < 1) continue;
 
-            // "Якорь-зона" (твоя формулировка) — переиспользует тот же
-            // общий anchor-слот, что и Колокол разведки (у зоны только одна
-            // текущая специализация активна за раз, так что слот свободен),
-            // с фоллбеком на центр зоны, если якоря физически нет.
+            // GH#24 (фидбек 2026-08-14 п.4) — якорь (тот же Колокол, что у
+            // Разведпункта — см. MilitaryAnchorService.isAnchorCapable)
+            // теперь ОБЯЗАТЕЛЕН, не просто "предпочтителен": без него
+            // Арбалет не стреляет вообще, никакого фоллбека на центр зоны
+            // больше нет — сайт (MilitaryMapPage) прямо предупреждает об
+            // этом в статусе якоря, так что здесь это должно быть правдой.
             Location origin = z.getMilitaryAnchorLocation();
-            if (origin == null) origin = z.getCenter();
             if (origin == null || origin.getWorld() == null) continue;
 
             Player target = findTarget(origin, cfg, z.getCountryName());

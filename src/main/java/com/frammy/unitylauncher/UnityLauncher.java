@@ -179,7 +179,7 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         militarySpecializationService = new com.frammy.unitylauncher.military.MilitarySpecializationService(zoneManager);
         militaryDefenseSubtypeService = new com.frammy.unitylauncher.military.MilitaryDefenseSubtypeService(zoneManager);
         Bukkit.getPluginManager().registerEvents(
-                new com.frammy.unitylauncher.military.MilitaryAnchorService(militarySpecializationService), this);
+                new com.frammy.unitylauncher.military.MilitaryAnchorService(militarySpecializationService, militaryDefenseSubtypeService), this);
         militaryReconMinigame = new com.frammy.unitylauncher.military.MilitaryReconMinigame(militarySpecializationService);
         Bukkit.getPluginManager().registerEvents(militaryReconMinigame, this);
 

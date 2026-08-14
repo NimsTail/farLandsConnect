@@ -37,9 +37,19 @@ import org.bukkit.event.block.BlockPlaceEvent;
 public final class MilitaryAnchorService implements Listener {
 
     private final MilitarySpecializationService specializationService;
+    // GH#24 (фидбек 2026-08-14 п.4) — Арбалет теперь тоже требует якорь
+    // (тот же Колокол), не только Разведпункт — см. isAnchorCapable ниже.
+    private final MilitaryDefenseSubtypeService defenseSubtypeService;
 
-    public MilitaryAnchorService(MilitarySpecializationService specializationService) {
+    public MilitaryAnchorService(MilitarySpecializationService specializationService, MilitaryDefenseSubtypeService defenseSubtypeService) {
         this.specializationService = specializationService;
+        this.defenseSubtypeService = defenseSubtypeService;
+    }
+
+    /** RECON специализация, либо DEFENSE-объект, реально вкачанный в CROSSBOW — единственные два потребителя якоря сейчас. */
+    private boolean isAnchorCapable(ZoneInfo zone) {
+        if (specializationService.current(zone) == MilitarySpecialization.RECON) return true;
+        return defenseSubtypeService.isActiveAs(zone, MilitaryDefenseSubtype.CROSSBOW);
     }
 
     // GH#24 (твоя заметка про закапывание) — анкер обязан быть либо выше
@@ -68,11 +78,12 @@ public final class MilitaryAnchorService implements Listener {
         ZoneInfo zone = specializationService.militaryZoneAt(loc);
         if (zone == null) return; // колокол вне военного объекта — нас не касается
 
-        if (specializationService.current(zone) != MilitarySpecialization.RECON) {
-            // Не Разведпункт — колокол просто обычный блок здесь, никакой
-            // ошибки: не все специализации (пока) требуют именно колокол,
-            // а раскрывать игроку внутреннюю механику "это не сработает"
-            // без причины не нужно — он и не ожидает эффекта.
+        if (!isAnchorCapable(zone)) {
+            // Ни Разведпункт, ни Арбалет — колокол просто обычный блок здесь,
+            // никакой ошибки: не все специализации/типы обороны (пока)
+            // требуют именно колокол, а раскрывать игроку внутреннюю
+            // механику "это не сработает" без причины не нужно — он и не
+            // ожидает эффекта.
             return;
         }
 
@@ -86,7 +97,7 @@ public final class MilitaryAnchorService implements Listener {
         zone.setMilitaryAnchorLocation(loc);
         saveZones();
 
-        p.sendMessage(ChatColor.GREEN + "Колокол закреплён как якорь разведки для \"" + zone.getName() + "\"."
+        p.sendMessage(ChatColor.GREEN + "Колокол закреплён как якорь для \"" + zone.getName() + "\"."
                 + (replacing ? ChatColor.GRAY + " (заменил предыдущий)" : ""));
     }
 
@@ -107,7 +118,7 @@ public final class MilitaryAnchorService implements Listener {
 
         boolean ownAnchor = zoneCountry == null || breakerCountry == null || breakerCountry.equalsIgnoreCase(zoneCountry);
         if (ownAnchor) {
-            breaker.sendMessage(ChatColor.YELLOW + "Якорь разведки \"" + zone.getName() + "\" снят.");
+            breaker.sendMessage(ChatColor.YELLOW + "Якорь \"" + zone.getName() + "\" снят.");
             return;
         }
 
