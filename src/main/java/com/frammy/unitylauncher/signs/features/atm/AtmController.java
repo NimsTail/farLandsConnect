@@ -135,8 +135,9 @@ public final class AtmController {
         );
 
         String markerID = "marker_" + UUID.randomUUID();
+        int atmNumber = nextAtmNumber();
 
-        store.put(loc, new SignVariables(
+        SignVariables sv = new SignVariables(
                 p.getName(),
                 countryCanonical,
                 List.of(title, "Коснитесь,", "чтобы начать", ""),
@@ -146,7 +147,9 @@ public final class AtmController {
                 SignCategory.ATM,
                 SignState.ATM_MENU,
                 markerID
-        ));
+        );
+        sv.setAtmNumber(atmNumber);
+        store.put(loc, sv);
 
         blueMap.addBlueMapMarker(markerID, loc, "services", "Сервисы", "point_atm", null, p);
         // GH #21 point 3: "point_atm" used to only ever get the fixed label
@@ -154,10 +157,28 @@ public final class AtmController {
         // that we know them (both static at creation time, unlike a live
         // per-viewer commission rate, which would need the popup itself to
         // fetch from the site — a bigger, separate piece of work).
-        String atmDetail = "<b>ATM</b><br>"
-                + "<b>ID:</b> " + com.frammy.unitylauncher.BlueMapIntegration.escapeHtml(markerID) + "<br>"
-                + "<b>Страна:</b> " + com.frammy.unitylauncher.BlueMapIntegration.escapeHtml(countryName);
-        blueMap.setPoiMarkerDetail("services", "atm_" + markerID, loc.getWorld().getName(), "ATM [" + countryName + "]", atmDetail);
+        // GH #21 followup: markerID (a UUID) is useless for a player to
+        // reference out loud/in chat — atmNumber is a short sequential id
+        // just for that. Commission is shown as two real, static rates
+        // (own-country citizen vs everyone else) via AtmFeesUpgrade —
+        // there's no bluemap-side auth to personalize it per-viewer, see
+        // AtmFeesUpgrade.ratesForDisplay's javadoc.
+        String feeLine;
+        AtmFeesUpgrade feesUpgrade = atmFeesUpgradeOrNull();
+        if (feesUpgrade != null) {
+            AtmFeesUpgrade.DisplayRates rates = feesUpgrade.ratesForDisplay(loc);
+            feeLine = rates.sameForAll()
+                    ? "<b>Комиссия:</b> " + pct(rates.own()) + "<br>"
+                    : "<b>Комиссия (граждане):</b> " + pct(rates.own()) + "<br>"
+                    + "<b>Комиссия (остальные):</b> " + pct(rates.foreign()) + "<br>";
+        } else {
+            feeLine = "";
+        }
+        String atmDetail = "<b>ATM №" + atmNumber + "</b><br>"
+                + "<b>Страна:</b> " + com.frammy.unitylauncher.BlueMapIntegration.escapeHtml(countryName) + "<br>"
+                + feeLine
+                + "<b>ID:</b> " + com.frammy.unitylauncher.BlueMapIntegration.escapeHtml(markerID);
+        blueMap.setPoiMarkerDetail("services", "atm_" + markerID, loc.getWorld().getName(), "ATM №" + atmNumber + " [" + countryName + "]", atmDetail);
 
         p.sendMessage(ChatColor.GREEN + "Банкомат установлен." + ChatColor.GRAY + " (" + need + "/" + allowed + ")");
 
@@ -188,6 +209,24 @@ public final class AtmController {
                 }
             }.runTask(UnityLauncher.getInstance());
         });
+    }
+
+    /** Следующий свободный игроко-читаемый номер ATM (GH #21 п.3) — максимум уже
+     *  выданных + 1, а не отдельный персистентный счётчик: signData.yml и так
+     *  переживает рестарты, а старым ATM (созданным до этого поля, atmNumber==0)
+     *  ничего задним числом не бэкафилливаем. */
+    private int nextAtmNumber() {
+        int max = 0;
+        for (SignVariables sv : store.signs().values()) {
+            if (sv != null && sv.getSignCategory() == SignCategory.ATM) {
+                max = Math.max(max, sv.getAtmNumber());
+            }
+        }
+        return max + 1;
+    }
+
+    private static String pct(double rate) {
+        return String.format(Locale.ROOT, "%.1f%%", rate * 100.0);
     }
 
     // ===== interact (ЛКМ = browse/confirm, ПКМ = back/cancel) =====

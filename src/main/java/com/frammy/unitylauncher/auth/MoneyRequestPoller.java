@@ -55,6 +55,8 @@ public class MoneyRequestPoller {
                 case "balance_sync" -> processBalanceSync(req);
                 case "daydeal_confirm" -> processDaydealConfirm(req);
                 case "daydeal_status" -> processDaydealStatus(req);
+                case "country_treasury_deposit" -> processTreasuryDeposit(req);
+                case "country_treasury_withdraw" -> processTreasuryWithdraw(req);
                 default -> api.reportMoneyRequestResult(req.id(), false, "unknown_kind");
             }
         } catch (Exception e) {
@@ -179,6 +181,40 @@ public class MoneyRequestPoller {
             return;
         }
         boolean credited = UnityCommands.getInstance().applyMoneyDelta(req.toUsername(), req.amount(), "Зарплата за игру");
+        api.reportMoneyRequestResult(req.id(), credited, credited ? null : "user_not_found");
+    }
+
+    /**
+     * farlandsconnect GH #19 follow-up — пополнение казны страны с сайта:
+     * чистый сток (никто в игре не получает эти деньги, казна — виртуальный
+     * счётчик в Postgres, не игровой аккаунт), тот же паттерн, что и
+     * safewayless счёт в processInvoicePay, только всегда без получателя.
+     * До этого сайт трогал только свой локальный Account-зеркало — игрок
+     * реально ничего не терял, следующий же balance_sync тихо откатывал
+     * "списание" обратно на нетронутый реальный баланс.
+     */
+    private void processTreasuryDeposit(FarLandsApiClient.PendingMoneyRequest req) {
+        if (req.fromUsername() == null) {
+            api.reportMoneyRequestResult(req.id(), false, "missing_username");
+            return;
+        }
+        boolean debited = UnityCommands.getInstance().applyMoneyDelta(req.fromUsername(), -req.amount(), "Пополнение казны страны");
+        api.reportMoneyRequestResult(req.id(), debited, debited ? null : "insufficient_funds");
+    }
+
+    /**
+     * farlandsconnect GH #19 follow-up — снятие из казны страны на сайте:
+     * чистый источник (никто в игре не платит за это — казна отдаёт свои
+     * же виртуальные деньги), тот же паттерн, что processSalaryClaim.
+     * До этого снятие уменьшало казну на сайте, но игрок реально не получал
+     * ничего — следующий же balance_sync стирал фиктивное зачисление.
+     */
+    private void processTreasuryWithdraw(FarLandsApiClient.PendingMoneyRequest req) {
+        if (req.toUsername() == null) {
+            api.reportMoneyRequestResult(req.id(), false, "missing_username");
+            return;
+        }
+        boolean credited = UnityCommands.getInstance().applyMoneyDelta(req.toUsername(), req.amount(), "Снятие из казны страны");
         api.reportMoneyRequestResult(req.id(), credited, credited ? null : "user_not_found");
     }
 }

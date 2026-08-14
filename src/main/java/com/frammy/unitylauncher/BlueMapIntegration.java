@@ -294,7 +294,9 @@ public class BlueMapIntegration {
                     String mid = "atm_" + id;
                     POIMarker marker = new POIMarker(mid, position);
                     marker.setLabel("ATM");
-                    marker.setIcon("assets/atm.png", 8, 8);
+                    // GH #21 п.1: пользователь положил свою иконку (atm_sign) в
+                    // assets блумапа — используем её вместо generic-заглушки.
+                    marker.setIcon("assets/atm_sign.png", 8, 8);
                     markerSet.getMarkers().put(mid, marker);
                 }
 

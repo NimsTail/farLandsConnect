@@ -50,6 +50,9 @@ public record SignYamlRepository(UnityLauncher plugin, File dataFolder,
             }
 
             shopConfig.set(path + ".markerID", vars.getMarkerID());
+            if (vars.getSignCategory() == SignCategory.ATM) {
+                shopConfig.set(path + ".atmNumber", vars.getAtmNumber());
+            }
 
             shopConfig.set(path + ".location.world", loc.getWorld().getName());
             shopConfig.set(path + ".location.x", loc.getBlockX());
@@ -128,6 +131,9 @@ public record SignYamlRepository(UnityLauncher plugin, File dataFolder,
             }
 
             SignVariables vars = new SignVariables(owner, ownerCountry, text, scrollLines, isConfigurable, isPaused, category, state, markerID);
+            if (category == SignCategory.ATM) {
+                vars.setAtmNumber(section.getInt("atmNumber", 0));
+            }
             store.put(loc, vars);
 
             // Индекс контейнеров для SHOP_SOURCE

@@ -15,6 +15,12 @@ public class SignVariables {
     private final SignCategory category;
     private String markerID;
 
+    // GH #21 п.3: простой sequential ID для игроков (в отличие от markerID —
+    // случайного UUID, непригодного для того, чтобы игрок мог его назвать/
+    // записать). 0 значит "не назначен" (не-ATM таблички, или старые ATM,
+    // созданные до этого поля — им номер не бэкафилливается).
+    private int atmNumber;
+
     public SignVariables(
             String ownerName,
             String ownerCountry,
@@ -54,6 +60,7 @@ public class SignVariables {
     public String getOwnerName() { return ownerName; }
     public String getOwnerCountry() { return ownerCountry; }
     public String getMarkerID() {return markerID;}
+    public int getAtmNumber() { return atmNumber; }
 
 
     public void setPaused(boolean isPaused) {
@@ -70,5 +77,8 @@ public class SignVariables {
 
     public void setMarkerID(String markerID) {
         this.markerID = markerID;
+    }
+    public void setAtmNumber(int atmNumber) {
+        this.atmNumber = atmNumber;
     }
 }

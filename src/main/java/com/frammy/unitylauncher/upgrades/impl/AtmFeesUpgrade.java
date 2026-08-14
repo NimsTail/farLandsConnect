@@ -92,4 +92,37 @@ public final class AtmFeesUpgrade extends BaseUpgrade {
         var cfg = C().bank().atmFees();
         return cfg != null && cfg.enabled();
     }
+
+    /** Ставки для статичного описания BlueMap-маркера (GH #21 п.2): own — что платит
+     *  гражданин страны, которой принадлежит этот ATM; foreign — все остальные. В
+     *  BANK-зоне гражданство роли не играет (см. rawRate — bank-ставка отдаётся
+     *  всем одинаково), тогда own==foreign. Не привязано к конкретному игроку —
+     *  посетитель BlueMap-карты не аутентифицирован, в отличие от calculateAtmFee. */
+    public DisplayRates ratesForDisplay(Location atmLocation) {
+        if (!enabled() || atmLocation == null) return new DisplayRates(0.0, 0.0);
+        var cfg = C().bank().atmFees();
+        String locCountry = UpgradeCondition.countryCanonicalAt(atmLocation);
+        ZoneInfo zone = UpgradeCondition.zoneAt(atmLocation);
+
+        if (zone != null && zone.getType() == ZoneType.BANK) {
+            boolean hasAtmNetwork = locCountry != null && countryMaxLevel(locCountry, cfg.atmNetworkPermBase(), 1) >= 1;
+            double bankRate = clamp(hasAtmNetwork ? cfg.feeInBank() : cfg.feeInBankBase());
+            return new DisplayRates(bankRate, bankRate);
+        }
+
+        boolean free = locCountry != null && countryMaxLevel(locCountry, cfg.freeTransferPermBase(), 1) >= 1;
+        double own = clamp(free ? 0.0 : cfg.feeInCountry());
+        double foreign = clamp(cfg.feeForeign());
+        return new DisplayRates(own, foreign);
+    }
+
+    private static double clamp(double r) {
+        if (r < 0.0) return 0.0;
+        if (r > 1.0) return 1.0;
+        return r;
+    }
+
+    public record DisplayRates(double own, double foreign) {
+        public boolean sameForAll() { return Double.compare(own, foreign) == 0; }
+    }
 }
