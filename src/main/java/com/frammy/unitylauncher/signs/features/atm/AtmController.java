@@ -157,28 +157,7 @@ public final class AtmController {
         // that we know them (both static at creation time, unlike a live
         // per-viewer commission rate, which would need the popup itself to
         // fetch from the site — a bigger, separate piece of work).
-        // GH #21 followup: markerID (a UUID) is useless for a player to
-        // reference out loud/in chat — atmNumber is a short sequential id
-        // just for that. Commission is shown as two real, static rates
-        // (own-country citizen vs everyone else) via AtmFeesUpgrade —
-        // there's no bluemap-side auth to personalize it per-viewer, see
-        // AtmFeesUpgrade.ratesForDisplay's javadoc.
-        String feeLine;
-        AtmFeesUpgrade feesUpgrade = atmFeesUpgradeOrNull();
-        if (feesUpgrade != null) {
-            AtmFeesUpgrade.DisplayRates rates = feesUpgrade.ratesForDisplay(loc);
-            feeLine = rates.sameForAll()
-                    ? "<b>Комиссия:</b> " + pct(rates.own()) + "<br>"
-                    : "<b>Комиссия (граждане):</b> " + pct(rates.own()) + "<br>"
-                    + "<b>Комиссия (остальные):</b> " + pct(rates.foreign()) + "<br>";
-        } else {
-            feeLine = "";
-        }
-        String atmDetail = "<b>ATM №" + atmNumber + "</b><br>"
-                + "<b>Страна:</b> " + com.frammy.unitylauncher.BlueMapIntegration.escapeHtml(countryName) + "<br>"
-                + feeLine
-                + "<b>ID:</b> " + com.frammy.unitylauncher.BlueMapIntegration.escapeHtml(markerID);
-        blueMap.setPoiMarkerDetail("services", "atm_" + markerID, loc.getWorld().getName(), "ATM №" + atmNumber + " [" + countryName + "]", atmDetail);
+        applyMarkerDetail(loc, markerID, countryCanonical, atmNumber);
 
         p.sendMessage(ChatColor.GREEN + "Банкомат установлен." + ChatColor.GRAY + " (" + need + "/" + allowed + ")");
 
@@ -227,6 +206,44 @@ public final class AtmController {
 
     private static String pct(double rate) {
         return String.format(Locale.ROOT, "%.1f%%", rate * 100.0);
+    }
+
+    /**
+     * GH #21 п.3 (restore-on-boot regression) — extracted out of
+     * onSignCreateATM so the SAME ID/country/fee detail popup gets filled in
+     * both at creation AND every time SignManager.restoreRuntimeStateAfterLoad
+     * recreates the "services"/point_atm marker on server boot. Before this,
+     * only a freshly-placed ATM ever got the real detail — every restart
+     * silently reset already-existing ATMs back to the bare "ATM" label with
+     * no popup content at all, since restore only called addBlueMapMarker
+     * (which sets the generic label) and never this.
+     *
+     * atmNumber &lt;= 0 covers legacy ATMs placed before that field existed
+     * (never backfilled, see nextAtmNumber's javadoc) — shown without the
+     * "№N" to avoid a misleading "ATM №0".
+     */
+    public void applyMarkerDetail(Location loc, String markerID, String countryCanonical, int atmNumber) {
+        String countryName = countryDisplayName(countryCanonical);
+        if (countryName == null) countryName = countryCanonical;
+
+        String feeLine;
+        AtmFeesUpgrade feesUpgrade = atmFeesUpgradeOrNull();
+        if (feesUpgrade != null) {
+            AtmFeesUpgrade.DisplayRates rates = feesUpgrade.ratesForDisplay(loc);
+            feeLine = rates.sameForAll()
+                    ? "<b>Комиссия:</b> " + pct(rates.own()) + "<br>"
+                    : "<b>Комиссия (граждане):</b> " + pct(rates.own()) + "<br>"
+                    + "<b>Комиссия (остальные):</b> " + pct(rates.foreign()) + "<br>";
+        } else {
+            feeLine = "";
+        }
+
+        String numberLabel = atmNumber > 0 ? "ATM №" + atmNumber : "ATM";
+        String atmDetail = "<b>" + numberLabel + "</b><br>"
+                + "<b>Страна:</b> " + com.frammy.unitylauncher.BlueMapIntegration.escapeHtml(countryName) + "<br>"
+                + feeLine
+                + "<b>ID:</b> " + com.frammy.unitylauncher.BlueMapIntegration.escapeHtml(markerID);
+        blueMap.setPoiMarkerDetail("services", "atm_" + markerID, loc.getWorld().getName(), numberLabel + " [" + countryName + "]", atmDetail);
     }
 
     // ===== interact (ЛКМ = browse/confirm, ПКМ = back/cancel) =====

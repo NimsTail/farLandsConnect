@@ -239,6 +239,11 @@ public final class SignManager implements Listener {
             String markerId = sv.getMarkerID();
             if (markerId != null && !markerId.isBlank() && sv.getSignCategory() == SignCategory.ATM) {
                 blueMapIntegration.addBlueMapMarker(markerId, loc, "services", "Сервисы", "point_atm", null, null);
+                // GH #21 п.3 (restore-on-boot regression) — addBlueMapMarker
+                // above only sets the generic "ATM" label; without this the
+                // real ID/country/fee popup (AtmController.onSignCreateATM)
+                // silently reset to blank on every server restart.
+                atm.applyMarkerDetail(loc, markerId, sv.getOwnerCountry(), sv.getAtmNumber());
             }
         }
 

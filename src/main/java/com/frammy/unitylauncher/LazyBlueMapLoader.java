@@ -1,10 +1,8 @@
 package com.frammy.unitylauncher;
 
-import com.frammy.unitylauncher.signs.SignVariables;
 import com.frammy.unitylauncher.zones.ZoneInfo;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import org.bukkit.Bukkit;
-import org.bukkit.Location;
 import org.bukkit.scheduler.BukkitRunnable;
 import org.jetbrains.annotations.NotNull;
 
@@ -65,12 +63,11 @@ public record LazyBlueMapLoader(UnityLauncher plugin) {
             t.printStackTrace();
         }
 
-        // 2) Делаем снимки коллекций, чтобы не шарить «живые» мапы в раннер
-        Map<Location, SignVariables> signsSnapshot = new HashMap<>();
-        var sm = plugin.getSignManager();
-        if (sm != null) {
-            signsSnapshot.putAll(sm.store().signs()); // Map<Location, SignVariables>
-        }
+        // 2) Снимок зон, чтобы не шарить «живую» карту в раннер. Раньше тут
+        // же снимался и snapshot табличек для applySignMarker — тот путь
+        // убран целиком (GH #21 п.3, см. clearMarkerSet ниже), сами
+        // маркеры табличек (ATM) восстанавливает SignManager.
+        // loadSignData()/restoreRuntimeStateAfterLoad, вызванный чуть выше.
         List<ZoneInfo> zonesSnapshot = plugin.getZoneManager().getAllZonesSnapshot();
 
         // 3) Инициализируем MarkerSet'ы один раз
@@ -80,8 +77,21 @@ public record LazyBlueMapLoader(UnityLauncher plugin) {
             t.printStackTrace();
         }
 
+        // GH #21 п.3 — "zones_signs" (generic icon-less POI per sign,
+        // restored unconditionally for every sign category) is retired —
+        // superseded by SHOP's own zone extrude marker and ATM's proper
+        // "services"/point_atm marker (see SignManager.restoreRuntimeState
+        // AfterLoad). It kept resurrecting a redundant second pin at ATM's
+        // exact location on every boot. One-time sweep of whatever it
+        // already left behind; nothing repopulates this set going forward.
+        try {
+            plugin.getBlueMapIntegration().clearMarkerSet("zones_signs");
+        } catch (Throwable t) {
+            t.printStackTrace();
+        }
+
         // 4) Собираем список коротких задач применения (никаких тяжёлых расчётов внутри!)
-        final List<Runnable> tasks = getRunnables(zonesSnapshot, signsSnapshot);
+        final List<Runnable> tasks = getRunnables(zonesSnapshot);
 
         // 5) Бежим порциями по MARKERS_PER_TICK задач за тик — мягко для TPS
         final int total = tasks.size();
@@ -127,8 +137,8 @@ public record LazyBlueMapLoader(UnityLauncher plugin) {
         }.runTaskTimer(plugin, 1L, 1L);
     }
 
-    private @NotNull List<Runnable> getRunnables(List<ZoneInfo> zonesSnapshot, Map<Location, SignVariables> signsSnapshot) {
-        final List<Runnable> tasks = new ArrayList<>(zonesSnapshot.size() + signsSnapshot.size());
+    private @NotNull List<Runnable> getRunnables(List<ZoneInfo> zonesSnapshot) {
+        final List<Runnable> tasks = new ArrayList<>(zonesSnapshot.size());
 
         for (ZoneInfo z : zonesSnapshot) {
             tasks.add(() -> {
@@ -136,18 +146,6 @@ public record LazyBlueMapLoader(UnityLauncher plugin) {
                     plugin.getBlueMapIntegration().applyZoneMarker(z);
                 } catch (Throwable t) {
                     plugin.getLogger().warning("[LazyLoad] applyZoneMarker fail: " + (z != null ? z.getID() : "null") + " -> " + t.getMessage());
-                }
-            });
-        }
-
-        for (Map.Entry<Location, SignVariables> e : signsSnapshot.entrySet()) {
-            final Location loc = e.getKey();
-            final SignVariables vars = e.getValue();
-            tasks.add(() -> {
-                try {
-                    plugin.getBlueMapIntegration().applySignMarker(loc, vars);
-                } catch (Throwable t) {
-                    plugin.getLogger().warning("[LazyLoad] applySignMarker fail @" + loc + " -> " + t.getMessage());
                 }
             });
         }

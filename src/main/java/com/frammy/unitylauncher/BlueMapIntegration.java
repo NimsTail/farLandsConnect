@@ -1,7 +1,6 @@
 package com.frammy.unitylauncher;
 
 import com.flowpowered.math.vector.Vector3d;
-import com.frammy.unitylauncher.signs.SignVariables;
 import com.frammy.unitylauncher.zones.ZoneInfo;
 import de.bluecolored.bluemap.api.BlueMapAPI;
 import de.bluecolored.bluemap.api.BlueMapMap;
@@ -107,30 +106,6 @@ public class BlueMapIntegration {
                 }
             });
         }
-    }
-
-    /** Ставит простой POI-маркер для таблички в отдельном наборе. Совместим с текущей сигнатурой POIMarker. */
-    public void applySignMarker(Location loc, SignVariables vars) {
-        if (loc == null || loc.getWorld() == null) return;
-
-        BlueMapAPI.getInstance().flatMap(api -> api.getMap(loc.getWorld().getName())).ifPresent(map -> {
-            Map<String, MarkerSet> sets = map.getMarkerSets();
-            if (sets == null) return;
-
-            final String setId = "zones_signs";
-            final String setLabel = "Signs";
-            MarkerSet set = sets.computeIfAbsent(setId, k -> new MarkerSet("Markers"));
-            set.setLabel(setLabel);
-
-            final String id = "sign_" + loc.getBlockX() + "_" + loc.getBlockY() + "_" + loc.getBlockZ();
-            Vector3d pos = new Vector3d(loc.getX(), loc.getY(), loc.getZ());
-
-            POIMarker poi = new POIMarker(id, pos); // без iconAddress
-            String label = (vars != null && vars.getSignCategory() != null) ? vars.getSignCategory().name() : "Sign";
-            poi.setLabel(label);
-
-            set.getMarkers().put(id, poi);
-        });
     }
 
     // GH #27 "Географические объекты" — infra/geographic-landmarks-design.md
@@ -294,9 +269,14 @@ public class BlueMapIntegration {
                     String mid = "atm_" + id;
                     POIMarker marker = new POIMarker(mid, position);
                     marker.setLabel("ATM");
-                    // GH #21 п.1: пользователь положил свою иконку (atm_sign) в
-                    // assets блумапа — используем её вместо generic-заглушки.
-                    marker.setIcon("assets/atm_sign.png", 8, 8);
+                    // GH #21 п.1: пользователь положил свою иконку в assets
+                    // блумапа — используем её вместо generic-заглушки. GH #21
+                    // (фидбек) — путь был с подчёркиванием (atm_sign.png), а
+                    // реальный файл на сервере лежит с дефисом (atm-sign.png,
+                    // см. D:\...\clean\bluemap\web\assets) — из-за этого
+                    // иконка молча не грузилась (BlueMap просто не находил
+                    // файл, без ошибки).
+                    marker.setIcon("assets/atm-sign.png", 8, 8);
                     markerSet.getMarkers().put(mid, marker);
                 }
 
@@ -361,6 +341,30 @@ public class BlueMapIntegration {
             if (m instanceof POIMarker poi) {
                 if (label != null) poi.setLabel(label);
                 if (detailHtml != null) poi.setDetail(detailHtml);
+            }
+        });
+    }
+
+    /**
+     * GH #21 п.3 — {@code applySignMarker}/{@code zones_signs} (generic POI
+     * per sign, no icon/detail, restored unconditionally on every boot for
+     * ALL sign categories including ATM) is now fully superseded: SHOP no
+     * longer wants a point marker at all (its zone's own extrude marker
+     * covers it), and ATM has its own proper "services"/point_atm marker
+     * with icon+detail. Left running, it just kept resurrecting a second,
+     * generic, icon-less pin at the exact same spot as ATM's real one on
+     * every restart — the "показывается не там" confusion from the ticket.
+     * Called once at boot to sweep out whatever it already resurrected
+     * before this fix; nothing repopulates this set going forward.
+     */
+    public void clearMarkerSet(String setId) {
+        if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) return;
+        BlueMapAPI.getInstance().ifPresent(api -> {
+            for (BlueMapMap map : api.getMaps()) {
+                Map<String, MarkerSet> sets = map.getMarkerSets();
+                if (sets == null) continue;
+                MarkerSet set = sets.get(setId);
+                if (set != null && set.getMarkers() != null) set.getMarkers().clear();
             }
         });
     }
