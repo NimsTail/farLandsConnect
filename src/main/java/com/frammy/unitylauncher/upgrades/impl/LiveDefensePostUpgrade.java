@@ -110,6 +110,14 @@ import java.util.concurrent.ThreadLocalRandom;
 //     шлем) / все 3 доп. слота / все 3 доп. слота гарантированно топового
 //     тира (алмаз/незерит) — вместо единого шанса на "полный комплект
 //     случайного тира" сразу на 75%, что ощущалось как слишком щедро.
+//
+// GH#30 (раунд 5) — "ты действительно не понял": не "три планки строгости
+// одного броска", а три ПОСЛЕДОВАТЕЛЬНЫХ независимых шанса — собрать 1-й
+// доп. слот, затем (только если собрал) 2-й, затем 3-й; какие именно из
+// {нагрудник, поножи, ботинки} заполняются первым/вторым/третьим —
+// случайный порядок каждый раз, не всегда нагрудник первым. "Гарантированно
+// топовый тир" убран целиком — тир как и раньше общий взвешенный по
+// редкости бросок (pickArmorTierIndex), независимо от количества слотов.
 public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listener {
 
     private static final UpgradeKey KEY = UpgradeKey.of("military.live_defense");
@@ -155,17 +163,19 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
                     new MobSpec(EntityType.WITCH, 1, false), new MobSpec(EntityType.PILLAGER, 2, false), new MobSpec(EntityType.ZOMBIE, 3, true)))
     );
 
-    // GH#30 (раунд 3→4, Улучшения п.2) "Шанс лучшей экипировки" —
-    // независимый параметрический апгрейд поверх пачки. Раунд 4: вместо
-    // одного шанса на "всё или ничего" — три вложенных порога (см. п.14
-    // класс-javadoc). Индекс массива — уровень апгрейда (0 = не куплено).
-    // Пороги НЕ складываются — это один бросок 0..100, ниже atLeastOne%
-    // ничего, ниже three% — минимум 1 доп. слот, ниже full% — минимум 3,
-    // иначе (< full%) — 3 доп. слота гарантированно топового тира.
+    // GH#30 (раунд 5) "Шанс лучшей экипировки" — три ПОСЛЕДОВАТЕЛЬНЫХ
+    // независимых шанса вместо трёх вложенных порогов одного броска (см.
+    // класс-javadoc). SLOT1 — шанс собрать первый доп. слот; SLOT2 —
+    // шанс собрать второй, ТОЛЬКО если собран первый; SLOT3 — шанс
+    // собрать третий, только если собраны оба предыдущих. Итоговый
+    // кумулятивный шанс "хотя бы N слотов" = произведение первых N
+    // элементов (см. cumulativeGearChance ниже) — именно эти кумулятивные
+    // цифры и показываются игроку (seed-data stats на 2_militaryLiveDefense).
+    // Индекс массива — уровень апгрейда (0 = не куплено, всё по нулям).
     private static final String GEAR_PERM_BASE = "unity.military.live_defense_gear";
-    private static final double[] GEAR_AT_LEAST_ONE_CHANCE = {0.0, 0.35, 0.55, 0.75};
-    private static final double[] GEAR_THREE_CHANCE = {0.0, 0.12, 0.25, 0.40};
-    private static final double[] GEAR_FULL_CHANCE = {0.0, 0.03, 0.08, 0.15};
+    private static final double[] GEAR_SLOT1_CHANCE = {0.0, 0.40, 0.55, 0.70};
+    private static final double[] GEAR_SLOT2_CHANCE = {0.0, 0.30, 0.40, 0.55};
+    private static final double[] GEAR_SLOT3_CHANCE = {0.0, 0.20, 0.30, 0.40};
 
     // GH#30 (раунд 4, п.13) — кулдаун между волнами больше не фиксированная
     // cfg.cooldownTicks() — база теперь зависит от "мощности" пачки (состав
@@ -387,16 +397,21 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
             boolean burnsInDaylight = spec.type() == EntityType.ZOMBIE || spec.type() == EntityType.SKELETON;
             if (burnsInDaylight) equipHelmet(mob, pickArmorTierIndex());
 
-            // GH#30 (раунд 4, п.14) — три вложенных порога вместо одного
-            // "всё или ничего": роль одного случайного числа против трёх
-            // возрастающе строгих планок (см. константы выше).
+            // GH#30 (раунд 5) — три последовательных независимых шанса, не
+            // один бросок против трёх порогов: собрать 1-й доп. слот, потом
+            // (только если собрал) 2-й, потом 3-й.
             if (gearLevel > 0) {
-                double roll = ThreadLocalRandom.current().nextDouble();
-                if (roll < GEAR_AT_LEAST_ONE_CHANCE[gearLevel]) {
-                    boolean guaranteedTopTier = roll < GEAR_FULL_CHANCE[gearLevel]; // top nested tier — implies "three" too
-                    int extraPieces = roll < GEAR_THREE_CHANCE[gearLevel] ? 3 : 1;
-                    int tierIndex = guaranteedTopTier ? pickTopArmorTierIndex() : pickArmorTierIndex();
-                    equipExtraArmor(mob, tierIndex, extraPieces);
+                ThreadLocalRandom rnd = ThreadLocalRandom.current();
+                int extraSlots = 0;
+                if (rnd.nextDouble() < GEAR_SLOT1_CHANCE[gearLevel]) {
+                    extraSlots = 1;
+                    if (rnd.nextDouble() < GEAR_SLOT2_CHANCE[gearLevel]) {
+                        extraSlots = 2;
+                        if (rnd.nextDouble() < GEAR_SLOT3_CHANCE[gearLevel]) extraSlots = 3;
+                    }
+                }
+                if (extraSlots > 0) {
+                    equipRandomArmorSlots(mob, pickArmorTierIndex(), extraSlots);
                     equipEnchantedWeapon(mob, spec.type());
                 }
             }
@@ -436,32 +451,26 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
     }
 
     /**
-     * GH#30 (раунд 4, п.14) — 1 или 3 доп. слота брони (сверх обязательного
-     * шлема, который уже стоит своего тира — перекрывается тут тем же
-     * tierIndex для визуальной цельности комплекта). 1 слот — нагрудник
-     * (самая заметная защита); 3 — весь корпус (нагрудник+поножи+ботинки).
+     * GH#30 (раунд 5) — extraSlots (1-3) доп. слотов брони сверх
+     * обязательного шлема (который уже стоит своего тира — перекрывается
+     * тут тем же tierIndex для визуальной цельности комплекта), но КАКИЕ
+     * именно из {нагрудник, поножи, ботинки} заполняются — случайный
+     * порядок каждый раз (Collections.shuffle), не всегда нагрудник первым.
      */
-    private void equipExtraArmor(LivingEntity mob, int tierIndex, int extraPieces) {
+    private void equipRandomArmorSlots(LivingEntity mob, int tierIndex, int extraSlots) {
         EntityEquipment eq = mob.getEquipment();
         if (eq == null) return;
         eq.setHelmet(new ItemStack(ARMOR_TIER_HELMET[tierIndex]));
-        eq.setChestplate(new ItemStack(ARMOR_TIER_CHEST[tierIndex]));
-        if (extraPieces >= 3) {
-            eq.setLeggings(new ItemStack(ARMOR_TIER_LEGS[tierIndex]));
-            eq.setBoots(new ItemStack(ARMOR_TIER_BOOTS[tierIndex]));
+
+        List<Material> slots = new ArrayList<>(List.of(
+                ARMOR_TIER_CHEST[tierIndex], ARMOR_TIER_LEGS[tierIndex], ARMOR_TIER_BOOTS[tierIndex]));
+        java.util.Collections.shuffle(slots);
+        for (int i = 0; i < Math.min(extraSlots, slots.size()); i++) {
+            Material piece = slots.get(i);
+            if (piece == ARMOR_TIER_CHEST[tierIndex]) eq.setChestplate(new ItemStack(piece));
+            else if (piece == ARMOR_TIER_LEGS[tierIndex]) eq.setLeggings(new ItemStack(piece));
+            else eq.setBoots(new ItemStack(piece));
         }
-    }
-
-    // GH#30 (раунд 4, п.14) — "фулл сет" гарантированно топ-2 тира
-    // (алмаз/незерит), а не по общей взвешенной редкости — отличает эту
-    // планку от простого "3 доп. слота" случайного тира качественно, не
-    // только по количеству. Индексы 4 (алмаз)/5 (незерит) в ARMOR_TIER_*.
-    private static final double[] TOP_TIER_WEIGHTS = {70, 30};
-
-    private static int pickTopArmorTierIndex() {
-        // Индексы 4 (алмаз) и 5 (незерит) в ARMOR_TIER_* массивах.
-        double roll = ThreadLocalRandom.current().nextDouble() * (TOP_TIER_WEIGHTS[0] + TOP_TIER_WEIGHTS[1]);
-        return roll < TOP_TIER_WEIGHTS[0] ? 4 : 5;
     }
 
     /**

@@ -358,7 +358,14 @@ public class ZoneRequestPoller {
         // на ближайшем же zones_sync он тихо перестаёт засчитываться, без
         // отдельного слушателя за постройкой над ним.
         Location anchorLoc = z.getMilitaryAnchorLocation();
-        o.addProperty("militaryAnchorPresent", anchorLoc != null && com.frammy.unitylauncher.military.MilitaryAnchorService.isExposed(anchorLoc));
+        boolean anchorExposed = anchorLoc != null && com.frammy.unitylauncher.military.MilitaryAnchorService.isExposed(anchorLoc);
+        o.addProperty("militaryAnchorPresent", anchorExposed);
+        // GH#32 (раунд 5, п.6) — "отображать точное местоположение сооружений
+        // по колоколу" — раньше сайт знал только да/нет, сам якорь не
+        // отдавался; координаты нужны только пока якорь реально жив
+        // (anchorExposed), иначе null — сайт падает обратно на центроид зоны.
+        o.addProperty("militaryAnchorX", anchorExposed ? anchorLoc.getX() : null);
+        o.addProperty("militaryAnchorZ", anchorExposed ? anchorLoc.getZ() : null);
 
         return o;
     }

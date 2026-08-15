@@ -286,9 +286,9 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
         zoneLimits.put(ZoneType.LIBRARY,    new ZoneTypeData("Библиотека",    500.0, 4,  10.0, false, 1.0,  20, "unityLauncher.createZone.library"));
         zoneLimits.put(ZoneType.GREENHOUSE, new ZoneTypeData("Теплица",       900.0, 4,   5.0, false, 1.0,  20, "unityLauncher.createZone.greenhouse"));
         // infra/military-diplomacy-design.md §3.1: находится только в стране/колонии,
-        // как HOSPITAL/BANK — квота/лимиты по той же логике, чисел пока не утверждено,
-        // взяты на паритет с HOSPITAL.
-        zoneLimits.put(ZoneType.MILITARY,   new ZoneTypeData("Военный объект", 700.0, 4,  15.0, false, 1.0, 200, "unityLauncher.createZone.military"));
+        // как HOSPITAL/BANK. GH#32 (раунд 5, п.3) — "сократить лимит военной
+        // зоны и повысить нижнюю планку" — было 15/700, теперь 100/500.
+        zoneLimits.put(ZoneType.MILITARY,   new ZoneTypeData("Военный объект", 500.0, 4, 100.0, false, 1.0, 200, "unityLauncher.createZone.military"));
 
         zoneLimits.put(ZoneType.SHOP,       new ZoneTypeData("Торговая точка", 500.0, 10, 3.0, true, 1.0, 10, "unityLauncher.createZone.shop"));
         zoneLimits.put(ZoneType.PLOT,       new ZoneTypeData("Участок",        500.0, 10, 3.0, true, 1.0, 10, "unityLauncher.createZone.plot"));
