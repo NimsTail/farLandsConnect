@@ -55,6 +55,11 @@ import java.util.concurrent.ThreadLocalRandom;
 //     эффектов (см. choices в 3_militaryCrossbowEffects) вместо случайного
 //     эффекта из всего пула; если ничего не выбрано — старое поведение
 //     (случайный эффект из пула по уровню) как фоллбек.
+//  6. (Фидбек раунда 4) — "то сбоку не стреляет, то прямо в упоре": findTargets()
+//     проверял LOS/угол/дальность от НЕсмещённого origin, а стрела спавнилась
+//     на 1.2 блока выше (см. п.1/раунд 3) — та же расходящаяся пара точек,
+//     просто на этапе выбора цели, не наведения. Оба этапа теперь считаются
+//     от одной и той же spawnLoc.
 public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
 
     private static final UpgradeKey KEY = UpgradeKey.of("military.crossbow");
@@ -163,8 +168,22 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
             // GH#24 (фидбек 2026-08-14 п.4) — якорь обязателен, без него не стреляет вообще.
             Location origin = z.getMilitaryAnchorLocation();
             if (origin == null || origin.getWorld() == null) continue;
+            // GH#29 (фидбек раунд 4) — "то сбоку не стреляет, то прямо в
+            // упоре" — тот же класс бага, что уже чинили для направления в
+            // п.1, только теперь в проверке видимости/дальности: findTargets
+            // проверял LOS/угол/дистанцию от НЕсмещённого origin (низ
+            // якоря), а стрела реально спавнилась из shoot() на 1.2 блока
+            // выше. У любого объекта с парапетом/выступом на этой высоте
+            // (а Разведпункт/Арбалет как раз требуют физический блок-якорь)
+            // два уровня видят обзор по-разному — то ложно "не видит" цель
+            // сбоку (которая реально в прямой видимости с высоты стрелы),
+            // то ложно "видит" (а стрела при спавне на 1.2 выше тут же
+            // цепляется за что-то рядом — ощущается как "в упор"). Считаем
+            // spawnLoc один раз и используем её ВЕЗДЕ — и для проверки, и
+            // для самого выстрела, вместо двух разных точек отсчёта.
+            Location spawnLoc = origin.clone().add(0, 1.2, 0);
 
-            List<Player> targets = findTargets(origin, cfg, z.getCountryName(), MAX_TARGETS);
+            List<Player> targets = findTargets(spawnLoc, cfg, z.getCountryName(), MAX_TARGETS);
             if (targets.isEmpty()) continue;
 
             String markerId = z.getMarkerID();
@@ -175,7 +194,7 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
             lastShotByZone.put(markerId, now);
 
             for (Player target : targets) {
-                shoot(origin, target, cfg, canonicalCountry, effectsLevel, chanceLevel, accuracyLevel);
+                shoot(spawnLoc, target, cfg, canonicalCountry, effectsLevel, chanceLevel, accuracyLevel);
             }
         }
     }
@@ -226,19 +245,17 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
         return verticalAngleDeg >= -blindSpotDegrees;
     }
 
-    private void shoot(Location origin, Player target, MilitaryCfg.CrossbowCfg cfg, String canonicalCountry, int effectsLevel, int chanceLevel, int accuracyLevel) {
-        // GH#29 п.1 — направление считаем от той же точки, где стрела реально
-        // спавнится (не от origin без смещения) — раньше это расхождение в
-        // 0.5 блока по всей траектории читалось как "целится на голову выше".
-        // GH#29 (фидбек раунд 3) — "создавай стрелу чуть выше самого блока
-        // колокола, иначе появляется куча механических слепых зон, попадает
-        // сам в себя" — 0.5 блока было мало, стрела спавнилась внутри/у
-        // самого блока якоря и сталкивалась с ним почти сразу после спавна.
-        Location spawnLoc = origin.clone().add(0, 1.2, 0);
+    // GH#29 (фидбек раунд 4) — spawnLoc теперь передаётся готовым из tick()
+    // (уже с поднятием на 1.2 блока над якорем) — та же точка, от которой
+    // findTargets() выше проверял LOS/угол/дальность, не пересчитывается
+    // здесь заново. Раньше shoot() сам прибавлял смещение к origin — ЭТО и
+    // была причина расхождения (см. тот же класс бага, п.1: два разных
+    // отсчёта для "видит" и "стреляет").
+    private void shoot(Location spawnLoc, Player target, MilitaryCfg.CrossbowCfg cfg, String canonicalCountry, int effectsLevel, int chanceLevel, int accuracyLevel) {
         Vector direction = target.getEyeLocation().toVector().subtract(spawnLoc.toVector()).normalize();
         // GH#29 (фидбек раунд 2) — реальный разброс вместо идеальной прямой.
         direction = applySpread(direction, INACCURACY_DEGREES[accuracyLevel]);
-        Arrow arrow = (Arrow) origin.getWorld().spawnEntity(spawnLoc, EntityType.ARROW);
+        Arrow arrow = (Arrow) spawnLoc.getWorld().spawnEntity(spawnLoc, EntityType.ARROW);
         arrow.setVelocity(direction.multiply(ARROW_SPEED));
         arrow.setDamage(cfg.damage());
 
