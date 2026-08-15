@@ -32,7 +32,6 @@ import org.bukkit.util.BoundingBox;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -66,6 +65,28 @@ import java.util.concurrent.ThreadLocalRandom;
 //     другим плагином/приоритетом, а не логическая ошибка в самой очистке.
 //  7. Мобы поста теперь именованы (видимый CustomName) — видно, что это
 //     защита объекта, не случайный моб.
+//
+// GH#30 (раунд 3) — по фидбеку "не понятно как триггерится... время между
+// волнами будто не существует", "шанс на лучшую экипировку", "мобы должны
+// не гореть (шапка любого тира)":
+//  8. Детекция врага переведена с "радиус вокруг центра" (detectRadius,
+//     дефолт всего 6 блоков — почти всегда мимо реальных границ объекта) на
+//     реальную территорию объекта (z.contains2D), тот же полигон, что уже
+//     использует randomPointIn(). Заодно ушла вся модель "только момент
+//     пересечения границы": пока враг физически внутри территории, волна
+//     теперь просто повторяется на кулдауне — раньше, застряв в маленьком
+//     detectRadius без выхода/входа, новая волна не приходила вообще
+//     (именно это и читалось как "кулдаун не существует").
+//  9. Зомби/скелеты волны ВСЕГДА получают шлем случайного тира (кожа →
+//     незерит, взвешенно по редкости) — защита от сгорания на солнце,
+//     безусловно, не зависит от апгрейда экипировки ниже.
+//  10. Новый параметрический апгрейд "шанс лучшей экипировки"
+//     (3_militaryLiveDefenseGear) — на успешный бросок мобу дополнительно
+//     достаётся полный комплект брони одного тира (перекрывает шлем п.9) +
+//     зачарованное оружие в основную руку. Per-pack armorChance убран
+//     совсем (был зафиксирован по пачке, теперь общий параметр апгрейда) —
+//     пачка "zombie_armored" заменена на "mixed_patrol" (фидбек: "убрать те,
+//     что с шансом на броню, заменить чем-нибудь").
 public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listener {
 
     private static final UpgradeKey KEY = UpgradeKey.of("military.live_defense");
@@ -91,26 +112,67 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
     // же приём, что и у CrossbowUpgrade.EFFECT_PRESETS (см. её javadoc).
     // Наборы подобраны по примеру из фидбека: 1 уровень — простые
     // зомби/скелеты, 2 — усиленные варианты, 3 — ведьмы/разбойники.
-    private record MobSpec(EntityType type, int count, boolean baby, double armorChance) {}
+    // GH#30 (раунд 3) — armorChance убран из MobSpec: экипировка теперь
+    // общий параметрический апгрейд (см. GEAR_PERM_BASE ниже), не свойство
+    // конкретной пачки. "zombie_armored" (была отличима только шансом на
+    // броню) заменена на "mixed_patrol" — смешанный состав как отличие.
+    private record MobSpec(EntityType type, int count, boolean baby) {}
     private record Pack(String permission, List<MobSpec> mobs) {}
     private static final List<Pack> PACKS = List.of(
-            new Pack("unity.military.live_defense_pack.zombie_pack", List.of(new MobSpec(EntityType.ZOMBIE, 3, false, 0.0))),
-            new Pack("unity.military.live_defense_pack.skeleton_small", List.of(new MobSpec(EntityType.SKELETON, 2, false, 0.0))),
-            new Pack("unity.military.live_defense_pack.skeleton_large", List.of(new MobSpec(EntityType.SKELETON, 4, false, 0.0))),
-            new Pack("unity.military.live_defense_pack.zombie_armored", List.of(new MobSpec(EntityType.ZOMBIE, 3, false, 0.5))),
+            new Pack("unity.military.live_defense_pack.zombie_pack", List.of(new MobSpec(EntityType.ZOMBIE, 3, false))),
+            new Pack("unity.military.live_defense_pack.skeleton_small", List.of(new MobSpec(EntityType.SKELETON, 2, false))),
+            new Pack("unity.military.live_defense_pack.skeleton_large", List.of(new MobSpec(EntityType.SKELETON, 4, false))),
+            new Pack("unity.military.live_defense_pack.mixed_patrol", List.of(
+                    new MobSpec(EntityType.ZOMBIE, 2, false), new MobSpec(EntityType.SKELETON, 2, false))),
             new Pack("unity.military.live_defense_pack.witch_duo", List.of(
-                    new MobSpec(EntityType.WITCH, 2, false, 0.0), new MobSpec(EntityType.ZOMBIE, 2, false, 0.5))),
+                    new MobSpec(EntityType.WITCH, 2, false), new MobSpec(EntityType.ZOMBIE, 2, false))),
             new Pack("unity.military.live_defense_pack.raid_mix", List.of(
-                    new MobSpec(EntityType.WITCH, 1, false, 0.0), new MobSpec(EntityType.PILLAGER, 2, false, 0.0), new MobSpec(EntityType.ZOMBIE, 3, true, 0.0)))
+                    new MobSpec(EntityType.WITCH, 1, false), new MobSpec(EntityType.PILLAGER, 2, false), new MobSpec(EntityType.ZOMBIE, 3, true)))
     );
+
+    // GH#30 (раунд 3, Улучшения п.2) "Шанс лучшей экипировки" — независимый
+    // параметрический апгрейд поверх пачки: на успешный бросок моб получает
+    // полный комплект брони одного тира (перекрывает обязательный шлем п.9)
+    // + зачарованное оружие в основную руку.
+    private static final String GEAR_PERM_BASE = "unity.military.live_defense_gear";
+    private static final double[] GEAR_CHANCE = {0.0, 0.20, 0.45, 0.75};
+
+    // GH#30 (раунд 3, п.3) — "мобы должны гореть с шапкой... хоть кожаной,
+    // хоть незеритовой" — веса убывают с редкостью тира, но шанс никогда 0.
+    private static final Material[] ARMOR_TIER_HELMET = {
+            Material.LEATHER_HELMET, Material.GOLDEN_HELMET, Material.CHAINMAIL_HELMET,
+            Material.IRON_HELMET, Material.DIAMOND_HELMET, Material.NETHERITE_HELMET,
+    };
+    private static final Material[] ARMOR_TIER_CHEST = {
+            Material.LEATHER_CHESTPLATE, Material.GOLDEN_CHESTPLATE, Material.CHAINMAIL_CHESTPLATE,
+            Material.IRON_CHESTPLATE, Material.DIAMOND_CHESTPLATE, Material.NETHERITE_CHESTPLATE,
+    };
+    private static final Material[] ARMOR_TIER_LEGS = {
+            Material.LEATHER_LEGGINGS, Material.GOLDEN_LEGGINGS, Material.CHAINMAIL_LEGGINGS,
+            Material.IRON_LEGGINGS, Material.DIAMOND_LEGGINGS, Material.NETHERITE_LEGGINGS,
+    };
+    private static final Material[] ARMOR_TIER_BOOTS = {
+            Material.LEATHER_BOOTS, Material.GOLDEN_BOOTS, Material.CHAINMAIL_BOOTS,
+            Material.IRON_BOOTS, Material.DIAMOND_BOOTS, Material.NETHERITE_BOOTS,
+    };
+    private static final double[] ARMOR_TIER_WEIGHTS = {40, 25, 15, 12, 6, 2}; // редкость растёт слева направо
+
+    private static int pickArmorTierIndex() {
+        double total = 0;
+        for (double w : ARMOR_TIER_WEIGHTS) total += w;
+        double roll = ThreadLocalRandom.current().nextDouble() * total;
+        double acc = 0;
+        for (int i = 0; i < ARMOR_TIER_WEIGHTS.length; i++) {
+            acc += ARMOR_TIER_WEIGHTS[i];
+            if (roll <= acc) return i;
+        }
+        return ARMOR_TIER_WEIGHTS.length - 1;
+    }
 
     @Override public UpgradeKey key() { return KEY; }
     @Override public UpgradeScope scope() { return UpgradeScope.COUNTRY; }
     @Override public Listener listener() { return this; }
 
-    // markerId -> кто из врагов уже засчитан "внутри" на прошлый тик — переход
-    // false->true (не было в сете, стал рядом) это и есть "пересечение границы".
-    private final Map<String, Set<String>> nearbyEnemiesByZone = new ConcurrentHashMap<>();
     private final Map<String, Long> lastTriggerByZone = new ConcurrentHashMap<>();
     private BukkitTask task;
 
@@ -151,23 +213,30 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
 
             String countryName = z.getCountryName();
             String markerId = z.getMarkerID();
-            // GH#30 п.3 — "враг" теперь требует реальной войны, не просто
-            // "не свой гражданин" — вне войны пост никого не засекает и не
-            // спавнит волну.
-            Set<String> nearbyNow = ConcurrentHashMap.newKeySet();
+            // GH#30 (раунд 3, п.8) — "враг" требует реальной войны (как и
+            // раньше), но теперь проверяется реальное нахождение в
+            // территории объекта (contains2D), не расстояние до центра —
+            // detectRadius (дефолт 6 блоков) почти всегда не совпадал с
+            // реальными границами полигона объекта, отсюда "вход-выход не
+            // работает" из прошлого раунда фидбека.
+            boolean enemyPresent = false;
             for (Player p : center.getWorld().getPlayers()) {
+                if (!z.contains2D(p.getLocation())) continue;
                 String playerCountry = UnityLauncher.getInstance().countryRegistryJdbc.getCountryOfPlayer(p.getName());
                 if (playerCountry == null || playerCountry.equalsIgnoreCase(countryName)) continue; // не враг
                 if (!UnityLauncher.getInstance().warStatusCache.isAtWar(countryName, playerCountry)) continue; // не воюем — не враг
-                if (p.getLocation().distance(center) > cfg.detectRadius()) continue;
-                nearbyNow.add(p.getName());
+                enemyPresent = true;
+                break;
             }
+            if (!enemyPresent) continue;
 
-            Set<String> nearbyBefore = nearbyEnemiesByZone.getOrDefault(markerId, Set.of());
-            boolean justCrossed = nearbyNow.stream().anyMatch(name -> !nearbyBefore.contains(name));
-            nearbyEnemiesByZone.put(markerId, nearbyNow);
-
-            if (!justCrossed) continue;
+            // GH#30 (раунд 3, п.8) — раньше волна спавнилась ТОЛЬКО в
+            // момент "только что пересёк границу" (сработавший 1 раз, пока
+            // враг не покинул detectRadius и не вошёл заново) — на практике
+            // читалось как "кулдаун между волнами не существует", раз враг,
+            // сражаясь с постом, обычно с объекта никуда не уходит. Теперь —
+            // обычный периодический повтор на кулдауне, пока враг физически
+            // в территории, тот же принцип, что у общего DefensePatrolUpgrade.
             long now = System.currentTimeMillis();
             Long lastTrigger = lastTriggerByZone.get(markerId);
             int cooldownLevel = UpgradeCondition.countryMaxLevel(canonicalCountry, COOLDOWN_PERM_BASE, 2);
@@ -184,7 +253,7 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
         if (mobs == null) {
             // Ничего не выбрано (узел не куплен вообще, или куплен но выбор
             // ещё не сделан) — старый фоллбек: 1 моб по биому.
-            mobs = List.of(new MobSpec(DefensePatrolBiomeMob.forBiome(center), 1, false, 0.0));
+            mobs = List.of(new MobSpec(DefensePatrolBiomeMob.forBiome(center), 1, false));
         }
 
         // Разворачиваем спецификацию пачки в плоский список отдельных мобов —
@@ -192,7 +261,7 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
         // заботясь о том, откуда список взялся (пачка или фоллбек).
         List<MobSpec> flatUnits = new ArrayList<>();
         for (MobSpec spec : mobs) {
-            for (int i = 0; i < spec.count(); i++) flatUnits.add(new MobSpec(spec.type(), 1, spec.baby(), spec.armorChance()));
+            for (int i = 0; i < spec.count(); i++) flatUnits.add(new MobSpec(spec.type(), 1, spec.baby()));
         }
 
         // GH#30 п.4 — интенсивность волны обратно пропорциональна числу
@@ -223,9 +292,22 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
             mob.setCustomNameVisible(true);
 
             if (spec.baby() && mob instanceof Zombie zombie) zombie.setBaby(true);
-            if (spec.armorChance() > 0 && ThreadLocalRandom.current().nextDouble() < spec.armorChance()) {
-                equipIronArmor(mob);
+
+            // GH#30 (раунд 3, п.9) — зомби/скелеты обязательно в шапке
+            // (любого тира) — без неё горят на солнце. Безусловно, не
+            // завязано на апгрейд экипировки ниже.
+            boolean burnsInDaylight = spec.type() == EntityType.ZOMBIE || spec.type() == EntityType.SKELETON;
+            if (burnsInDaylight) equipHelmet(mob, pickArmorTierIndex());
+
+            // GH#30 (раунд 3, п.10) — апгрейд "шанс лучшей экипировки": на
+            // успешный бросок — полный комплект брони одного тира (одного
+            // случайного, перекрывает шлем выше) + зачарованное оружие.
+            int gearLevel = UpgradeCondition.countryMaxLevel(canonicalCountry, GEAR_PERM_BASE, GEAR_CHANCE.length - 1);
+            if (gearLevel > 0 && ThreadLocalRandom.current().nextDouble() < GEAR_CHANCE[gearLevel]) {
+                equipFullArmor(mob, pickArmorTierIndex());
+                equipEnchantedWeapon(mob);
             }
+
             if (spec.type() == EntityType.PILLAGER) {
                 EntityEquipment eq = mob.getEquipment();
                 if (eq != null) eq.setItemInMainHand(new ItemStack(Material.CROSSBOW));
@@ -252,13 +334,33 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
         return null;
     }
 
-    private void equipIronArmor(LivingEntity mob) {
+    /** GH#30 (раунд 3, п.9) — только шлем, случайный тир по индексу (см. pickArmorTierIndex). */
+    private void equipHelmet(LivingEntity mob, int tierIndex) {
         EntityEquipment eq = mob.getEquipment();
         if (eq == null) return;
-        eq.setHelmet(new ItemStack(Material.IRON_HELMET));
-        eq.setChestplate(new ItemStack(Material.IRON_CHESTPLATE));
-        eq.setLeggings(new ItemStack(Material.IRON_LEGGINGS));
-        eq.setBoots(new ItemStack(Material.IRON_BOOTS));
+        eq.setHelmet(new ItemStack(ARMOR_TIER_HELMET[tierIndex]));
+    }
+
+    /** GH#30 (раунд 3, п.10) — полный комплект одного тира (перекрывает шлем п.9, если уже был другого тира). */
+    private void equipFullArmor(LivingEntity mob, int tierIndex) {
+        EntityEquipment eq = mob.getEquipment();
+        if (eq == null) return;
+        eq.setHelmet(new ItemStack(ARMOR_TIER_HELMET[tierIndex]));
+        eq.setChestplate(new ItemStack(ARMOR_TIER_CHEST[tierIndex]));
+        eq.setLeggings(new ItemStack(ARMOR_TIER_LEGS[tierIndex]));
+        eq.setBoots(new ItemStack(ARMOR_TIER_BOOTS[tierIndex]));
+    }
+
+    /** GH#30 (раунд 3, п.10) — зачарованный меч в основную руку, простые боевые чары умеренного уровня. */
+    private void equipEnchantedWeapon(LivingEntity mob) {
+        EntityEquipment eq = mob.getEquipment();
+        if (eq == null) return;
+        ItemStack sword = new ItemStack(Material.IRON_SWORD);
+        sword.addUnsafeEnchantment(org.bukkit.enchantments.Enchantment.SHARPNESS, 1 + ThreadLocalRandom.current().nextInt(2));
+        if (ThreadLocalRandom.current().nextBoolean()) {
+            sword.addUnsafeEnchantment(org.bukkit.enchantments.Enchantment.KNOCKBACK, 1);
+        }
+        eq.setItemInMainHand(sword);
     }
 
     /** Случайная точка внутри реальной территории зоны (rejection sampling по AABB), с фоллбеком на center при неудаче/маленьком полигоне. */
@@ -317,7 +419,6 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
             task.cancel();
             task = null;
         }
-        nearbyEnemiesByZone.clear();
         lastTriggerByZone.clear();
     }
 

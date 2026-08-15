@@ -18,6 +18,7 @@ import org.bukkit.entity.EntityType;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityTargetLivingEntityEvent;
@@ -148,7 +149,13 @@ public final class DefensePatrolUpgrade extends BaseUpgrade implements Listener 
                 if (center != null && center.getWorld() != null) {
                     int toSpawn = Math.min(cfg.mobsPerWave(), cfg.maxAlive() - alive.size());
                     for (int i = 0; i < toSpawn; i++) {
-                        LivingEntity mob = (LivingEntity) center.getWorld().spawnEntity(center, patrolTypeFor(center));
+                        // GH#30 п.4 — своя случайная точка внутри реальной
+                        // территории объекта для каждого моба (тот же приём,
+                        // что LiveDefensePostUpgrade.randomPointIn), не один
+                        // общий center на всех — раньше вся волна спавнилась
+                        // друг на друге в одном блоке.
+                        Location spawnLoc = randomPointIn(z, center);
+                        LivingEntity mob = (LivingEntity) spawnLoc.getWorld().spawnEntity(spawnLoc, patrolTypeFor(center));
                         mob.setMetadata(META_KEY, new FixedMetadataValue(plugin(), markerId));
                         mob.setRemoveWhenFarAway(true);
                         alive.add(mob.getUniqueId());
@@ -195,6 +202,28 @@ public final class DefensePatrolUpgrade extends BaseUpgrade implements Listener 
         if (api != null) api.reportMilitaryNeutralize(markerId, attackerCountry);
     }
 
+    // GH#30 п.4 — сколько раз пробовать случайную точку внутри AABB, прежде
+    // чем сдаться и упасть на center() (полигон может занимать малую долю
+    // своего же bounding box). То же число, что у LiveDefensePostUpgrade.
+    private static final int RANDOM_POINT_ATTEMPTS = 12;
+
+    /** Случайная точка внутри реальной территории зоны (rejection sampling по AABB), с фоллбеком на center при неудаче/маленьком полигоне. */
+    private Location randomPointIn(ZoneInfo z, Location fallbackCenter) {
+        var w = z.getWorld();
+        if (w == null) return fallbackCenter;
+
+        var bb = z.getBoundingBoxXZ();
+        var rnd = java.util.concurrent.ThreadLocalRandom.current();
+        for (int i = 0; i < RANDOM_POINT_ATTEMPTS; i++) {
+            double x = bb.getMinX() + rnd.nextDouble() * (bb.getMaxX() - bb.getMinX());
+            double zc = bb.getMinZ() + rnd.nextDouble() * (bb.getMaxZ() - bb.getMinZ());
+            int y = w.getHighestBlockYAt((int) Math.floor(x), (int) Math.floor(zc));
+            Location candidate = new Location(w, x, y, zc);
+            if (z.contains2D(candidate)) return candidate;
+        }
+        return fallbackCenter;
+    }
+
     /** Скелет/зомби по биому — только ванильные мобы, ничего нового (§14.2). */
     private static EntityType patrolTypeFor(Location loc) {
         Biome biome = loc.getBlock().getBiome();
@@ -202,6 +231,14 @@ public final class DefensePatrolUpgrade extends BaseUpgrade implements Listener 
         if (name.contains("DESERT")) return EntityType.HUSK;
         if (name.contains("SNOW") || name.contains("FROZEN") || name.contains("ICE")) return EntityType.STRAY;
         return Math.random() < 0.5 ? EntityType.ZOMBIE : EntityType.SKELETON;
+    }
+
+    /** GH#30 п.4 — без дропа/опыта, как и у Живого поста (§14.2 "защита объекта, не источник фарма"). HIGHEST — тот же приём против других плагинов, что и у LiveDefensePostUpgrade. */
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onDeath(org.bukkit.event.entity.EntityDeathEvent e) {
+        if (e.getEntity().getMetadata(META_KEY).isEmpty()) return;
+        e.getDrops().clear();
+        e.setDroppedExp(0);
     }
 
     // Враждебны к чужакам, не к своим (§14.2: "не из страны/союза" — союзники
