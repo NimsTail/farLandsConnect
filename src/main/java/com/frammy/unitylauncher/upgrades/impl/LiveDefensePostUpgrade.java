@@ -87,6 +87,29 @@ import java.util.concurrent.ThreadLocalRandom;
 //     совсем (был зафиксирован по пачке, теперь общий параметр апгрейда) —
 //     пачка "zombie_armored" заменена на "mixed_patrol" (фидбек: "убрать те,
 //     что с шансом на броню, заменить чем-нибудь").
+//
+// GH#30 (раунд 4) — по свежему фидбеку:
+//  11. Скелеты почти всегда получали меч вместо лука (шанс экипировки
+//     безусловно перезаписывал основную руку) — теперь лук остаётся
+//     основным оружием скелета, меч — редкое исключение (~35%), а не
+//     наоборот.
+//  12. Лимит одновременно живых мобов поста (MAX_ALIVE) —
+//     раньше волны накапливались без ограничения, если их не выбивали
+//     достаточно быстро ("быстро превращается в хаос"). Тот же принцип,
+//     что у DefensePatrolUpgrade.maxAlive, просто для волнового спавна:
+//     новая волна не спавнится сверх лимита, размер обрезается до
+//     оставшегося места.
+//  13. Кулдаун между волнами больше не фиксированное число — зависит от
+//     "мощности" пачки (состав + уровень апгрейда экипировки): тяжелее
+//     пачка/лучше броня → дольше нужно ждать следующую волну. Апгрейд
+//     "время между спавном" по-прежнему режет этот кулдаун в процентах —
+//     просто теперь от переменной базы, а не от одной и той же цифры
+//     для любой пачки.
+//  14. Шанс "лучшей экипировки" переработан в три вложенных порога вместо
+//     одного "всё или ничего": хотя бы 1 доп. слот брони (не считая
+//     шлем) / все 3 доп. слота / все 3 доп. слота гарантированно топового
+//     тира (алмаз/незерит) — вместо единого шанса на "полный комплект
+//     случайного тира" сразу на 75%, что ощущалось как слишком щедро.
 public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listener {
 
     private static final UpgradeKey KEY = UpgradeKey.of("military.live_defense");
@@ -104,7 +127,9 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
     private static final int RANDOM_POINT_ATTEMPTS = 12;
 
     // GH#30 (Улучшения п.2) "Время между спавном" — независимый
-    // параметрический апгрейд, множитель на cfg.cooldownTicks().
+    // параметрический апгрейд, множитель % сверху динамической базы (см.
+    // раунд 4, п.13 — база теперь зависит от мощности пачки, не от одной
+    // и той же cfg.cooldownTicks() для любой пачки).
     private static final String COOLDOWN_PERM_BASE = "unity.military.live_defense_cooldown";
     private static final double[] COOLDOWN_MULTIPLIER = {1.0, 0.75, 0.55};
 
@@ -130,12 +155,35 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
                     new MobSpec(EntityType.WITCH, 1, false), new MobSpec(EntityType.PILLAGER, 2, false), new MobSpec(EntityType.ZOMBIE, 3, true)))
     );
 
-    // GH#30 (раунд 3, Улучшения п.2) "Шанс лучшей экипировки" — независимый
-    // параметрический апгрейд поверх пачки: на успешный бросок моб получает
-    // полный комплект брони одного тира (перекрывает обязательный шлем п.9)
-    // + зачарованное оружие в основную руку.
+    // GH#30 (раунд 3→4, Улучшения п.2) "Шанс лучшей экипировки" —
+    // независимый параметрический апгрейд поверх пачки. Раунд 4: вместо
+    // одного шанса на "всё или ничего" — три вложенных порога (см. п.14
+    // класс-javadoc). Индекс массива — уровень апгрейда (0 = не куплено).
+    // Пороги НЕ складываются — это один бросок 0..100, ниже atLeastOne%
+    // ничего, ниже three% — минимум 1 доп. слот, ниже full% — минимум 3,
+    // иначе (< full%) — 3 доп. слота гарантированно топового тира.
     private static final String GEAR_PERM_BASE = "unity.military.live_defense_gear";
-    private static final double[] GEAR_CHANCE = {0.0, 0.20, 0.45, 0.75};
+    private static final double[] GEAR_AT_LEAST_ONE_CHANCE = {0.0, 0.35, 0.55, 0.75};
+    private static final double[] GEAR_THREE_CHANCE = {0.0, 0.12, 0.25, 0.40};
+    private static final double[] GEAR_FULL_CHANCE = {0.0, 0.03, 0.08, 0.15};
+
+    // GH#30 (раунд 4, п.13) — кулдаун между волнами больше не фиксированная
+    // cfg.cooldownTicks() — база теперь зависит от "мощности" пачки (состав
+    // + уровень экипировки), апгрейд "время между спавном" режет её в %
+    // сверху, как и раньше. Черновые числа — баланс подбирается по факту.
+    private static final double POWER_ZOMBIE = 1.0;
+    private static final double POWER_SKELETON = 1.0;
+    private static final double POWER_WITCH = 2.5;
+    private static final double POWER_PILLAGER = 2.0;
+    private static final double POWER_PER_GEAR_LEVEL = 3.0; // "если появится броня — растёт кулдаун"
+    private static final double BASE_COOLDOWN_SECONDS = 12.0;
+    private static final double POWER_TO_SECONDS = 1.3;
+
+    // GH#30 (раунд 4, п.2) — "лимит по которому пост не спавнит больше
+    // мобов, пока N ещё живое". Считает по максимально возможному составу
+    // волны (raid_mix, 6 юнитов) плюс небольшой запас — не жёсткий потолок
+    // ровно под одну волну, чтобы не резать её саму себя.
+    private static final int MAX_ALIVE = 8;
 
     // GH#30 (раунд 3, п.3) — "мобы должны гореть с шапкой... хоть кожаной,
     // хоть незеритовой" — веса убывают с редкостью тира, но шанс никогда 0.
@@ -174,6 +222,9 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
     @Override public Listener listener() { return this; }
 
     private final Map<String, Long> lastTriggerByZone = new ConcurrentHashMap<>();
+    // GH#30 (раунд 4, п.2) — живые мобы текущей/прошлых волн этого объекта,
+    // тот же приём, что и guardsByZone у DefensePatrolUpgrade.
+    private final Map<String, List<java.util.UUID>> aliveByZone = new ConcurrentHashMap<>();
     private BukkitTask task;
 
     @Override
@@ -230,6 +281,27 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
             }
             if (!enemyPresent) continue;
 
+            // GH#30 (раунд 4, п.2) — не спавним поверх ещё не выбитой волны
+            // сверх лимита; сначала чистим протухшие записи (мобы, которых
+            // уже нет/убиты), потом проверяем остаток места.
+            List<java.util.UUID> alive = aliveByZone.computeIfAbsent(markerId, k -> new ArrayList<>());
+            alive.removeIf(id -> {
+                var e = Bukkit.getEntity(id);
+                return e == null || !e.isValid();
+            });
+            int freeSlots = MAX_ALIVE - alive.size();
+            if (freeSlots <= 0) continue;
+
+            // GH#30 (раунд 4, п.13) — состав пачки нужен уже здесь: кулдаун
+            // зависит от её "мощности", не только от cfg/апгрейда.
+            int gearLevel = UpgradeCondition.countryMaxLevel(canonicalCountry, GEAR_PERM_BASE, GEAR_AT_LEAST_ONE_CHANCE.length - 1);
+            List<MobSpec> mobs = resolveActivePack(canonicalCountry);
+            if (mobs == null) {
+                // Ничего не выбрано (узел не куплен вообще, или куплен но
+                // выбор ещё не сделан) — старый фоллбек: 1 моб по биому.
+                mobs = List.of(new MobSpec(DefensePatrolBiomeMob.forBiome(center), 1, false));
+            }
+
             // GH#30 (раунд 3, п.8) — раньше волна спавнилась ТОЛЬКО в
             // момент "только что пересёк границу" (сработавший 1 раз, пока
             // враг не покинул detectRadius и не вошёл заново) — на практике
@@ -240,22 +312,32 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
             long now = System.currentTimeMillis();
             Long lastTrigger = lastTriggerByZone.get(markerId);
             int cooldownLevel = UpgradeCondition.countryMaxLevel(canonicalCountry, COOLDOWN_PERM_BASE, 2);
-            long cooldownMs = Math.round(cfg.cooldownTicks() * 50L * COOLDOWN_MULTIPLIER[cooldownLevel]);
+            double dynamicBaseSeconds = BASE_COOLDOWN_SECONDS + POWER_TO_SECONDS * (packPower(mobs) + gearLevel * POWER_PER_GEAR_LEVEL);
+            long cooldownMs = Math.round(dynamicBaseSeconds * 1000 * COOLDOWN_MULTIPLIER[cooldownLevel]);
             if (lastTrigger != null && now - lastTrigger < cooldownMs) continue;
 
             lastTriggerByZone.put(markerId, now);
-            spawnWave(z, center, markerId, countryName, canonicalCountry);
+            List<java.util.UUID> spawned = spawnWave(z, center, markerId, countryName, mobs, gearLevel, freeSlots);
+            alive.addAll(spawned);
         }
     }
 
-    private void spawnWave(ZoneInfo z, Location center, String markerId, String countryName, String canonicalCountry) {
-        List<MobSpec> mobs = resolveActivePack(canonicalCountry);
-        if (mobs == null) {
-            // Ничего не выбрано (узел не куплен вообще, или куплен но выбор
-            // ещё не сделан) — старый фоллбек: 1 моб по биому.
-            mobs = List.of(new MobSpec(DefensePatrolBiomeMob.forBiome(center), 1, false));
+    /** GH#30 (раунд 4, п.13) — суммарная "мощность" пачки, определяет базовый кулдаун до применения % апгрейда. */
+    private double packPower(List<MobSpec> mobs) {
+        double power = 0;
+        for (MobSpec spec : mobs) {
+            double unit = switch (spec.type()) {
+                case WITCH -> POWER_WITCH;
+                case PILLAGER -> POWER_PILLAGER;
+                case SKELETON -> POWER_SKELETON;
+                default -> POWER_ZOMBIE;
+            };
+            power += unit * spec.count();
         }
+        return power;
+    }
 
+    private List<java.util.UUID> spawnWave(ZoneInfo z, Location center, String markerId, String countryName, List<MobSpec> mobs, int gearLevel, int capThisWave) {
         // Разворачиваем спецификацию пачки в плоский список отдельных мобов —
         // дальше интенсивность по онлайну применяется к нему целиком, не
         // заботясь о том, откуда список взялся (пачка или фоллбек).
@@ -278,6 +360,11 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
             for (int i = 0; i < toRemove; i++) flatUnits.remove(flatUnits.size() - 1);
         }
 
+        // GH#30 (раунд 4, п.2) — обрезаем волну под оставшееся место
+        // (MAX_ALIVE минус уже живые), а не только по интенсивности выше.
+        while (flatUnits.size() > capThisWave) flatUnits.remove(flatUnits.size() - 1);
+
+        List<java.util.UUID> spawned = new ArrayList<>(flatUnits.size());
         for (MobSpec spec : flatUnits) {
             // GH#30 п.2 — своя случайная точка внутри территории объекта
             // для каждого моба волны, не общий center на всех.
@@ -290,6 +377,7 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
             // GH#30 (раунд 2, п.3) — видимое имя, чтобы отличать от случайных мобов.
             mob.setCustomName(MOB_NAME);
             mob.setCustomNameVisible(true);
+            spawned.add(mob.getUniqueId());
 
             if (spec.baby() && mob instanceof Zombie zombie) zombie.setBaby(true);
 
@@ -299,13 +387,18 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
             boolean burnsInDaylight = spec.type() == EntityType.ZOMBIE || spec.type() == EntityType.SKELETON;
             if (burnsInDaylight) equipHelmet(mob, pickArmorTierIndex());
 
-            // GH#30 (раунд 3, п.10) — апгрейд "шанс лучшей экипировки": на
-            // успешный бросок — полный комплект брони одного тира (одного
-            // случайного, перекрывает шлем выше) + зачарованное оружие.
-            int gearLevel = UpgradeCondition.countryMaxLevel(canonicalCountry, GEAR_PERM_BASE, GEAR_CHANCE.length - 1);
-            if (gearLevel > 0 && ThreadLocalRandom.current().nextDouble() < GEAR_CHANCE[gearLevel]) {
-                equipFullArmor(mob, pickArmorTierIndex());
-                equipEnchantedWeapon(mob);
+            // GH#30 (раунд 4, п.14) — три вложенных порога вместо одного
+            // "всё или ничего": роль одного случайного числа против трёх
+            // возрастающе строгих планок (см. константы выше).
+            if (gearLevel > 0) {
+                double roll = ThreadLocalRandom.current().nextDouble();
+                if (roll < GEAR_AT_LEAST_ONE_CHANCE[gearLevel]) {
+                    boolean guaranteedTopTier = roll < GEAR_FULL_CHANCE[gearLevel]; // top nested tier — implies "three" too
+                    int extraPieces = roll < GEAR_THREE_CHANCE[gearLevel] ? 3 : 1;
+                    int tierIndex = guaranteedTopTier ? pickTopArmorTierIndex() : pickArmorTierIndex();
+                    equipExtraArmor(mob, tierIndex, extraPieces);
+                    equipEnchantedWeapon(mob, spec.type());
+                }
             }
 
             if (spec.type() == EntityType.PILLAGER) {
@@ -313,6 +406,7 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
                 if (eq != null) eq.setItemInMainHand(new ItemStack(Material.CROSSBOW));
             }
         }
+        return spawned;
     }
 
     /**
@@ -341,20 +435,57 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
         eq.setHelmet(new ItemStack(ARMOR_TIER_HELMET[tierIndex]));
     }
 
-    /** GH#30 (раунд 3, п.10) — полный комплект одного тира (перекрывает шлем п.9, если уже был другого тира). */
-    private void equipFullArmor(LivingEntity mob, int tierIndex) {
+    /**
+     * GH#30 (раунд 4, п.14) — 1 или 3 доп. слота брони (сверх обязательного
+     * шлема, который уже стоит своего тира — перекрывается тут тем же
+     * tierIndex для визуальной цельности комплекта). 1 слот — нагрудник
+     * (самая заметная защита); 3 — весь корпус (нагрудник+поножи+ботинки).
+     */
+    private void equipExtraArmor(LivingEntity mob, int tierIndex, int extraPieces) {
         EntityEquipment eq = mob.getEquipment();
         if (eq == null) return;
         eq.setHelmet(new ItemStack(ARMOR_TIER_HELMET[tierIndex]));
         eq.setChestplate(new ItemStack(ARMOR_TIER_CHEST[tierIndex]));
-        eq.setLeggings(new ItemStack(ARMOR_TIER_LEGS[tierIndex]));
-        eq.setBoots(new ItemStack(ARMOR_TIER_BOOTS[tierIndex]));
+        if (extraPieces >= 3) {
+            eq.setLeggings(new ItemStack(ARMOR_TIER_LEGS[tierIndex]));
+            eq.setBoots(new ItemStack(ARMOR_TIER_BOOTS[tierIndex]));
+        }
     }
 
-    /** GH#30 (раунд 3, п.10) — зачарованный меч в основную руку, простые боевые чары умеренного уровня. */
-    private void equipEnchantedWeapon(LivingEntity mob) {
+    // GH#30 (раунд 4, п.14) — "фулл сет" гарантированно топ-2 тира
+    // (алмаз/незерит), а не по общей взвешенной редкости — отличает эту
+    // планку от простого "3 доп. слота" случайного тира качественно, не
+    // только по количеству. Индексы 4 (алмаз)/5 (незерит) в ARMOR_TIER_*.
+    private static final double[] TOP_TIER_WEIGHTS = {70, 30};
+
+    private static int pickTopArmorTierIndex() {
+        // Индексы 4 (алмаз) и 5 (незерит) в ARMOR_TIER_* массивах.
+        double roll = ThreadLocalRandom.current().nextDouble() * (TOP_TIER_WEIGHTS[0] + TOP_TIER_WEIGHTS[1]);
+        return roll < TOP_TIER_WEIGHTS[0] ? 4 : 5;
+    }
+
+    /**
+     * GH#30 (раунд 3, п.10 → раунд 4, п.1) — зачарованное оружие в основную
+     * руку. Скелет по умолчанию и без нас спавнится с луком — раньше это
+     * безусловно перезаписывалось мечом ("скелеты с мечами это круто, но
+     * сделать так, чтобы в основном спавнились с луками"): теперь лук —
+     * основной вариант (~65%), меч — редкое исключение (~35%). Остальные
+     * типы (зомби/ведьма) как и раньше — меч.
+     */
+    private static final double SKELETON_SWORD_CHANCE = 0.35;
+
+    private void equipEnchantedWeapon(LivingEntity mob, EntityType type) {
         EntityEquipment eq = mob.getEquipment();
         if (eq == null) return;
+
+        boolean giveSword = type != EntityType.SKELETON || ThreadLocalRandom.current().nextDouble() < SKELETON_SWORD_CHANCE;
+        if (!giveSword) {
+            ItemStack bow = new ItemStack(Material.BOW);
+            bow.addUnsafeEnchantment(org.bukkit.enchantments.Enchantment.POWER, 1 + ThreadLocalRandom.current().nextInt(2));
+            eq.setItemInMainHand(bow);
+            return;
+        }
+
         ItemStack sword = new ItemStack(Material.IRON_SWORD);
         sword.addUnsafeEnchantment(org.bukkit.enchantments.Enchantment.SHARPNESS, 1 + ThreadLocalRandom.current().nextInt(2));
         if (ThreadLocalRandom.current().nextBoolean()) {
@@ -420,6 +551,7 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
             task = null;
         }
         lastTriggerByZone.clear();
+        aliveByZone.clear();
     }
 
     /** Тот же биомный выбор, что у DefensePatrolUpgrade (§14.2) — вынесено сюда, чтобы не тянуть зависимость между двумя upgrade-классами. */
