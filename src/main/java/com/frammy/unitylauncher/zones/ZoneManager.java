@@ -1419,6 +1419,28 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
                 .orElse(null);
     }
 
+    /**
+     * GH#33: как {@link #getZoneAt}, но игнорирует приоритет типов зон и
+     * ищет именно зону-территорию страны (COUNTRY) под точкой. getZoneAt
+     * возвращает самую "узкую" зону с наивысшим index() (PLOT/SHOP/MILITARY
+     * и т.п.), которая почти всегда перекрывает COUNTRY на застроенной
+     * территории — из-за этого вызывающий код, которому нужна именно
+     * страна-владелец территории (например, репорт присутствия на линии
+     * фронта), молча терял игроков, стоящих в чьём-то плоте/магазине/на
+     * военном объекте.
+     */
+    public ZoneInfo getCountryZoneAt(Location loc) {
+        if (loc == null) return null;
+        World w = loc.getWorld();
+        if (w == null) return null;
+
+        return zoneList.values().stream()
+                .filter(z -> z.getType() == ZoneType.COUNTRY)
+                .filter(z -> ZoneGeometry.worldOkAny(z.getShapes(), w) && ZoneGeometry.pointInAnyShape(loc, z.getShapes(), Y_MIN, Y_MAX))
+                .findFirst()
+                .orElse(null);
+    }
+
     // ==== Public adapters for SignManager ====
 
     /** Проверка точки внутри полигона, где полигон задан массивом точек. */

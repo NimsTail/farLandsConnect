@@ -4,7 +4,6 @@ import com.frammy.unitylauncher.UnityLauncher;
 import com.frammy.unitylauncher.auth.FarLandsApiClient;
 import com.frammy.unitylauncher.zones.ZoneInfo;
 import com.frammy.unitylauncher.zones.ZoneManager;
-import com.frammy.unitylauncher.zones.ZoneType;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import org.bukkit.Bukkit;
@@ -49,8 +48,11 @@ public final class FrontierPresenceReporter {
             if (playerCountry == null || playerCountry.isBlank()) continue;
 
             Location loc = p.getLocation();
-            ZoneInfo zone = zoneManager.getZoneAt(loc);
-            if (zone == null || zone.getType() != ZoneType.COUNTRY) continue;
+            // GH#33: getZoneAt() would return whichever overlapping zone has the
+            // highest priority (PLOT/SHOP/MILITARY etc.), not the COUNTRY territory
+            // itself — silently dropping presence for anyone standing on built land.
+            ZoneInfo zone = zoneManager.getCountryZoneAt(loc);
+            if (zone == null) continue;
             String zoneCountry = zone.getCountryName();
             if (zoneCountry == null || zoneCountry.isBlank() || zone.getMarkerID() == null) continue;
 
