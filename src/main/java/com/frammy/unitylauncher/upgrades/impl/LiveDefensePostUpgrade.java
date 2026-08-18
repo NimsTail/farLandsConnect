@@ -265,6 +265,10 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
             // остальными; теперь только на той, что реально вкачана именно
             // в LIVE_DEFENSE (см. MilitaryDefenseSubtypeService).
             if (!subtypeService.isActiveAs(z, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.LIVE_DEFENSE)) continue;
+            // farlandsconnect GH#32 (раунд 10) — захваченные секторы линии
+            // фронта снижают эффективность: вероятностный пропуск волны
+            // целиком вместо переработки формулы динамического кулдауна.
+            if (!UnityLauncher.getInstance().militaryEffectivenessCache.rollActive(z.getMarkerID())) continue;
 
             String canonicalCountry = UpgradeCondition.zoneCountryCanonical(z);
             if (canonicalCountry == null) continue; // объект без страны — быть не должно, но на всякий случай

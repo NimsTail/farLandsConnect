@@ -72,6 +72,10 @@ public final class ScorchUpgrade extends BaseUpgrade implements Listener {
             if (z.getType() != ZoneType.MILITARY) continue;
             // GH#24 (фидбек 2026-08-14 п.1/4) — только на объекте, реально вкачанном в SCORCH.
             if (!subtypeService.isActiveAs(z, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.SCORCH)) continue;
+            // farlandsconnect GH#32 (раунд 10) — захваченные секторы линии
+            // фронта снижают эффективность: вероятностный пропуск тика вместо
+            // переработки формул поджога/молнии под конкретный %.
+            if (!UnityLauncher.getInstance().militaryEffectivenessCache.rollActive(z.getMarkerID())) continue;
 
             // Фидбек 2026-08-14 — длительность поджога и шанс молнии читаются
             // независимо; isActiveAs выше уже подтверждает базовую покупку

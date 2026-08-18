@@ -67,6 +67,13 @@ public final class AuraUpgrade extends BaseUpgrade implements Listener {
                 // GH#24 (фидбек 2026-08-14 п.1/4) — раньше срабатывал на ЛЮБОЙ
                 // DEFENSE-зоне страны; теперь только если хоть одна реально вкачана в AURA.
                 if (!hasActiveAuraZone(subtypeService, hereCountry)) continue;
+                // farlandsconnect GH#32 (раунд 10) — захваченные секторы
+                // линии фронта снижают эффективность: если хоть одна активная
+                // зона AURA страны сейчас ослаблена, пульс с вероятностным
+                // шансом пропускается целиком (Ореол безусловно одна зона на
+                // страну по геймдизайну — activeAuraZoneMarkerId ищет её же).
+                String activeAuraMarkerId = activeAuraZoneMarkerId(subtypeService, hereCountry);
+                if (!UnityLauncher.getInstance().militaryEffectivenessCache.rollActive(activeAuraMarkerId)) continue;
 
                 // Фидбек 2026-08-14 — интервал и сила эффекта читаются
                 // независимо друг от друга (см. класс-javadoc поля выше);
@@ -93,12 +100,17 @@ public final class AuraUpgrade extends BaseUpgrade implements Listener {
 
     /** Считается один раз в тик было бы дешевле, но страна тут не известна заранее (перебираем всех онлайн) — при малом числе военных зон разница не важна. */
     private boolean hasActiveAuraZone(com.frammy.unitylauncher.military.MilitaryDefenseSubtypeService subtypeService, String countryName) {
+        return activeAuraZoneMarkerId(subtypeService, countryName) != null;
+    }
+
+    /** farlandsconnect GH#32 (раунд 10) — markerId of the country's active AURA zone, for the effectiveness lookup above. Same scan as hasActiveAuraZone, just returning the id instead of a boolean. */
+    private String activeAuraZoneMarkerId(com.frammy.unitylauncher.military.MilitaryDefenseSubtypeService subtypeService, String countryName) {
         for (ZoneInfo z : zones().getAllZonesSnapshot()) {
             if (z.getType() != ZoneType.MILITARY) continue;
             if (!countryName.equalsIgnoreCase(z.getCountryName())) continue;
-            if (subtypeService.isActiveAs(z, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.AURA)) return true;
+            if (subtypeService.isActiveAs(z, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.AURA)) return z.getMarkerID();
         }
-        return false;
+        return null;
     }
 
     @Override

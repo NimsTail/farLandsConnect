@@ -596,6 +596,45 @@ public class FarLandsApiClient {
         return out;
     }
 
+    public record ZoneEffectiveness(String markerId, int percent) {}
+
+    /**
+     * GH#32 (раунд 10, фидбек 2026-08-18) — "снижается эффективность сразу и
+     * в игру". Blocking GET — called from MilitaryEffectivenessCache's own
+     * scheduler thread, mirrors fetchActiveWars exactly. percent is 0-100
+     * (100 = no captured frontier sector overlaps this zone right now); see
+     * farlandsconnect's lib/militaryEffectiveness.ts for how it's computed.
+     */
+    public List<ZoneEffectiveness> fetchMilitaryEffectiveness() {
+        List<ZoneEffectiveness> out = new ArrayList<>();
+        if (!isEnabled()) return out;
+
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/plugin/military/effectiveness"))
+                    .timeout(Duration.ofSeconds(10))
+                    .header("Authorization", "Bearer " + token)
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 300) {
+                log.warning("[FarLandsApi] GET /plugin/military/effectiveness -> HTTP " + response.statusCode());
+                return out;
+            }
+
+            JsonObject body = GSON.fromJson(response.body(), JsonObject.class);
+            JsonArray entries = body.getAsJsonArray("effectiveness");
+            for (JsonElement el : entries) {
+                JsonObject o = el.getAsJsonObject();
+                out.add(new ZoneEffectiveness(o.get("markerId").getAsString(), o.get("percent").getAsInt()));
+            }
+        } catch (Exception e) {
+            log.warning("[FarLandsApi] fetchMilitaryEffectiveness failed: " + e);
+        }
+        return out;
+    }
+
     // GH #27 "Географические объекты" — infra/geographic-landmarks-design.md
     // §8 п.4. Website-authoritative, this is a pure read poll (see
     // LandmarkSyncService), same shape as fetchActiveWars above.

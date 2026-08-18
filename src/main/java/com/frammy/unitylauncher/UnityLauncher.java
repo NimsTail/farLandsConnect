@@ -74,6 +74,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
     public CountryRegistryJdbc countryRegistryJdbc;
     // military-diplomacy-design.md §13 Фаза 4.
     public com.frammy.unitylauncher.auth.WarStatusCache warStatusCache;
+    // GH#32 (раунд 10, фидбек 2026-08-18) — захваченные секторы линии фронта
+    // снижают эффективность военного объекта, сразу и в игре.
+    public com.frammy.unitylauncher.auth.MilitaryEffectivenessCache militaryEffectivenessCache;
     public CountryRelationshipDao countryRelationshipDao;
     // military-diplomacy-design.md §4.1, GH#24 — per-zone "тип сооружения" +
     // физический анкер. Конструируется сразу после zoneManager (onEnable).
@@ -434,6 +437,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         // are currently at war (consumed by AttackSupportUpgrade etc.) ---
         warStatusCache = new com.frammy.unitylauncher.auth.WarStatusCache(this, farLandsApi);
         warStatusCache.start(200L); // ~10s — war status doesn't need second-level freshness
+
+        militaryEffectivenessCache = new com.frammy.unitylauncher.auth.MilitaryEffectivenessCache(this, farLandsApi);
+        militaryEffectivenessCache.start(600L); // ~30s — same order of magnitude as the frontier presence report period
 
         // GH #27 "Географические объекты" — infra/geographic-landmarks-
         // design.md §8 п.4. Website-authoritative, this is the plugin

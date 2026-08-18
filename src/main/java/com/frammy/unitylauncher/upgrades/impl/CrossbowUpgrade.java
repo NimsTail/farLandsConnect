@@ -157,6 +157,10 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
             if (z.getType() != ZoneType.MILITARY) continue;
             // GH#24 (фидбек 2026-08-14 п.1/4) — только на объекте, реально вкачанном в CROSSBOW.
             if (!subtypeService.isActiveAs(z, com.frammy.unitylauncher.military.MilitaryDefenseSubtype.CROSSBOW)) continue;
+            // farlandsconnect GH#32 (раунд 10) — захваченные секторы линии
+            // фронта снижают эффективность: вероятностный пропуск залпа
+            // вместо переработки формулы скорострельности под конкретный %.
+            if (!UnityLauncher.getInstance().militaryEffectivenessCache.rollActive(z.getMarkerID())) continue;
 
             String canonicalCountry = UpgradeCondition.zoneCountryCanonical(z);
             // GH#29 — независимые уровни прокачки вместо одного общего "усиления".
