@@ -453,6 +453,11 @@ public final class SignManager implements Listener {
         // Если этот блок держит любую сохранённую табличку — ломать может только хозяин таблички.
         Location broken = SignStore.keyLoc(b.getLocation());
 
+        // Собираем таблички, которые физически стоят на этом блоке — нужны
+        // и для проверки права ломать (ниже), и (баг-фикс, см. ниже) для
+        // деактивации после, если ломать разрешено.
+        List<Location> signsOnBrokenSupport = new ArrayList<>();
+
         // маленькая оптимизация: если мир null или store пуст — не бегаем
         if (broken.getWorld() != null && !store.signs().isEmpty()) {
             for (var entry : store.signs().entrySet()) {
@@ -485,7 +490,23 @@ public final class SignManager implements Listener {
                     }
                     return;
                 }
+
+                signsOnBrokenSupport.add(signLoc);
             }
+        }
+
+        // Разрешённый снос опоры (хозяин ломает свой же блок) и правда роняет
+        // табличку физикой ванильного Minecraft — но физика не бросает
+        // BlockBreakEvent на сам блок таблички, только на тот, что реально
+        // сломал игрок. Раньше это означало, что деактивация ниже (п.523,
+        // "if (!(e.getBlock().getState() instanceof Sign)) return") никогда
+        // не срабатывала для этого случая: табличка визуально пропадала
+        // (роняется предметом), а стор/BlueMap-маркер/апгрейды продолжали
+        // считать её действующей вечно — репортнутый баг "разрушить блок
+        // под АТМ, табличка падает, но сервер считает его активным".
+        for (Location signLoc : signsOnBrokenSupport) {
+            SignVariables sv = store.get(signLoc);
+            if (sv != null) deactivateSignAt(signLoc, sv);
         }
 
         // 1) защита контейнеров магазина
