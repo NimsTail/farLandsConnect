@@ -204,10 +204,6 @@ public final class AtmController {
         return max + 1;
     }
 
-    private static String pct(double rate) {
-        return String.format(Locale.ROOT, "%.1f%%", rate * 100.0);
-    }
-
     /**
      * GH #21 п.3 (restore-on-boot regression) — extracted out of
      * onSignCreateATM so the SAME ID/country/fee detail popup gets filled in
@@ -221,29 +217,38 @@ public final class AtmController {
      * atmNumber &lt;= 0 covers legacy ATMs placed before that field existed
      * (never backfilled, see nextAtmNumber's javadoc) — shown without the
      * "№N" to avoid a misleading "ATM №0".
+     *
+     * GH #21 (фидбек 2026-08-20): комиссия раньше была статичная — две
+     * зашитые ставки "граждане/остальные", посчитанные один раз при
+     * генерации маркера, без понятия кто вообще смотрит карту. Теперь
+     * detail — только скелет (страна/номер/id), тот же паттерн, что
+     * ZoneBlueMapService уже использует для COUNTRY-зон: сайт
+     * (bluemap-marker-cards.js, hydrateAtm) достраивает карточку в стиле
+     * "как у страны" и спрашивает свой бэкенд за РЕАЛЬНОЙ ставкой для
+     * конкретного авторизованного зрителя (GET /api/bank/atm-commission).
      */
     public void applyMarkerDetail(Location loc, String markerID, String countryCanonical, int atmNumber) {
         String countryName = countryDisplayName(countryCanonical);
         if (countryName == null) countryName = countryCanonical;
 
-        String feeLine;
-        AtmFeesUpgrade feesUpgrade = atmFeesUpgradeOrNull();
-        if (feesUpgrade != null) {
-            AtmFeesUpgrade.DisplayRates rates = feesUpgrade.ratesForDisplay(loc);
-            feeLine = rates.sameForAll()
-                    ? "<b>Комиссия:</b> " + pct(rates.own()) + "<br>"
-                    : "<b>Комиссия (граждане):</b> " + pct(rates.own()) + "<br>"
-                    + "<b>Комиссия (остальные):</b> " + pct(rates.foreign()) + "<br>";
-        } else {
-            feeLine = "";
-        }
-
         String numberLabel = atmNumber > 0 ? "ATM №" + atmNumber : "ATM";
-        String atmDetail = "<b>" + numberLabel + "</b><br>"
-                + "<b>Страна:</b> " + com.frammy.unitylauncher.BlueMapIntegration.escapeHtml(countryName) + "<br>"
-                + feeLine
-                + "<b>ID:</b> " + com.frammy.unitylauncher.BlueMapIntegration.escapeHtml(markerID);
+        // Attribute values need quotes escaped too, unlike
+        // BlueMapIntegration.escapeHtml (text-node only) — a `"` in a
+        // country name would otherwise break out of data-fl-atm-country="…"
+        // the same way ZoneBlueMapService's own escapeHtml already guards
+        // against for data-fl-country.
+        String atmDetail = "<div class=\"fl-marker-card\" data-fl-atm=\"1\" data-fl-atm-id=\""
+                + escapeAttr(markerID) + "\" data-fl-atm-number=\"" + atmNumber
+                + "\" data-fl-atm-country=\"" + escapeAttr(countryName) + "\">"
+                + "<div class=\"fl-marker-type\">ATM</div>"
+                + "<div class=\"fl-marker-name\">" + com.frammy.unitylauncher.BlueMapIntegration.escapeHtml(numberLabel) + "</div>"
+                + "</div>";
         blueMap.setPoiMarkerDetail("services", "atm_" + markerID, loc.getWorld().getName(), numberLabel + " [" + countryName + "]", atmDetail);
+    }
+
+    private static String escapeAttr(String s) {
+        if (s == null) return "";
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
     }
 
     // ===== interact (ЛКМ = browse/confirm, ПКМ = back/cancel) =====
