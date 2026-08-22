@@ -25,7 +25,6 @@ import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.EntityTargetLivingEntityEvent;
 import org.bukkit.metadata.FixedMetadataValue;
 import org.bukkit.scheduler.BukkitTask;
-import org.bukkit.util.Vector;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -269,6 +268,7 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
         List<java.util.UUID> alive = aliveByPlayer.computeIfAbsent(attackerName, k -> new ArrayList<>());
         for (EntityType type : composition) {
             Location spawnLoc = randomPointNear(near, shielded);
+            if (spawnLoc == null) continue; // фидбек 2026-08-22 (раунд 2) — тесно вокруг, не спавним вообще
             Entity e = spawnLoc.getWorld().spawnEntity(spawnLoc, type);
             if (!(e instanceof LivingEntity mob)) continue;
             mob.setMetadata(META_KEY, new FixedMetadataValue(plugin(), defenderCountryName));
@@ -287,18 +287,6 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
         return n;
     }
 
-    // Фидбек 2026-08-22 — "если места нет — разрушать блоки рядом (разрешённый
-    // список), не тупо не спавнить/спавнить в одной точке". Только природный
-    // диггабельный камень/грунт — НЕ бедрок, НЕ обсидиан/магма (это теперь
-    // шрам от Диверсии, см. дизайн-док §17.10 — не должны сами же его портить),
-    // НЕ что-либо похожее на постройку игрока.
-    private static final java.util.Set<Material> DIGGABLE_UNDERGROUND = java.util.EnumSet.of(
-            Material.STONE, Material.DEEPSLATE, Material.DIRT, Material.GRAVEL, Material.SAND,
-            Material.ANDESITE, Material.DIORITE, Material.GRANITE, Material.TUFF, Material.CALCITE,
-            Material.CLAY, Material.NETHERRACK, Material.END_STONE, Material.COBBLESTONE,
-            Material.MOSSY_COBBLESTONE, Material.DRIPSTONE_BLOCK, Material.COBBLED_DEEPSLATE
-    );
-
     /** heightBlocks клеток вертикально от (x,y,z) — все не-солид (воздух/вода/т.п.). SPAWN_HEIGHT_CHECK=3 — с запасом даже под Иссушающего скелета (2.4 блока), 2 клетки ему впритык (фидбек п.2 "мобы задыхаются"). */
     private boolean isPassableColumn(World w, int x, int y, int z, int heightBlocks) {
         for (int i = 0; i < heightBlocks; i++) {
@@ -307,31 +295,25 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
         return true;
     }
 
-    /** Тот же столбец, но допускает и уже-воздух, и диггабельную породу (кандидат на прокопку) — ничего похожего на бедрок/чужую постройку. */
-    private boolean isDiggableColumn(World w, int x, int y, int z, int heightBlocks) {
-        for (int i = 0; i < heightBlocks; i++) {
-            Material m = w.getBlockAt(x, y + i, z).getType();
-            if (m != Material.AIR && !DIGGABLE_UNDERGROUND.contains(m)) return false;
-        }
-        return true;
-    }
-
     /**
      * Точка рядом с игроком: на поверхности — по highestBlockYAt (с
      * проверкой на реальную проходимость — навес/листва не должны душить
-     * моба, фидбек п.2), под землёй — на его же уровне Y.
+     * моба, фидбек п.2).
      *
-     * Фидбек 2026-08-22 п.1 — раньше при нехватке места прокапывался ОДИН
-     * изолированный карман (2×1), к которому у моба физически не было пути —
-     * "застревал в дыре". Теперь при прокопке роется целый КОРИДОР от
-     * позиции игрока до кандидата (carveTunnel) — моб гарантированно может
-     * дойти, а не телепортируется в запечатанный карман.
-     *
-     * Фидбек п.7 — минимальный радиус MIN_SPAWN_RADIUS (не спавнить в упор).
+     * Под землёй — фидбек 2026-08-22 (второй раунд): "рыть тоннель не
+     * нужно, надо просто спавнить там, где уже есть доступ к воздуху — у
+     * игрока". Никакой прокопки/модификации чужого мира больше нет вообще
+     * (прошлый раунд с carveTunnel — отменён целиком). Ищем ТОЛЬКО
+     * естественный воздушный карман в тесном радиусе (1-3 блока, "в
+     * упоре") вокруг игрока — раз сам игрок там физически стоит и дышит,
+     * воздух в его непосредственной близости точно есть. Если в этом
+     * тесном пузыре подходящей точки нет вообще — возвращаем null, вызывающий
+     * просто не спавнит этого конкретного моба в этот раз, не форсируя
+     * ничего и не трогая блоки.
      */
     private Location randomPointNear(Location base, boolean shielded) {
         World w = base.getWorld();
-        if (w == null) return base;
+        if (w == null) return null;
         ThreadLocalRandom rnd = ThreadLocalRandom.current();
 
         if (!shielded) {
@@ -357,63 +339,18 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
             return new Location(w, x, w.getHighestBlockYAt(bx, bz) + 1, z);
         }
 
-        Location naturalCandidate = null;
-        Location diggableCandidate = null;
         for (int i = 0; i < RANDOM_POINT_ATTEMPTS; i++) {
-            double radius = MIN_SPAWN_RADIUS + rnd.nextDouble() * 4; // короче, чем на поверхности — туннель (если понадобится) должен быть коротким
+            double radius = 1.0 + rnd.nextDouble() * 2.0; // 1-3 блока — тесно, "в упоре"
             double angle = rnd.nextDouble() * Math.PI * 2;
             double x = base.getX() + Math.cos(angle) * radius;
             double z = base.getZ() + Math.sin(angle) * radius;
             double y = base.getY() + rnd.nextInt(3) - 1; // тот же уровень +-1
             Location candidate = new Location(w, x, y, z);
-            int bx = candidate.getBlockX(), by = candidate.getBlockY(), bz = candidate.getBlockZ();
-
-            if (isPassableColumn(w, bx, by, bz, SPAWN_HEIGHT_CHECK)) {
-                naturalCandidate = candidate;
-                break;
-            }
-            if (diggableCandidate == null && isDiggableColumn(w, bx, by, bz, SPAWN_HEIGHT_CHECK)) {
-                diggableCandidate = candidate;
+            if (isPassableColumn(w, candidate.getBlockX(), candidate.getBlockY(), candidate.getBlockZ(), SPAWN_HEIGHT_CHECK)) {
+                return candidate;
             }
         }
-        if (naturalCandidate != null) return naturalCandidate;
-        if (diggableCandidate != null) {
-            Location connected = carveTunnel(w, base, diggableCandidate);
-            if (connected != null) return connected;
-        }
-        return base; // не нашли даже диггабельную точку (бедрок/чужая постройка вокруг) — спавним прямо у игрока
-    }
-
-    /**
-     * Роет прямой коридор (SPAWN_HEIGHT_CHECK клеток в высоту) от базовой
-     * точки до кандидата, шаг за шагом — только если КАЖДАЯ клетка на пути
-     * диггабельна (не бедрок/чужая постройка), иначе ничего не трогает и
-     * возвращает null. Гарантирует, что моб физически дойдёт до точки
-     * спавна, а не окажется в запечатанном кармане (фидбек 2026-08-22 п.1).
-     */
-    private Location carveTunnel(World w, Location from, Location to) {
-        Vector dir = to.toVector().subtract(from.toVector());
-        double length = dir.length();
-        int steps = Math.max(1, (int) Math.ceil(length));
-        Vector step = length > 1e-6 ? dir.multiply(1.0 / steps) : new Vector(0, 0, 0);
-
-        // Проход 1 — только проверка: весь путь диггабелен?
-        Location cursor = from.clone();
-        for (int i = 0; i <= steps; i++) {
-            if (!isDiggableColumn(w, cursor.getBlockX(), cursor.getBlockY(), cursor.getBlockZ(), SPAWN_HEIGHT_CHECK)) return null;
-            cursor.add(step);
-        }
-
-        // Проход 2 — реально прокапываем (только теперь, когда уверены, что можно).
-        cursor = from.clone();
-        for (int i = 0; i <= steps; i++) {
-            int bx = cursor.getBlockX(), by = cursor.getBlockY(), bz = cursor.getBlockZ();
-            for (int dy = 0; dy < SPAWN_HEIGHT_CHECK; dy++) {
-                w.getBlockAt(bx, by + dy, bz).setType(Material.AIR);
-            }
-            cursor.add(step);
-        }
-        return to;
+        return null; // тесно вокруг — в этот раз не спавним вообще, ничего не копаем
     }
 
     // ---- 2. "Отголосок" (§17.4) / 3. Фантомы на столбе ----
@@ -520,7 +457,18 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
             // минимальным радиусом — тот же приём, что у randomPointNear.
             double radius = MIN_SPAWN_RADIUS + rnd.nextDouble() * 4;
             double angle = rnd.nextDouble() * Math.PI * 2;
-            Location spawnAt = at.clone().add(Math.cos(angle) * radius, rnd.nextInt(4), Math.sin(angle) * radius);
+            double x = at.getX() + Math.cos(angle) * radius;
+            double z = at.getZ() + Math.sin(angle) * radius;
+            // Фидбек 2026-08-22 (раунд 2) — "фантомов спавнить ниже, 7-8+
+            // блоков от земли": раньше спавнились у самой высоты игрока
+            // (rnd.nextInt(4) над ним) — на высоком столбе это ощущалось
+            // как мгновенное появление в упор. Теперь высота считается от
+            // РЕЛЬЕФА, не от игрока — фантому нужно долететь снизу, давая
+            // видимое/слышимое предупреждение вместо мгновенного появления
+            // рядом на любой высоте столба.
+            int groundY = w.getHighestBlockYAt((int) Math.floor(x), (int) Math.floor(z));
+            double y = groundY + 7 + rnd.nextInt(4); // 7-10 блоков от земли
+            Location spawnAt = new Location(w, x, y, z);
             Entity e = w.spawnEntity(spawnAt, EntityType.PHANTOM);
             if (!(e instanceof LivingEntity mob)) continue;
             mob.setMetadata(META_KEY, new FixedMetadataValue(plugin(), defenderCountryName));
