@@ -82,6 +82,21 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
     private static final long DECAY_GRACE_MS = 10_000L; // 10с без атакующего рядом — и начинает таять
     private static final double DECAY_RATE = 0.8; // от скорости роста
 
+    // Живой тест 2026-08-22 (раунд 2) — ни BlockDamageEvent, ни
+    // BlockDamageAbortEvent НЕ надёжны как единственный источник правды о
+    // "копает ли игрок прямо сейчас": abort прилетает только при
+    // ДОСРОЧНОМ отпускании, а штатное завершение долбёжки (дошёл до конца
+    // анимации трещин) вообще не шлёт ни одного из двух событий — просто
+    // BlockBreakEvent, который мы отменяем. Раньше это давало то залипание
+    // навечно (diggingActive не сбрасывался вообще), то полную заморозку
+    // (сброс без надёжного способа снова стать true, если ре-старт клиента
+    // не успевал попасть в 2-секундный tick). Поэтому здесь — "пинг":
+    // ЛЮБОЕ доказательство активности (dig-start ИЛИ отменённая попытка
+    // слома) обновляет lastDigPingAt; digging в tick() держится, пока пинг
+    // не протух дольше PING_TIMEOUT_MS. Явный abort всё ещё останавливает
+    // немедленно (диggingActive=false) — это надёжный сигнал сам по себе.
+    private static final long PING_TIMEOUT_MS = TICK_PERIOD_TICKS * 50L + 1_000L; // один период tick() + запас
+
     private static final double MILESTONE_KNOCKBACK_AT = 33.0;
     private static final double MILESTONE_DARKNESS_AT = 66.0;
     private static final double MILESTONE_FIRE_AT = 75.0;
@@ -143,6 +158,9 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         // true, а не просто пока враг где-то рядом.
         String diggingPlayerName;
         boolean diggingActive;
+        // Последнее доказательство реальной активности (dig-start ИЛИ
+        // отменённая попытка слома) — см. PING_TIMEOUT_MS выше.
+        long lastDigPingAt;
         // Фидбек 2026-08-22 (второй раунд) — "первые 30% ничего не
         // происходит" — таймер лёгкой периодической обратной связи, не
         // привязанной к майлстоунам.
@@ -183,9 +201,12 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
             SabotageState state = statesByZone.computeIfAbsent(markerId, k -> new SabotageState());
 
             // Фидбек 2026-08-22 — рост только пока игрок РЕАЛЬНО копает
-            // (диспетчер онлайн + флаг ещё не сброшен BlockDamageAbortEvent'ом
-            // — см. onAnchorDigStart/onAnchorDigAbort ниже), не просто стоит рядом.
+            // (диспетчер онлайн, флаг не сброшен BlockDamageAbortEvent'ом И
+            // пинг активности не протух — см. PING_TIMEOUT_MS выше и
+            // onAnchorDigStart/onAnchorDigAbort/onAnchorBreakAttempt ниже),
+            // не просто стоит рядом.
             boolean digging = state.diggingActive && state.diggingPlayerName != null
+                    && (now - state.lastDigPingAt) <= PING_TIMEOUT_MS
                     && org.bukkit.Bukkit.getPlayerExact(state.diggingPlayerName) != null;
             if (digging) {
                 state.progress = Math.min(100.0, state.progress + growthPerTick);
@@ -367,6 +388,7 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         state.attackerCountryName = null;
         state.diggingPlayerName = null;
         state.diggingActive = false;
+        state.lastDigPingAt = 0;
     }
 
     // ---- Реальное копание якоря (фидбек 2026-08-22) ----
@@ -404,9 +426,10 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         SabotageState state = statesByZone.computeIfAbsent(zone.getMarkerID(), k -> new SabotageState());
         state.diggingPlayerName = e.getPlayer().getName();
         state.diggingActive = true;
+        state.lastDigPingAt = System.currentTimeMillis();
     }
 
-    /** Игрок отпустил ЛКМ раньше, чем блок реально сломался (мы и не даём ему сломаться обычным способом, см. onAnchorBreakAttempt) — копание прервано, дальше decay в tick(). */
+    /** Игрок отпустил ЛКМ раньше, чем блок реально сломался (мы и не даём ему сломаться обычным способом, см. onAnchorBreakAttempt) — копание прервано, дальше decay в tick(). Единственный НАДЁЖНЫЙ сигнал "точно остановился" — сбрасываем сразу, не дожидаясь протухания пинга. */
     @EventHandler(ignoreCancelled = true)
     public void onAnchorDigAbort(BlockDamageAbortEvent e) {
         if (e.getBlock().getType() != Material.BELL) return;
@@ -426,19 +449,24 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
      * вообще без 100% прогресса. Реальный слом/шрам происходит программно в
      * completeSabotage, не через это событие.
      *
-     * Живой тест 2026-08-22 — баг "нажал один раз, и дальше безвозвратно
-     * продолжается": BlockDamageAbortEvent прилетает, только если игрок
-     * прервал долбёжку РАНЬШЕ, чем она штатно завершилась бы (отпустил ПКМ
-     * до конца анимации трещин). Если долбёжка дошла до конца (мгновенный
-     * слом в креативе, быстрый инструмент, либо просто додержал до финальной
-     * трещины) — клиент считает действие завершённым, abort не шлётся
-     * вообще, а diggingActive так и остаётся true навсегда: прогресс растёт
-     * даже после того как игрок давно отпустил кнопку и ушёл. Поэтому сброс
-     * diggingActive нужен ЗДЕСЬ ЖЕ, в момент отмены ванильной попытки слома —
-     * это и есть настоящий конец текущей "сессии" долбёжки. Если игрок
-     * продолжает реально держать ПКМ дальше, клиент увидит, что блок никуда
-     * не делся, и сам заново пришлёт BlockDamageEvent — onAnchorDigStart
-     * снова выставит diggingActive=true, рост не прервётся.
+     * Живой тест 2026-08-22 (раунд 1) — баг "нажал один раз, и дальше
+     * безвозвратно продолжается": BlockDamageAbortEvent прилетает, только
+     * если игрок прервал долбёжку РАНЬШЕ, чем она штатно завершилась бы
+     * (отпустил ПКМ до конца анимации трещин). Штатное завершение
+     * (мгновенный слом в креативе, быстрый инструмент, либо додержал до
+     * финальной трещины) не шлёт вообще ни одного из двух событий — только
+     * этот BlockBreakEvent, который мы отменяем.
+     *
+     * Живой тест 2026-08-22 (раунд 2) — первая попытка фикса (жёсткий сброс
+     * diggingActive=false прямо здесь) породила противоположный баг:
+     * "остывает и не сбить" — после ОДНОГО такого срабатывания рост
+     * навсегда переставал возобновляться, даже когда игрок реально начинал
+     * долбить заново, потому что при мгновенном/быстром сломе dig-start и
+     * break-attempt идут почти одновременно и наш 2-секундный tick() почти
+     * всегда успевал застать diggingActive именно в false-фазе. Поэтому
+     * здесь только обновляем пинг активности (PING_TIMEOUT_MS выше) — это
+     * доказательство "игрок только что реально долбил", а не сигнал
+     * "точно остановился" (тот даёт исключительно onAnchorDigAbort).
      */
     @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
     public void onAnchorBreakAttempt(BlockBreakEvent e) {
@@ -451,10 +479,10 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
 
         e.setCancelled(true);
 
-        SabotageState state = statesByZone.get(zone.getMarkerID());
-        if (state != null && e.getPlayer().getName().equals(state.diggingPlayerName)) {
-            state.diggingActive = false;
-        }
+        SabotageState state = statesByZone.computeIfAbsent(zone.getMarkerID(), k -> new SabotageState());
+        state.diggingPlayerName = e.getPlayer().getName();
+        state.diggingActive = true;
+        state.lastDigPingAt = System.currentTimeMillis();
     }
 
     @Override
