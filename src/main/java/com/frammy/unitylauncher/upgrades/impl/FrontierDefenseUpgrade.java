@@ -253,12 +253,25 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
         return n;
     }
 
-    /** Точка рядом с игроком: на поверхности — по highestBlockYAt, под землёй — на его же уровне Y с проверкой на проходимость. */
+    // Фидбек 2026-08-22 — "если места нет — разрушать блоки рядом (разрешённый
+    // список), не тупо не спавнить/спавнить в одной точке". Только природный
+    // диггабельный камень/грунт — НЕ бедрок, НЕ обсидиан/магма (это теперь
+    // шрам от Диверсии, см. дизайн-док §17.10 — не должны сами же его портить),
+    // НЕ что-либо похожее на постройку игрока.
+    private static final java.util.Set<Material> DIGGABLE_UNDERGROUND = java.util.EnumSet.of(
+            Material.STONE, Material.DEEPSLATE, Material.DIRT, Material.GRAVEL, Material.SAND,
+            Material.ANDESITE, Material.DIORITE, Material.GRANITE, Material.TUFF, Material.CALCITE,
+            Material.CLAY, Material.NETHERRACK, Material.END_STONE, Material.COBBLESTONE,
+            Material.MOSSY_COBBLESTONE, Material.DRIPSTONE_BLOCK, Material.COBBLED_DEEPSLATE
+    );
+
+    /** Точка рядом с игроком: на поверхности — по highestBlockYAt, под землёй — на его же уровне Y с проверкой на проходимость (или прокопкой, если места совсем нет). */
     private Location randomPointNear(Location base, boolean shielded) {
         World w = base.getWorld();
         if (w == null) return base;
         ThreadLocalRandom rnd = ThreadLocalRandom.current();
 
+        Location lastDiggableCandidate = null;
         for (int i = 0; i < RANDOM_POINT_ATTEMPTS; i++) {
             double radius = shielded ? (4 + rnd.nextDouble() * 5) : (5 + rnd.nextDouble() * 8);
             double angle = rnd.nextDouble() * Math.PI * 2;
@@ -275,8 +288,21 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
             Material at = candidate.getBlock().getType();
             Material above = candidate.clone().add(0, 1, 0).getBlock().getType();
             if (!at.isSolid() && !above.isSolid()) return candidate;
+
+            // Запоминаем последнего "диггабельного" кандидата — если ни одна
+            // точка так и не оказалась свободной (тесная порода), прокопаем
+            // именно его, а не первый попавшийся (мог быть бедрок/чужая постройка).
+            if (lastDiggableCandidate == null && DIGGABLE_UNDERGROUND.contains(at) && DIGGABLE_UNDERGROUND.contains(above)) {
+                lastDiggableCandidate = candidate;
+            }
         }
-        return base; // не нашли проходимую точку — спавним прямо у игрока
+
+        if (lastDiggableCandidate != null) {
+            lastDiggableCandidate.getBlock().setType(Material.AIR);
+            lastDiggableCandidate.clone().add(0, 1, 0).getBlock().setType(Material.AIR);
+            return lastDiggableCandidate;
+        }
+        return base; // не нашли даже диггабельную точку (бедрок/чужая постройка вокруг) — спавним прямо у игрока
     }
 
     // ---- 2. "Отголосок" (§17.4) / 3. Фантомы на столбе ----
@@ -342,22 +368,32 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
             // тем же индексом пульса — больше фантомов с каждым разом, как и у
             // Отголоска с уроном, тот же принцип "чем дольше сидишь, тем хуже".
             int count = Math.min(PHANTOM_MAX_PER_PULSE, 1 + pulseIndex);
-            spawnPhantoms(p.getLocation(), defenderCountryName, count);
+            spawnPhantoms(p, defenderCountryName, count);
             return;
         }
 
         double damage = cfg.pulseBaseDamage() + pulseIndex * (ECHO_DAMAGE_STEP_HEARTS[echoLevel] * 2.0);
 
-        // "Сквозь блоки" — прямой damage()/playSound() игроку, без снарядов и
-        // без проверки видимости: звук/урон приходят независимо от того, что
-        // между источником и игроком (та же сигнатурная черта Стража).
-        p.playSound(p.getLocation(), Sound.ENTITY_WARDEN_SONIC_BOOM, 2.5f, 1.0f);
-        p.spawnParticle(Particle.SONIC_BOOM, p.getLocation().add(0, 1, 0), 1);
+        // Фидбек 2026-08-22 ("удар вардена вообще не появляется") — урон
+        // теперь идёт ПЕРВЫМ, звук/партиклы — best-effort в try/catch следом:
+        // раньше, если звук/партикл-константа не резолвилась на конкретной
+        // версии API (NoSuchFieldError на конкретном сервере — не
+        // воспроизвести локально без доступа к боевому окружению), исключение
+        // прерывало метод ДО damage() — и удара не было вообще, хотя
+        // остальная логика (детект/эскалация) явно отрабатывала. Теперь урон
+        // применяется гарантированно, аудио-визуал — по возможности.
         p.damage(damage);
+        try {
+            p.playSound(p.getLocation(), Sound.ENTITY_WARDEN_SONIC_BOOM, 2.5f, 1.0f);
+            p.spawnParticle(Particle.SONIC_BOOM, p.getLocation().add(0, 1, 0), 1);
+        } catch (Throwable t) {
+            plugin().getLogger().warning("[Military/FrontierDefense] Отголосок: звук/партикл не сработали (" + t + "), урон всё равно применён");
+        }
     }
 
-    /** Фантомы у столба — те же анти-фарм атрибуты (без дропа/опыта, именованы, целятся только в реального врага по войне), что и наземный патруль — onDeath/onTarget ниже общие для всех META_KEY-мобов. */
-    private void spawnPhantoms(Location at, String defenderCountryName, int count) {
+    /** Фантомы у столба — те же анти-фарм атрибуты (без дропа/опыта, именованы, целятся только в реального врага по войне), что и наземный патруль — onDeath/onTarget ниже общие для всех META_KEY-мобов. onCombust ниже — иммунитет к дневному горению, иначе фантомы гибли от солнца раньше, чем успевали атаковать. */
+    private void spawnPhantoms(Player target, String defenderCountryName, int count) {
+        Location at = target.getLocation();
         World w = at.getWorld();
         if (w == null) return;
         ThreadLocalRandom rnd = ThreadLocalRandom.current();
@@ -369,6 +405,13 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
             mob.setRemoveWhenFarAway(true);
             mob.setCustomName(MOB_NAME);
             mob.setCustomNameVisible(true);
+            // Фидбек 2026-08-22 ("кружат и не атакуют") — заспавненный через
+            // spawnEntity фантом НЕ получает цель автоматически (ванильная
+            // AI-цель фантома завязана на "бессонницу" игрока при природном
+            // спавне — плагинный спавн этот триггер не проходит вообще).
+            // Без явной цели фантом просто летает по своему обычному
+            // блужданию рядом, никогда не атакуя — задаём цель напрямую.
+            if (mob instanceof org.bukkit.entity.Mob m) m.setTarget(target);
         }
     }
 
@@ -455,6 +498,22 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
         if (e.getEntity().getMetadata(META_KEY).isEmpty()) return;
         e.getDrops().clear();
         e.setDroppedExp(0);
+    }
+
+    /**
+     * Фидбек 2026-08-22 ("афк над землёй практически не срабатывает...
+     * фантомы сгорают ещё до момента как успеют атаковать") — фантомы, как и
+     * прочая нежить, горят на солнце; заспавненные днём рядом со столбом (в
+     * открытом небе, по определению) вспыхивали и гибли за пару секунд,
+     * реального боя не успевало произойти. Иммунитет к возгоранию только для
+     * META_KEY-мобов этого класса (не трогает обычных фантомов/зомби/скелетов
+     * в мире) — вся тема Отголоска/фантомов на столбе про "заставить среагировать",
+     * не про "повезёт, если ночь".
+     */
+    @EventHandler(ignoreCancelled = true)
+    public void onCombust(org.bukkit.event.entity.EntityCombustEvent e) {
+        if (e.getEntity().getMetadata(META_KEY).isEmpty()) return;
+        e.setCancelled(true);
     }
 
     @EventHandler(ignoreCancelled = true)
