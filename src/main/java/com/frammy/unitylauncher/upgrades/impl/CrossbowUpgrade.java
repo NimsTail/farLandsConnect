@@ -11,6 +11,7 @@ import com.frammy.unitylauncher.zones.ZoneInfo;
 import com.frammy.unitylauncher.zones.ZoneType;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.entity.Arrow;
@@ -207,6 +208,18 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
             // летит свободно.
             Location spawnLoc = origin.clone().add(0, 1.2, 0);
 
+            // Живой тест 2026-08-22 (раунд 2) — "если блок ставится РОВНО в
+            // точку спавна, стрела просто спавнится внутри" — onArrowHit
+            // реагирует на ProjectileHitEvent, а стрела, которая уже
+            // заспавнилась ВНУТРИ блока, никуда не летит и это событие
+            // никогда не получает (нет столкновения — нечему сработать).
+            // Прочищаем саму точку спавна заранее, до вызова shoot() —
+            // тем же способом, что и onArrowHit (небольшой взрыв), так что
+            // следующий же залп в ЭТОТ tick уже летит свободно.
+            if (!spawnLoc.getBlock().isPassable()) {
+                clearBlockingBlock(spawnLoc, origin);
+            }
+
             List<Player> targets = findTargets(spawnLoc, cfg, z.getCountryName(), MAX_TARGETS);
             if (targets.isEmpty()) continue;
 
@@ -218,7 +231,7 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
             lastShotByZone.put(markerId, now);
 
             for (Player target : targets) {
-                shoot(spawnLoc, target, cfg, canonicalCountry, effectsLevel, chanceLevel, accuracyLevel);
+                shoot(spawnLoc, origin, target, cfg, canonicalCountry, effectsLevel, chanceLevel, accuracyLevel);
             }
         }
     }
@@ -284,7 +297,7 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
     // здесь заново. Раньше shoot() сам прибавлял смещение к origin — ЭТО и
     // была причина расхождения (см. тот же класс бага, п.1: два разных
     // отсчёта для "видит" и "стреляет").
-    private void shoot(Location spawnLoc, Player target, MilitaryCfg.CrossbowCfg cfg, String canonicalCountry, int effectsLevel, int chanceLevel, int accuracyLevel) {
+    private void shoot(Location spawnLoc, Location anchor, Player target, MilitaryCfg.CrossbowCfg cfg, String canonicalCountry, int effectsLevel, int chanceLevel, int accuracyLevel) {
         Vector direction = target.getEyeLocation().toVector().subtract(spawnLoc.toVector()).normalize();
         // GH#29 (фидбек раунд 2) — реальный разброс вместо идеальной прямой.
         direction = applySpread(direction, INACCURACY_DEGREES[accuracyLevel]);
@@ -292,8 +305,11 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
         arrow.setVelocity(direction.multiply(ARROW_SPEED));
         arrow.setDamage(cfg.damage());
         // Живой тест 2026-08-22 — метим стрелу, чтобы onArrowHit ниже отличал
-        // её от любой другой стрелы на сервере (игрока, скелета и т.д.).
-        arrow.setMetadata(ARROW_METADATA_KEY, new FixedMetadataValue(plugin(), true));
+        // её от любой другой стрелы на сервере (игрока, скелета и т.д.); в
+        // значении несём координаты якоря — onArrowHit восстанавливает
+        // именно этот блок, если взрыв случайно его задел (spawnLoc всего в
+        // 1.2 блока от анкера, задеть легко).
+        arrow.setMetadata(ARROW_METADATA_KEY, new FixedMetadataValue(plugin(), anchor.clone()));
 
         if (effectsLevel >= 1 && ThreadLocalRandom.current().nextDouble() < EFFECT_CHANCE[chanceLevel]) {
             EffectPreset preset = resolveActivePreset(canonicalCountry);
@@ -360,20 +376,35 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
      * Следующий залп с той же spawnLoc уже летит свободно. Метка
      * ARROW_METADATA_KEY отсекает чужие стрелы (игроков, скелетов и т.д.) —
      * этот хендлер реагирует только на выстрелы этого класса.
+     *
+     * Живой тест 2026-08-22 (раунд 2) — "колокол может попасть сам в себя и
+     * себя взорвать": spawnLoc всего в 1.2 блока над анкером — взрыв
+     * (BLOCK_CLEAR_EXPLOSION_POWER, breakBlocks=true) вполне может задеть и
+     * сам блок якоря. Значение метки теперь несёт координаты анкера —
+     * восстанавливаем его безусловно после взрыва, тем же приёмом, что и
+     * completeSabotage.
      */
     @EventHandler
     public void onArrowHit(ProjectileHitEvent e) {
         if (!(e.getEntity() instanceof Arrow arrow)) return;
         if (!arrow.hasMetadata(ARROW_METADATA_KEY)) return;
+        Location anchor = (Location) arrow.getMetadata(ARROW_METADATA_KEY).get(0).value();
 
         Block hitBlock = e.getHitBlock();
         if (hitBlock != null) {
-            World w = hitBlock.getWorld();
-            if (w != null) {
-                w.createExplosion(hitBlock.getLocation().add(0.5, 0.5, 0.5), BLOCK_CLEAR_EXPLOSION_POWER, false, true);
-            }
+            clearBlockingBlock(hitBlock.getLocation().add(0.5, 0.5, 0.5), anchor);
         }
         arrow.remove();
+    }
+
+    /** Небольшой ванильный взрыв, расчищающий путь стрелы — с безусловным восстановлением якоря-колокола, если взрыв случайно его задел (см. onArrowHit/tick()). */
+    private void clearBlockingBlock(Location loc, Location anchor) {
+        World w = loc.getWorld();
+        if (w == null) return;
+        w.createExplosion(loc, BLOCK_CLEAR_EXPLOSION_POWER, false, true);
+        if (anchor != null && anchor.getWorld() != null && anchor.getBlock().getType() != Material.BELL) {
+            anchor.getBlock().setType(Material.BELL);
+        }
     }
 
     @Override
