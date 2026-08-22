@@ -94,9 +94,28 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
 
     // "Блоки ставятся как обычные, как шрам" (решено 2026-08-22) — не
     // спец-неразрушимые, обычный OBSIDIAN/STONE/MAGMA_BLOCK, ломаются как
-    // угодно. Радиус 1-2 блока, включая воздух (не только заменяет солид).
+    // угодно.
     private static final Material[] SCAR_MATERIALS = {Material.OBSIDIAN, Material.STONE, Material.MAGMA_BLOCK};
-    private static final int SCAR_RADIUS = 2;
+
+    // Фидбек 2026-08-22 (второй раунд) — "взрыв буквальный, срывать блоки
+    // вокруг (радиус до 4 блоков) + наносить урон". Настоящий ванильный
+    // взрыв (World.createExplosion) — даёт частицы/звук/урон/отталкивание
+    // и естественно рассыпчатое разрушение блоков бесплатно, без ручного
+    // кода на каждый из этих пунктов по отдельности. fire=false (у нас уже
+    // есть свой контролируемый огонь на 75%+, не нужен второй бесконтрольный
+    // пожар), breakBlocks=true.
+    private static final float EXPLOSION_POWER = 3.5f; // ~3-4 блока радиуса разрушения, как заряженный крипер
+
+    // Фидбек — "структура более рассыпная, с пиком в центре, а не как
+    // столб". Конус: максимальная высота ровно над анкером, тает к краю;
+    // density тоже падает к краю — не сплошная заливка, а рассыпчатая куча.
+    private static final int MOUND_RADIUS = 3;
+    private static final int MOUND_MAX_HEIGHT = 3;
+
+    // Фидбек — "первые 30% ничего не происходит, кроме статуса в баре".
+    // Лёгкая, но заметная обратная связь каждые несколько секунд копания,
+    // не привязанная к майлстоунам (те начинаются только с 33%).
+    private static final long EARLY_FEEDBACK_INTERVAL_MS = 3_000L;
 
     @Override public UpgradeKey key() { return KEY; }
     @Override public UpgradeScope scope() { return UpgradeScope.COUNTRY; }
@@ -124,6 +143,10 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         // true, а не просто пока враг где-то рядом.
         String diggingPlayerName;
         boolean diggingActive;
+        // Фидбек 2026-08-22 (второй раунд) — "первые 30% ничего не
+        // происходит" — таймер лёгкой периодической обратной связи, не
+        // привязанной к майлстоунам.
+        long lastFeedbackAt;
     }
 
     private final Map<String, SabotageState> statesByZone = new ConcurrentHashMap<>();
@@ -183,6 +206,15 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
                     String verb = digging ? "Диверсия" : "Диверсия (остывает)";
                     digger.sendActionBar(Component.text("⚒ " + verb + ": " + Math.round(state.progress) + "%", color));
                 }
+            }
+
+            // Фидбек 2026-08-22 (второй раунд) — "первые 30% даже не понятно,
+            // что ты копаешь" — лёгкая частица/звук раз в EARLY_FEEDBACK_INTERVAL_MS
+            // ПОКА РЕАЛЬНО КОПАЕТ, независимо от майлстоунов (те стартуют с 33%).
+            if (digging && anchor.getWorld() != null && now - state.lastFeedbackAt >= EARLY_FEEDBACK_INTERVAL_MS) {
+                state.lastFeedbackAt = now;
+                anchor.getWorld().spawnParticle(Particle.CRIT, anchor.clone().add(0, 0.5, 0), 10, 0.3, 0.3, 0.3, 0.02);
+                anchor.getWorld().playSound(anchor, Sound.BLOCK_BELL_USE, 1.2f, 0.7f);
             }
 
             applyMilestones(anchor, ownerCountryName, state, now, countryRegistry, warCache);
@@ -263,27 +295,49 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         }
     }
 
+    /**
+     * Фидбек 2026-08-22 (второй раунд):
+     *  - "блок колокола никуда не пропадает — просто становится неактивным
+     *    и покрывается сверху" — сам блок анкера НИКОГДА не входит в
+     *    рассыпаемую кучу (явно пропускается), восстанавливается на месте
+     *    сразу после взрыва, если тот случайно его задел.
+     *  - "взрыв буквальный — срывать блоки вокруг (радиус до 4) + урон" —
+     *    настоящий World.createExplosion: частицы/звук/урон/отталкивание
+     *    и рассыпчатое разрушение окрестности — всё бесплатно, одним вызовом.
+     *  - "структура более рассыпная, с пиком в центре, не как столб" —
+     *    после взрыва конусом насыпается куча шрам-материала: максимум
+     *    высоты и плотности прямо над анкером, тает к MOUND_RADIUS, с
+     *    пропусками (не сплошная заливка).
+     */
     private void completeSabotage(ZoneInfo zone, Location anchor, String markerId, SabotageState state) {
         World w = anchor.getWorld();
         if (w != null) {
-            // Партиклы пара + звук + толчок + шрам (§17.10, решено 2026-08-22).
+            // Настоящий взрыв — частицы/звук/урон+отталкивание нанесёт сам,
+            // не нужно вручную. fire=false (свой контролируемый огонь уже
+            // есть, см. igniteAround), breakBlocks=true — реально срывает
+            // блоки вокруг радиусом ~3-4 (та самая "рассыпчатость" бесплатно).
+            w.createExplosion(anchor, EXPLOSION_POWER, false, true);
+
+            // Взрыв мог случайно задеть и сам блок анкера — восстанавливаем
+            // его безусловно, он "просто становится неактивным", не исчезает.
+            anchor.getBlock().setType(Material.BELL);
+
+            // Доп. партиклы/звук поверх ванильного взрыва — пар/сталь, не дублируем сам взрыв.
             w.spawnParticle(Particle.CLOUD, anchor, 60, 1.2, 1.0, 1.2, 0.06);
             w.playSound(anchor, Sound.BLOCK_LAVA_EXTINGUISH, 3.0f, 1.0f);
-            w.playSound(anchor, Sound.ENTITY_GENERIC_EXPLODE, 1.5f, 0.8f);
 
-            for (Player p : anchor.getWorld().getPlayers()) {
-                if (p.getLocation().distanceSquared(anchor) > 8.0 * 8.0) continue;
-                Vector away = p.getLocation().toVector().subtract(anchor.toVector());
-                if (away.lengthSquared() < 1e-4) continue;
-                p.setVelocity(away.normalize().multiply(KNOCKBACK_STRENGTH * 1.6).setY(0.35));
-            }
+            // Рассыпчатая куча-конус: пик высоты/плотности над анкером, тает к краю.
+            for (int dx = -MOUND_RADIUS; dx <= MOUND_RADIUS; dx++) {
+                for (int dz = -MOUND_RADIUS; dz <= MOUND_RADIUS; dz++) {
+                    double dist = Math.sqrt(dx * dx + dz * dz);
+                    if (dist > MOUND_RADIUS) continue;
+                    double falloff = 1.0 - dist / MOUND_RADIUS; // 1 в центре -> 0 на краю
+                    int peakHeight = (int) Math.round(MOUND_MAX_HEIGHT * falloff);
+                    double density = Math.max(0.15, falloff); // рассыпчато — не сплошная заливка, гуще к центру
 
-            // Шрам — обычные ломаемые блоки, радиус 1-2, включая воздух
-            // (безусловная замена, не только "если было солид").
-            for (int dx = -SCAR_RADIUS; dx <= SCAR_RADIUS; dx++) {
-                for (int dy = -1; dy <= 1; dy++) {
-                    for (int dz = -SCAR_RADIUS; dz <= SCAR_RADIUS; dz++) {
-                        if (dx * dx + dy * dy + dz * dz > SCAR_RADIUS * SCAR_RADIUS) continue;
+                    for (int dy = -1; dy <= peakHeight; dy++) {
+                        if (dx == 0 && dz == 0 && dy == 0) continue; // сам блок анкера не трогаем никогда
+                        if (ThreadLocalRandom.current().nextDouble() > density) continue;
                         Material mat = SCAR_MATERIALS[ThreadLocalRandom.current().nextInt(SCAR_MATERIALS.length)];
                         anchor.clone().add(dx, dy, dz).getBlock().setType(mat);
                     }
@@ -291,11 +345,12 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
             }
         }
 
-        // Анкер физически похоронен под шрамом — сбрасываем регистрацию,
-        // владелец должен расчистить и поставить новый колокол (§17.10:
-        // "для починки владелец должен прийти, расчистить, чтобы дойти до
-        // него" — сама механика починки за пределами анкера пока открытый
-        // вопрос, см. дизайн-док).
+        // Анкер физически похоронен под шрамом (сам блок жив, просто
+        // недоступен под кучей) — сбрасываем регистрацию, владелец должен
+        // расчистить и поставить новый колокол (§17.10: "для починки
+        // владелец должен прийти, расчистить, чтобы дойти до него" — сама
+        // механика починки за пределами анкера пока открытый вопрос, см.
+        // дизайн-док).
         zone.setMilitaryAnchorLocation(null);
         zones().saveZonesToConfig();
 
@@ -308,6 +363,7 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         state.milestone33 = false;
         state.milestone66 = false;
         state.lastFireAt = 0;
+        state.lastFeedbackAt = 0;
         state.attackerCountryName = null;
         state.diggingPlayerName = null;
         state.diggingActive = false;
