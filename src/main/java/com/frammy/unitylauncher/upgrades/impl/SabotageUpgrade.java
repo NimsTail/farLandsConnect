@@ -17,7 +17,12 @@ import org.bukkit.Particle;
 import org.bukkit.Sound;
 import org.bukkit.World;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.BlockBreakEvent;
+import org.bukkit.event.block.BlockDamageAbortEvent;
+import org.bukkit.event.block.BlockDamageEvent;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitTask;
@@ -34,17 +39,28 @@ import java.util.concurrent.ThreadLocalRandom;
  * (см. DefensePatrolUpgrade) и мгновенное BREAK_ANCHOR (см.
  * MilitaryAnchorService.onBreak — для DEFENSE-объектов больше не репортит).
  *
- * Схема: враг стоит рядом с якорем-колоколом (требование введено для всех
- * четырёх подтипов DEFENSE, не только Арбалета — см. MilitaryAnchorService)
- * — прогресс 0-100% растёт, пока он там стоит, тает (decay, НЕ мгновенный
- * сброс), если ушёл. Долгий процесс намеренно — один долбит, другой
+ * Схема (фидбек 2026-08-22 — "не просто стоять рядом, а именно физически
+ * ломать"): враг обязан РЕАЛЬНО долбить якорь-колокол (требование анкера
+ * введено для всех четырёх подтипов DEFENSE, не только Арбалета — см.
+ * MilitaryAnchorService), не просто стоять поблизости. Обычный ванильный
+ * слом колокола врагом всегда отменяется (onAnchorBreakAttempt) — вместо
+ * этого держим у блока искусственно увеличенное время ломания: копится,
+ * пока игрок реально долбит блок без остановки (BlockDamageEvent старт /
+ * BlockDamageAbortEvent — прервался), тает (decay, НЕ мгновенный сброс),
+ * если остановился. Долгий процесс намеренно — один долбит, другой
  * прикрывает от фонового патруля Обороны/собственного эффекта объекта,
  * никакого искусственного headcount-гейта. Майлстоуны на пути бьют по
  * атакующей стороне: 33% — отталкивание, 66% — тьма, 75%+ — периодически
  * занимающийся вокруг огонь (нарастающая цена простоя рядом). 100% —
- * партиклы/звук/толчок + шрам из обсидиана/камня/магмы на месте анкера —
- * дальше уже обычный поток (CONTESTED/War Score/иммунитет/платный ремонт,
+ * партиклы/звук/толчок + шрам из обсидиана/камня/магмы на месте анкера
+ * (реальный физический слом происходит ЗДЕСЬ, программно, не через
+ * ванильный BlockBreakEvent — тот у врага всегда отменён) — дальше уже
+ * обычный поток (CONTESTED/War Score/иммунитет/платный ремонт,
  * lib/militaryZones.ts), этот класс лишь один раз шлёт репорт.
+ *
+ * Свой собственный колокол владелец по-прежнему ломает/переносит как
+ * обычно — перехват работает только для игроков вражеской (по войне)
+ * страны, см. onAnchorDigStart/onAnchorBreakAttempt.
  *
  * Без анкера объект физически не нейтрализуется вообще — прямое следствие
  * "если сейчас не требуется, ввести требование" (владелец обязан держать
@@ -57,8 +73,7 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
 
     // Черновые числа §17.10 — под правку по живому тесту, как и весь баланс документа.
     private static final long TICK_PERIOD_TICKS = 40L; // 2с
-    private static final double CHANNEL_SECONDS = 120.0; // "долгий процесс" — 2 минуты полного канала
-    private static final double PROXIMITY_RADIUS = 3.0; // должен физически стоять у якоря, не "где-то в зоне"
+    private static final double CHANNEL_SECONDS = 120.0; // "долгий процесс" — 2 минуты полного НЕПРЕРЫВНОГО копания
 
     // "Декай нужен, но держится явно меньше", чем на линии фронта (§17.2/§17.8:
     // там 7 мин/0.4×) — это активный ближний бой, а не пассивная площадь.
@@ -101,6 +116,12 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         boolean milestone66;
         long lastFireAt;
         String attackerCountryName;
+        // Фидбек 2026-08-22 — "не просто стоять рядом, а именно физически
+        // ломать". Кто сейчас реально долбит якорь (BlockDamageEvent без
+        // BlockDamageAbortEvent между) — прогресс растёт, только пока это
+        // true, а не просто пока враг где-то рядом.
+        String diggingPlayerName;
+        boolean diggingActive;
     }
 
     private final Map<String, SabotageState> statesByZone = new ConcurrentHashMap<>();
@@ -136,11 +157,15 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
             String markerId = z.getMarkerID();
             SabotageState state = statesByZone.computeIfAbsent(markerId, k -> new SabotageState());
 
-            Player attacker = findAttackerNear(anchor, ownerCountryName, countryRegistry, warCache);
-            if (attacker != null) {
+            // Фидбек 2026-08-22 — рост только пока игрок РЕАЛЬНО копает
+            // (диспетчер онлайн + флаг ещё не сброшен BlockDamageAbortEvent'ом
+            // — см. onAnchorDigStart/onAnchorDigAbort ниже), не просто стоит рядом.
+            boolean digging = state.diggingActive && state.diggingPlayerName != null
+                    && org.bukkit.Bukkit.getPlayerExact(state.diggingPlayerName) != null;
+            if (digging) {
                 state.progress = Math.min(100.0, state.progress + growthPerTick);
                 state.lastGrowthAt = now;
-                state.attackerCountryName = countryRegistry.getCountryOfPlayer(attacker.getName());
+                state.attackerCountryName = countryRegistry.getCountryOfPlayer(state.diggingPlayerName);
             } else if (state.progress > 0 && now - state.lastGrowthAt > DECAY_GRACE_MS) {
                 state.progress = Math.max(0.0, state.progress - growthPerTick * DECAY_RATE);
             }
@@ -158,18 +183,6 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
     private MilitaryDefenseSubtype activeSubtypeOf(ZoneInfo z, MilitaryDefenseSubtypeService subtypeService) {
         for (MilitaryDefenseSubtype s : MilitaryDefenseSubtype.values()) {
             if (subtypeService.isActiveAs(z, s)) return s;
-        }
-        return null;
-    }
-
-    private Player findAttackerNear(Location anchor, String ownerCountryName, CountryRegistryJdbc countryRegistry, WarStatusCache warCache) {
-        double r2 = PROXIMITY_RADIUS * PROXIMITY_RADIUS;
-        for (Player p : anchor.getWorld().getPlayers()) {
-            if (p.getLocation().distanceSquared(anchor) > r2) continue;
-            String playerCountry = countryRegistry.getCountryOfPlayer(p.getName());
-            if (playerCountry == null || playerCountry.equalsIgnoreCase(ownerCountryName)) continue;
-            if (!warCache.isAtWar(ownerCountryName, playerCountry)) continue;
-            return p;
         }
         return null;
     }
@@ -281,6 +294,77 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         state.milestone66 = false;
         state.lastFireAt = 0;
         state.attackerCountryName = null;
+        state.diggingPlayerName = null;
+        state.diggingActive = false;
+    }
+
+    // ---- Реальное копание якоря (фидбек 2026-08-22) ----
+
+    /** Зона, чей ЖИВОЙ (не сброшенный) якорь стоит ровно в этом блоке — та же логика поиска, что у MilitaryAnchorService.findZoneByAnchor, но своя копия: разные пакеты, тянуть ради одного метода не стоит. */
+    private ZoneInfo findZoneByAnchor(Location broken) {
+        for (ZoneInfo z : zones().getAllZonesSnapshot()) {
+            Location anchor = z.getMilitaryAnchorLocation();
+            if (anchor == null || anchor.getWorld() == null) continue;
+            if (!anchor.getWorld().getUID().equals(broken.getWorld().getUID())) continue;
+            if (anchor.getBlockX() == broken.getBlockX() && anchor.getBlockY() == broken.getBlockY() && anchor.getBlockZ() == broken.getBlockZ()) return z;
+        }
+        return null;
+    }
+
+    /** true, если этот игрок — реальный враг (по войне) владельца зоны, не сам владелец/союзник/нейтрал. Свой колокол ломается/переносится как обычно, без вмешательства этого класса. */
+    private boolean isEnemyDigger(ZoneInfo zone, Player p) {
+        var countryRegistry = UnityLauncher.getInstance().countryRegistryJdbc;
+        String diggerCountry = countryRegistry.getCountryOfPlayer(p.getName());
+        String ownerCountry = zone.getCountryName();
+        if (diggerCountry == null || ownerCountry == null || diggerCountry.equalsIgnoreCase(ownerCountry)) return false;
+        return UnityLauncher.getInstance().warStatusCache.isAtWar(ownerCountry, diggerCountry);
+    }
+
+    /** Начало копания (ЛКМ по блоку) — если это чужой якорь DEFENSE-объекта под Диверсией, помечаем прогресс как растущий. */
+    @EventHandler(ignoreCancelled = true)
+    public void onAnchorDigStart(BlockDamageEvent e) {
+        if (e.getBlock().getType() != Material.BELL) return;
+        ZoneInfo zone = findZoneByAnchor(e.getBlock().getLocation());
+        if (zone == null) return;
+        var subtypeService = UnityLauncher.getInstance().militaryDefenseSubtypeService;
+        if (activeSubtypeOf(zone, subtypeService) == null) return; // не DEFENSE-объект под Диверсией
+        if (!isEnemyDigger(zone, e.getPlayer())) return; // свой/не при войне — не наше дело
+
+        SabotageState state = statesByZone.computeIfAbsent(zone.getMarkerID(), k -> new SabotageState());
+        state.diggingPlayerName = e.getPlayer().getName();
+        state.diggingActive = true;
+    }
+
+    /** Игрок отпустил ЛКМ раньше, чем блок реально сломался (мы и не даём ему сломаться обычным способом, см. onAnchorBreakAttempt) — копание прервано, дальше decay в tick(). */
+    @EventHandler(ignoreCancelled = true)
+    public void onAnchorDigAbort(BlockDamageAbortEvent e) {
+        if (e.getBlock().getType() != Material.BELL) return;
+        ZoneInfo zone = findZoneByAnchor(e.getBlock().getLocation());
+        if (zone == null) return;
+        SabotageState state = statesByZone.get(zone.getMarkerID());
+        if (state != null && e.getPlayer().getName().equals(state.diggingPlayerName)) {
+            state.diggingActive = false;
+        }
+    }
+
+    /**
+     * Обычный ванильный слом якоря врагом — всегда отменяется. LOW-приоритет,
+     * чтобы событие было уже отменено к моменту, когда MilitaryAnchorService.onBreak
+     * (обычный приоритет, ignoreCancelled=true) до него дойдёт — свой колокол
+     * та логика по-прежнему обрабатывает как раньше, чужой теперь не ломается
+     * вообще без 100% прогресса. Реальный слом/шрам происходит программно в
+     * completeSabotage, не через это событие.
+     */
+    @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
+    public void onAnchorBreakAttempt(BlockBreakEvent e) {
+        if (e.getBlock().getType() != Material.BELL) return;
+        ZoneInfo zone = findZoneByAnchor(e.getBlock().getLocation());
+        if (zone == null) return;
+        var subtypeService = UnityLauncher.getInstance().militaryDefenseSubtypeService;
+        if (activeSubtypeOf(zone, subtypeService) == null) return;
+        if (!isEnemyDigger(zone, e.getPlayer())) return; // свой — пусть ломает как обычно
+
+        e.setCancelled(true);
     }
 
     @Override
