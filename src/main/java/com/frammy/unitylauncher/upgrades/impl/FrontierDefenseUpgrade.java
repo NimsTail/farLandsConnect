@@ -25,6 +25,7 @@ import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.EntityTargetLivingEntityEvent;
 import org.bukkit.metadata.FixedMetadataValue;
 import org.bukkit.scheduler.BukkitTask;
+import org.bukkit.util.Vector;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -50,9 +51,9 @@ import java.util.concurrent.ThreadLocalRandom;
  *     самой сущности. Урон растёт с каждым повторным пульсом, сбрасывается
  *     при реальном движении.
  *  3. Фантомы на столбе (фидбек 2026-08-22) — тот же принцип "неудобно
- *     закапываться" в другую сторону: если враг забрался на изолированный
- *     столб высоко над реальной землёй (не часть широкой конструкции —
- *     башни/стены не триггерят, см. isPillared) и не двигается дольше
+ *     закапываться" в другую сторону: если враг забрался высоко над
+ *     реальной землёй (столб ИЛИ платформа — см. isPillared, изоляция по
+ *     ширине убрана по фидбеку с живого теста) и не двигается дольше
  *     порога, периодически спавнятся фантомы — единственные ванильные
  *     мобы, которые долетят до него, раз наземный патруль физически не
  *     может. НЕ применяется к обычной поверхностной драке — высота почти
@@ -95,17 +96,28 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
     private static final double IDLE_MOVE_EPSILON_SQ = 0.35 * 0.35; // §17.4 — "без входов" — считаем неподвижным ниже этого смещения за тик
     private static final int RANDOM_POINT_ATTEMPTS = 8;
 
-    // Фидбек 2026-08-22 — "столб вверх, чтобы афкшить". Черновые числа:
+    // Фидбек 2026-08-22 — "столб вверх, чтобы афкшить". Черновое число:
     // 20+ блоков над реальной землёй (сэмплируется вокруг игрока, не под
     // ним — под ним стоит его же столб) — обычная поверхностная драка,
     // включая стены/башни разумной высоты, ниже порога почти всегда.
-    // Изоляция — почти всё вокруг на уровне игрока воздух (радиус 2), то
-    // есть именно тонкий столб, не платформа/стена/крыша башни.
+    // Раньше был ещё доп. чек "изоляция" (столб vs платформа) — убран по
+    // фидбеку живого теста п.3, см. javadoc isPillared.
     private static final int PILLAR_HEIGHT_THRESHOLD = 20;
     private static final int PILLAR_GROUND_SAMPLE_RADIUS = 8;
-    private static final int PILLAR_ISOLATION_RADIUS = 2;
-    private static final int PILLAR_MAX_SOLID_NEARBY = 1; // допуск на шум/случайный блок рядом
     private static final int PHANTOM_MAX_PER_PULSE = 4;
+
+    // Фидбек 2026-08-22 п.7 — "минимальный радиус от игрока до 3 блоков,
+    // чтобы не спавнить мобов ему на лицо". Общий для наземного/подземного
+    // патруля и фантомов.
+    private static final double MIN_SPAWN_RADIUS = 3.0;
+    // Фидбек п.2/1 — проверяем 3 блока по вертикали (не 2), с запасом:
+    // Иссушающий скелет выше обычного (2.4 блока), 2 клетки ему впритык.
+    private static final int SPAWN_HEIGHT_CHECK = 3;
+    // Фидбек п.4 — "буквально может спавнить их тысячами". Общий потолок
+    // живых мобов этого класса НА ОДНОГО атакующего игрока (не на зону —
+    // этот класс не привязан к конкретному объекту) — наземный патруль и
+    // фантомы делят один и тот же лимит.
+    private static final int MAX_ALIVE_PER_PLAYER = 6;
 
     @Override public UpgradeKey key() { return KEY; }
     @Override public UpgradeScope scope() { return UpgradeScope.COUNTRY; }
@@ -135,7 +147,22 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
     }
 
     private final Map<String, EngagementState> stateByPlayer = new ConcurrentHashMap<>();
+    // Фидбек 2026-08-22 п.4 — живые мобы этого класса на игрока (наземный
+    // патруль + фантомы вместе), для MAX_ALIVE_PER_PLAYER. Раньше вообще не
+    // считалось — при подходящих условиях каждый успешный pity-бросок/пульс
+    // просто добавлял ещё мобов без потолка.
+    private final Map<String, List<java.util.UUID>> aliveByPlayer = new ConcurrentHashMap<>();
     private BukkitTask task;
+
+    /** Чистит протухшие записи и возвращает, сколько ещё можно заспавнить этому игроку (0, если лимит уже выбран). */
+    private int freeSlotsFor(String playerName) {
+        List<java.util.UUID> alive = aliveByPlayer.computeIfAbsent(playerName, k -> new ArrayList<>());
+        alive.removeIf(id -> {
+            Entity e = Bukkit.getEntity(id);
+            return e == null || !e.isValid();
+        });
+        return Math.max(0, MAX_ALIVE_PER_PLAYER - alive.size());
+    }
 
     @Override
     protected void onEnable() {
@@ -193,6 +220,7 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
         // Чистим состояние игроков, которые вышли из релевантной территории/офлайн —
         // иначе карта растёт бесконечно на сервере с постоянной сменой состава.
         stateByPlayer.keySet().removeIf(name -> Bukkit.getPlayerExact(name) == null);
+        aliveByPlayer.keySet().removeIf(name -> Bukkit.getPlayerExact(name) == null);
     }
 
     // ---- 1. Pity-патруль (§17.3) ----
@@ -211,15 +239,18 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
             // §17.6 — 2_militaryFrontierWither, max_level 1: тот же countryMaxLevel(prefix, 1)
             // паттерн, что и у остальных одноуровневых проверок в этом файле/GEAR_PERM_BASE и т.п.
             boolean witherUnlocked = UpgradeCondition.countryMaxLevel(defenderCountry, cfg.witherPermission(), 1) > 0;
-            spawnPatrol(loc, defenderCountryName, shielded, witherUnlocked);
+            spawnPatrol(p.getName(), loc, defenderCountryName, shielded, witherUnlocked);
         } else {
             state.pityChance()[0] = Math.min(PITY_CAP, chance + growth); // накопление к следующей проверке
         }
     }
 
-    private void spawnPatrol(Location near, String defenderCountryName, boolean shielded, boolean witherUnlocked) {
+    private void spawnPatrol(String attackerName, Location near, String defenderCountryName, boolean shielded, boolean witherUnlocked) {
         World w = near.getWorld();
         if (w == null) return;
+
+        int freeSlots = freeSlotsFor(attackerName);
+        if (freeSlots <= 0) return; // фидбек п.4 — лимит живых мобов на игрока уже выбран
 
         boolean noDefendersOnline = onlineCitizens(defenderCountryName) == 0;
         List<EntityType> composition = new ArrayList<>();
@@ -233,7 +264,9 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
             composition.add(EntityType.SKELETON);
         }
         if (noDefendersOnline) composition.add(composition.get(0)); // GH#30-стиль усиление — некому защищаться
+        while (composition.size() > freeSlots) composition.remove(composition.size() - 1);
 
+        List<java.util.UUID> alive = aliveByPlayer.computeIfAbsent(attackerName, k -> new ArrayList<>());
         for (EntityType type : composition) {
             Location spawnLoc = randomPointNear(near, shielded);
             Entity e = spawnLoc.getWorld().spawnEntity(spawnLoc, type);
@@ -242,6 +275,7 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
             mob.setRemoveWhenFarAway(true);
             mob.setCustomName(MOB_NAME);
             mob.setCustomNameVisible(true);
+            alive.add(mob.getUniqueId());
         }
     }
 
@@ -265,44 +299,121 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
             Material.MOSSY_COBBLESTONE, Material.DRIPSTONE_BLOCK, Material.COBBLED_DEEPSLATE
     );
 
-    /** Точка рядом с игроком: на поверхности — по highestBlockYAt, под землёй — на его же уровне Y с проверкой на проходимость (или прокопкой, если места совсем нет). */
+    /** heightBlocks клеток вертикально от (x,y,z) — все не-солид (воздух/вода/т.п.). SPAWN_HEIGHT_CHECK=3 — с запасом даже под Иссушающего скелета (2.4 блока), 2 клетки ему впритык (фидбек п.2 "мобы задыхаются"). */
+    private boolean isPassableColumn(World w, int x, int y, int z, int heightBlocks) {
+        for (int i = 0; i < heightBlocks; i++) {
+            if (w.getBlockAt(x, y + i, z).getType().isSolid()) return false;
+        }
+        return true;
+    }
+
+    /** Тот же столбец, но допускает и уже-воздух, и диггабельную породу (кандидат на прокопку) — ничего похожего на бедрок/чужую постройку. */
+    private boolean isDiggableColumn(World w, int x, int y, int z, int heightBlocks) {
+        for (int i = 0; i < heightBlocks; i++) {
+            Material m = w.getBlockAt(x, y + i, z).getType();
+            if (m != Material.AIR && !DIGGABLE_UNDERGROUND.contains(m)) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Точка рядом с игроком: на поверхности — по highestBlockYAt (с
+     * проверкой на реальную проходимость — навес/листва не должны душить
+     * моба, фидбек п.2), под землёй — на его же уровне Y.
+     *
+     * Фидбек 2026-08-22 п.1 — раньше при нехватке места прокапывался ОДИН
+     * изолированный карман (2×1), к которому у моба физически не было пути —
+     * "застревал в дыре". Теперь при прокопке роется целый КОРИДОР от
+     * позиции игрока до кандидата (carveTunnel) — моб гарантированно может
+     * дойти, а не телепортируется в запечатанный карман.
+     *
+     * Фидбек п.7 — минимальный радиус MIN_SPAWN_RADIUS (не спавнить в упор).
+     */
     private Location randomPointNear(Location base, boolean shielded) {
         World w = base.getWorld();
         if (w == null) return base;
         ThreadLocalRandom rnd = ThreadLocalRandom.current();
 
-        Location lastDiggableCandidate = null;
+        if (!shielded) {
+            for (int i = 0; i < RANDOM_POINT_ATTEMPTS; i++) {
+                double radius = MIN_SPAWN_RADIUS + rnd.nextDouble() * 8;
+                double angle = rnd.nextDouble() * Math.PI * 2;
+                double x = base.getX() + Math.cos(angle) * radius;
+                double z = base.getZ() + Math.sin(angle) * radius;
+                int bx = (int) Math.floor(x), bz = (int) Math.floor(z);
+                int groundY = w.getHighestBlockYAt(bx, bz);
+                // Bukkit-конвенция highestBlockYAt плавает между версиями —
+                // проверяем оба варианта ("сам groundY свободен" и "groundY+1
+                // свободен") вместо того чтобы гадать, что именно вернул API.
+                if (isPassableColumn(w, bx, groundY, bz, SPAWN_HEIGHT_CHECK)) return new Location(w, x, groundY, z);
+                if (isPassableColumn(w, bx, groundY + 1, bz, SPAWN_HEIGHT_CHECK)) return new Location(w, x, groundY + 1, z);
+            }
+            // Ничего свободного не нашли (частый лес/навес) — берём
+            // последнюю попытку как есть, groundY+1 — обычно safest guess.
+            double angle = rnd.nextDouble() * Math.PI * 2;
+            double x = base.getX() + Math.cos(angle) * MIN_SPAWN_RADIUS;
+            double z = base.getZ() + Math.sin(angle) * MIN_SPAWN_RADIUS;
+            int bx = (int) Math.floor(x), bz = (int) Math.floor(z);
+            return new Location(w, x, w.getHighestBlockYAt(bx, bz) + 1, z);
+        }
+
+        Location naturalCandidate = null;
+        Location diggableCandidate = null;
         for (int i = 0; i < RANDOM_POINT_ATTEMPTS; i++) {
-            double radius = shielded ? (4 + rnd.nextDouble() * 5) : (5 + rnd.nextDouble() * 8);
+            double radius = MIN_SPAWN_RADIUS + rnd.nextDouble() * 4; // короче, чем на поверхности — туннель (если понадобится) должен быть коротким
             double angle = rnd.nextDouble() * Math.PI * 2;
             double x = base.getX() + Math.cos(angle) * radius;
             double z = base.getZ() + Math.sin(angle) * radius;
-
-            if (!shielded) {
-                int y = w.getHighestBlockYAt((int) Math.floor(x), (int) Math.floor(z));
-                return new Location(w, x, y, z);
-            }
-
             double y = base.getY() + rnd.nextInt(3) - 1; // тот же уровень +-1
             Location candidate = new Location(w, x, y, z);
-            Material at = candidate.getBlock().getType();
-            Material above = candidate.clone().add(0, 1, 0).getBlock().getType();
-            if (!at.isSolid() && !above.isSolid()) return candidate;
+            int bx = candidate.getBlockX(), by = candidate.getBlockY(), bz = candidate.getBlockZ();
 
-            // Запоминаем последнего "диггабельного" кандидата — если ни одна
-            // точка так и не оказалась свободной (тесная порода), прокопаем
-            // именно его, а не первый попавшийся (мог быть бедрок/чужая постройка).
-            if (lastDiggableCandidate == null && DIGGABLE_UNDERGROUND.contains(at) && DIGGABLE_UNDERGROUND.contains(above)) {
-                lastDiggableCandidate = candidate;
+            if (isPassableColumn(w, bx, by, bz, SPAWN_HEIGHT_CHECK)) {
+                naturalCandidate = candidate;
+                break;
+            }
+            if (diggableCandidate == null && isDiggableColumn(w, bx, by, bz, SPAWN_HEIGHT_CHECK)) {
+                diggableCandidate = candidate;
             }
         }
-
-        if (lastDiggableCandidate != null) {
-            lastDiggableCandidate.getBlock().setType(Material.AIR);
-            lastDiggableCandidate.clone().add(0, 1, 0).getBlock().setType(Material.AIR);
-            return lastDiggableCandidate;
+        if (naturalCandidate != null) return naturalCandidate;
+        if (diggableCandidate != null) {
+            Location connected = carveTunnel(w, base, diggableCandidate);
+            if (connected != null) return connected;
         }
         return base; // не нашли даже диггабельную точку (бедрок/чужая постройка вокруг) — спавним прямо у игрока
+    }
+
+    /**
+     * Роет прямой коридор (SPAWN_HEIGHT_CHECK клеток в высоту) от базовой
+     * точки до кандидата, шаг за шагом — только если КАЖДАЯ клетка на пути
+     * диггабельна (не бедрок/чужая постройка), иначе ничего не трогает и
+     * возвращает null. Гарантирует, что моб физически дойдёт до точки
+     * спавна, а не окажется в запечатанном кармане (фидбек 2026-08-22 п.1).
+     */
+    private Location carveTunnel(World w, Location from, Location to) {
+        Vector dir = to.toVector().subtract(from.toVector());
+        double length = dir.length();
+        int steps = Math.max(1, (int) Math.ceil(length));
+        Vector step = length > 1e-6 ? dir.multiply(1.0 / steps) : new Vector(0, 0, 0);
+
+        // Проход 1 — только проверка: весь путь диггабелен?
+        Location cursor = from.clone();
+        for (int i = 0; i <= steps; i++) {
+            if (!isDiggableColumn(w, cursor.getBlockX(), cursor.getBlockY(), cursor.getBlockZ(), SPAWN_HEIGHT_CHECK)) return null;
+            cursor.add(step);
+        }
+
+        // Проход 2 — реально прокапываем (только теперь, когда уверены, что можно).
+        cursor = from.clone();
+        for (int i = 0; i <= steps; i++) {
+            int bx = cursor.getBlockX(), by = cursor.getBlockY(), bz = cursor.getBlockZ();
+            for (int dy = 0; dy < SPAWN_HEIGHT_CHECK; dy++) {
+                w.getBlockAt(bx, by + dy, bz).setType(Material.AIR);
+            }
+            cursor.add(step);
+        }
+        return to;
     }
 
     // ---- 2. "Отголосок" (§17.4) / 3. Фантомы на столбе ----
@@ -396,15 +507,27 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
         Location at = target.getLocation();
         World w = at.getWorld();
         if (w == null) return;
+
+        int freeSlots = freeSlotsFor(target.getName());
+        if (freeSlots <= 0) return; // фидбек п.4
+        count = Math.min(count, freeSlots);
+
+        List<java.util.UUID> alive = aliveByPlayer.computeIfAbsent(target.getName(), k -> new ArrayList<>());
         ThreadLocalRandom rnd = ThreadLocalRandom.current();
         for (int i = 0; i < count; i++) {
-            Location spawnAt = at.clone().add(rnd.nextInt(7) - 3, rnd.nextInt(4), rnd.nextInt(7) - 3);
+            // Фидбек 2026-08-22 п.7 — раньше dx/dz могли оба выйти в 0
+            // (спавн прямо в игроке "на лицо"). Полярные координаты с
+            // минимальным радиусом — тот же приём, что у randomPointNear.
+            double radius = MIN_SPAWN_RADIUS + rnd.nextDouble() * 4;
+            double angle = rnd.nextDouble() * Math.PI * 2;
+            Location spawnAt = at.clone().add(Math.cos(angle) * radius, rnd.nextInt(4), Math.sin(angle) * radius);
             Entity e = w.spawnEntity(spawnAt, EntityType.PHANTOM);
             if (!(e instanceof LivingEntity mob)) continue;
             mob.setMetadata(META_KEY, new FixedMetadataValue(plugin(), defenderCountryName));
             mob.setRemoveWhenFarAway(true);
             mob.setCustomName(MOB_NAME);
             mob.setCustomNameVisible(true);
+            alive.add(mob.getUniqueId());
             // Фидбек 2026-08-22 ("кружат и не атакуют") — заспавненный через
             // spawnEntity фантом НЕ получает цель автоматически (ванильная
             // AI-цель фантома завязана на "бессонницу" игрока при природном
@@ -452,19 +575,19 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
     }
 
     /**
-     * Фидбек 2026-08-22 — "столб вверх, чтобы афкшить". Два независимых
-     * условия, оба обязательны:
-     *  1. Высота — минимум из высоты рельефа, сэмплированной ВОКРУГ игрока
-     *     (не под ним — под ним его же столб, highestBlockYAt там всегда
-     *     вернёт верх столба, бессмысленно) на радиусе
-     *     PILLAR_GROUND_SAMPLE_RADIUS в 4 стороны. Игрок должен быть выше
-     *     этого на PILLAR_HEIGHT_THRESHOLD блоков — обычная поверхностная
-     *     драка (в том числе у стен/на невысоких постройках) почти всегда
-     *     ниже порога сама по себе, без доп. условий.
-     *  2. Изоляция — на уровне игрока в радиусе PILLAR_ISOLATION_RADIUS
-     *     почти всё воздух (допуск PILLAR_MAX_SOLID_NEARBY). Отсекает
-     *     легитимные широкие постройки (башня/стена с площадкой) — там
-     *     соседних солид-блоков заведомо больше, чем у голого 1×1 столба.
+     * Фидбек 2026-08-22 — "столб вверх, чтобы афкшить". Изначально требовал
+     * ЕЩЁ и изоляцию (почти только воздух в радиусе 2) — по факту это
+     * ловило только голый 1×1 столб и пропускало платформу (3×3+), хотя
+     * платформа — та же самая AFK-стратегия наверху, просто пошире.
+     *
+     * Живой тест (фидбек 2026-08-22, п.3) — "сделай менее чувствительным":
+     * изоляция убрана целиком, остаётся только высота. Достаточно сама по
+     * себе — обычная поверхностная драка (в том числе у стен/на невысоких
+     * постройках) почти всегда ниже PILLAR_HEIGHT_THRESHOLD, без доп.
+     * условий; настоящие закрытые постройки (комната с крышей и стенами)
+     * всё равно уходят в isEnclosed раньше (shielded проверяется первым в
+     * tick() — pillared считается только если НЕ shielded), так что боязнь
+     * "поймать легитимную башню" тут не о том же случае.
      */
     private boolean isPillared(Location loc) {
         World w = loc.getWorld();
@@ -479,17 +602,7 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
         for (int[] s : samples) {
             groundEstimate = Math.min(groundEstimate, w.getHighestBlockYAt(x + s[0], z + s[1]));
         }
-        if (y - groundEstimate < PILLAR_HEIGHT_THRESHOLD) return false;
-
-        int solidNearby = 0;
-        for (int dx = -PILLAR_ISOLATION_RADIUS; dx <= PILLAR_ISOLATION_RADIUS; dx++) {
-            for (int dz = -PILLAR_ISOLATION_RADIUS; dz <= PILLAR_ISOLATION_RADIUS; dz++) {
-                if (dx == 0 && dz == 0) continue;
-                if (w.getBlockAt(x + dx, y, z + dz).getType().isSolid()) solidNearby++;
-                if (solidNearby > PILLAR_MAX_SOLID_NEARBY) return false; // ранний выход — не столб
-            }
-        }
-        return true;
+        return y - groundEstimate >= PILLAR_HEIGHT_THRESHOLD;
     }
 
     /** Без дропа/опыта — тот же паттерн, что у Живого поста/обычного патруля Обороны. */
@@ -505,13 +618,15 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
      * фантомы сгорают ещё до момента как успеют атаковать") — фантомы, как и
      * прочая нежить, горят на солнце; заспавненные днём рядом со столбом (в
      * открытом небе, по определению) вспыхивали и гибли за пару секунд,
-     * реального боя не успевало произойти. Иммунитет к возгоранию только для
-     * META_KEY-мобов этого класса (не трогает обычных фантомов/зомби/скелетов
-     * в мире) — вся тема Отголоска/фантомов на столбе про "заставить среагировать",
-     * не про "повезёт, если ночь".
+     * реального боя не успевало произойти. Иммунитет — ТОЛЬКО фантомам
+     * (фидбек, живой тест 2026-08-22 п.5 — "зомби и скелетам оставить",
+     * им дневное горение — нормальная ванильная часть боя, не баг). Не
+     * трогает обычных фантомов/зомби/скелетов в мире — только META_KEY-фантомов
+     * этого класса.
      */
     @EventHandler(ignoreCancelled = true)
     public void onCombust(org.bukkit.event.entity.EntityCombustEvent e) {
+        if (!(e.getEntity() instanceof org.bukkit.entity.Phantom)) return;
         if (e.getEntity().getMetadata(META_KEY).isEmpty()) return;
         e.setCancelled(true);
     }
@@ -537,5 +652,6 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
             task = null;
         }
         stateByPlayer.clear();
+        aliveByPlayer.clear();
     }
 }

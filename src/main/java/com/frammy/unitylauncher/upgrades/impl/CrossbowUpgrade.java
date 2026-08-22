@@ -240,11 +240,20 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
         return hit == null;
     }
 
-    /** Слепая зона снизу: угол между направлением на цель и горизонтом не должен быть ниже -blindSpotDegrees. */
+    // Фидбек 2026-08-22 (живой тест) — "убрать слепую зону, где перестаёт
+    // стрелять при 1-2 блоках радиуса (в упор)". Причина: угол = atan2(vertical,
+    // horizontal) — при маленьком horizontal (цель почти вплотную) даже
+    // небольшая разница высот даёт угол, близкий к -90°, и ложно улетает в
+    // "слепую зону снизу", хотя цель физически в упор и явно видна. Ниже
+    // этого горизонтального расстояния угол в принципе не может быть надёжным
+    // сигналом "снизу ли цель" — просто не проверяем его вообще.
+    private static final double BLIND_SPOT_MIN_HORIZONTAL = 3.0;
+
+    /** Слепая зона снизу: угол между направлением на цель и горизонтом не должен быть ниже -blindSpotDegrees. Не проверяется в упор (см. BLIND_SPOT_MIN_HORIZONTAL). */
     private boolean isWithinFiringAngle(Location origin, Location target, double blindSpotDegrees) {
         Vector to = target.toVector().subtract(origin.toVector());
         double horizontal = Math.hypot(to.getX(), to.getZ());
-        if (horizontal < 1e-6) return true; // цель прямо под/над якорем — угол не определён, не блокируем
+        if (horizontal < BLIND_SPOT_MIN_HORIZONTAL) return true; // в упор — угол ненадёжен, не блокируем
         double verticalAngleDeg = Math.toDegrees(Math.atan2(to.getY(), horizontal));
         return verticalAngleDeg >= -blindSpotDegrees;
     }
