@@ -42,12 +42,21 @@ import java.util.concurrent.ThreadLocalRandom;
  *     шанса заспавнить рядом небольшой отряд. Неудача повышает шанс
  *     следующей проверки (pity), успех сбрасывает к базовому. Под землёй
  *     состав тяжелее, чем на поверхности.
- *  2. "Отголосок" (§17.4) — если тот же враг физически под землёй (не
- *     open-to-sky) и не двигается дольше порога, получает периодический
- *     урон "сквозь блоки" (прямой damage(), без снаряда — блоки для него
- *     не преграда) со звуком/партиклами Стража, без спавна самой сущности.
- *     Урон растёт с каждым повторным пульсом, сбрасывается при реальном
- *     движении.
+ *  2. "Отголосок" (§17.4) — если тот же враг физически под землёй/в
+ *     закрытой коробке (§17.7 — не open-to-sky, либо обложен сплошными
+ *     блоками со всех сторон) и не двигается дольше порога, получает
+ *     периодический урон "сквозь блоки" (прямой damage(), без снаряда —
+ *     блоки для него не преграда) со звуком/партиклами Стража, без спавна
+ *     самой сущности. Урон растёт с каждым повторным пульсом, сбрасывается
+ *     при реальном движении.
+ *  3. Фантомы на столбе (фидбек 2026-08-22) — тот же принцип "неудобно
+ *     закапываться" в другую сторону: если враг забрался на изолированный
+ *     столб высоко над реальной землёй (не часть широкой конструкции —
+ *     башни/стены не триггерят, см. isPillared) и не двигается дольше
+ *     порога, периодически спавнятся фантомы — единственные ванильные
+ *     мобы, которые долетят до него, раз наземный патруль физически не
+ *     может. НЕ применяется к обычной поверхностной драке — высота почти
+ *     всегда исключает её саму по себе.
  *
  * Эквивалентность "в каждом секторе" (дизайн-док §17.3) и "где угодно в
  * территории страны, пока идёт война" (код ниже): вся территория страны на
@@ -85,6 +94,18 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
 
     private static final double IDLE_MOVE_EPSILON_SQ = 0.35 * 0.35; // §17.4 — "без входов" — считаем неподвижным ниже этого смещения за тик
     private static final int RANDOM_POINT_ATTEMPTS = 8;
+
+    // Фидбек 2026-08-22 — "столб вверх, чтобы афкшить". Черновые числа:
+    // 20+ блоков над реальной землёй (сэмплируется вокруг игрока, не под
+    // ним — под ним стоит его же столб) — обычная поверхностная драка,
+    // включая стены/башни разумной высоты, ниже порога почти всегда.
+    // Изоляция — почти всё вокруг на уровне игрока воздух (радиус 2), то
+    // есть именно тонкий столб, не платформа/стена/крыша башни.
+    private static final int PILLAR_HEIGHT_THRESHOLD = 20;
+    private static final int PILLAR_GROUND_SAMPLE_RADIUS = 8;
+    private static final int PILLAR_ISOLATION_RADIUS = 2;
+    private static final int PILLAR_MAX_SOLID_NEARBY = 1; // допуск на шум/случайный блок рядом
+    private static final int PHANTOM_MAX_PER_PULSE = 4;
 
     @Override public UpgradeKey key() { return KEY; }
     @Override public UpgradeScope scope() { return UpgradeScope.COUNTRY; }
@@ -158,9 +179,15 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
             // 4 сторон на уровне ног И головы (реальная коробка), вне
             // зависимости от того, открыта крыша или нет.
             boolean shielded = isUnderground(loc, cfg.undergroundMargin()) || isEnclosed(loc);
+            // Физически не могут быть true одновременно (нельзя одновременно быть
+            // глубоко под землёй/в коробке и высоко над землёй) — считаем оба
+            // отдельно, не elif, просто для ясности кода, не оптимизации ради.
+            boolean pillared = !shielded && isPillared(loc);
 
-            rollPityPatrol(p, loc, defenderCountry, defenderCountryName, shielded, cfg);
-            handleEcho(p, loc, defenderCountry, shielded, cfg);
+            // Наземный pity-патруль бессмыслен против игрока на столбе — сухопутные
+            // мобы физически не долетят/не долезут, только зря спавнились бы.
+            if (!pillared) rollPityPatrol(p, loc, defenderCountry, defenderCountryName, shielded, cfg);
+            handleIdleReaction(p, loc, defenderCountry, defenderCountryName, shielded, pillared, cfg);
         }
 
         // Чистим состояние игроков, которые вышли из релевантной территории/офлайн —
@@ -252,11 +279,35 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
         return base; // не нашли проходимую точку — спавним прямо у игрока
     }
 
-    // ---- 2. "Отголосок" (§17.4) ----
+    // ---- 2. "Отголосок" (§17.4) / 3. Фантомы на столбе ----
 
-    private void handleEcho(Player p, Location loc, String defenderCountry, boolean shielded, MilitaryCfg.FrontierDefenseCfg cfg) {
-        EngagementState state = stateByPlayer.get(p.getName());
-        if (state == null) return; // rollPityPatrol уже создал состояние в этом же тике — но на всякий случай
+    /**
+     * Общая неподвижность-детекция для обеих реакций — какая именно
+     * сработает (пульс Отголоска или спавн фантомов), решает, что из
+     * shielded/pillared true (взаимоисключающе по физике). Раньше это
+     * называлось handleEcho и создавало EngagementState только косвенно
+     * (через уже отработавший rollPityPatrol) — с фантомами на столбе
+     * rollPityPatrol теперь может НЕ вызываться вовсе (см. tick()), так
+     * что состояние создаётся здесь же, если его ещё нет.
+     */
+    private void handleIdleReaction(Player p, Location loc, String defenderCountry, String defenderCountryName, boolean shielded, boolean pillared, MilitaryCfg.FrontierDefenseCfg cfg) {
+        if (!shielded && !pillared) {
+            // На обычной поверхности/в бою — просто держим позицию свежей, без
+            // создания состояния впустую для игроков, которые никогда не попадут
+            // ни в одну из двух ситуаций (state создаётся лениво ниже при первом
+            // реальном попадании в shielded/pillared).
+            EngagementState existing = stateByPlayer.get(p.getName());
+            if (existing != null) {
+                existing.lastX()[0] = loc.getX();
+                existing.lastY()[0] = loc.getY();
+                existing.lastZ()[0] = loc.getZ();
+                existing.lastMoveAtMs()[0] = System.currentTimeMillis();
+                existing.echoPulses()[0] = 0;
+            }
+            return;
+        }
+
+        EngagementState state = stateByPlayer.computeIfAbsent(p.getName(), k -> EngagementState.fresh(BASE_CHANCE[0], loc));
 
         long now = System.currentTimeMillis();
         double dx = loc.getX() - state.lastX()[0];
@@ -264,12 +315,12 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
         double dz = loc.getZ() - state.lastZ()[0];
         boolean moved = (dx * dx + dy * dy + dz * dz) > IDLE_MOVE_EPSILON_SQ;
 
-        if (moved || !shielded) {
+        if (moved) {
             state.lastX()[0] = loc.getX();
             state.lastY()[0] = loc.getY();
             state.lastZ()[0] = loc.getZ();
             state.lastMoveAtMs()[0] = now;
-            state.echoPulses()[0] = 0; // реальное движение (или вышел из укрытия) — полный сброс эскалации
+            state.echoPulses()[0] = 0; // реальное движение — полный сброс эскалации
             return;
         }
 
@@ -283,6 +334,18 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
 
         state.lastPulseAtMs()[0] = now;
         int pulseIndex = state.echoPulses()[0]++;
+
+        if (pillared) {
+            // Фидбек 2026-08-22 — фантомы вместо урона сквозь блоки: игрок в
+            // открытом небе, "сквозь стены" тут ни при чём, зато летающий моб
+            // реально долетит и заставит либо драться, либо слезать. Эскалация
+            // тем же индексом пульса — больше фантомов с каждым разом, как и у
+            // Отголоска с уроном, тот же принцип "чем дольше сидишь, тем хуже".
+            int count = Math.min(PHANTOM_MAX_PER_PULSE, 1 + pulseIndex);
+            spawnPhantoms(p.getLocation(), defenderCountryName, count);
+            return;
+        }
+
         double damage = cfg.pulseBaseDamage() + pulseIndex * (ECHO_DAMAGE_STEP_HEARTS[echoLevel] * 2.0);
 
         // "Сквозь блоки" — прямой damage()/playSound() игроку, без снарядов и
@@ -291,6 +354,22 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
         p.playSound(p.getLocation(), Sound.ENTITY_WARDEN_SONIC_BOOM, 2.5f, 1.0f);
         p.spawnParticle(Particle.SONIC_BOOM, p.getLocation().add(0, 1, 0), 1);
         p.damage(damage);
+    }
+
+    /** Фантомы у столба — те же анти-фарм атрибуты (без дропа/опыта, именованы, целятся только в реального врага по войне), что и наземный патруль — onDeath/onTarget ниже общие для всех META_KEY-мобов. */
+    private void spawnPhantoms(Location at, String defenderCountryName, int count) {
+        World w = at.getWorld();
+        if (w == null) return;
+        ThreadLocalRandom rnd = ThreadLocalRandom.current();
+        for (int i = 0; i < count; i++) {
+            Location spawnAt = at.clone().add(rnd.nextInt(7) - 3, rnd.nextInt(4), rnd.nextInt(7) - 3);
+            Entity e = w.spawnEntity(spawnAt, EntityType.PHANTOM);
+            if (!(e instanceof LivingEntity mob)) continue;
+            mob.setMetadata(META_KEY, new FixedMetadataValue(plugin(), defenderCountryName));
+            mob.setRemoveWhenFarAway(true);
+            mob.setCustomName(MOB_NAME);
+            mob.setCustomNameVisible(true);
+        }
     }
 
     private boolean isUnderground(Location loc, int margin) {
@@ -325,6 +404,47 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
             Material feet = w.getBlockAt(x + side[0], feetY, z + side[1]).getType();
             Material head = w.getBlockAt(x + side[0], headY, z + side[1]).getType();
             if (!feet.isSolid() || !head.isSolid()) return false; // хотя бы одна сторона открыта — не коробка
+        }
+        return true;
+    }
+
+    /**
+     * Фидбек 2026-08-22 — "столб вверх, чтобы афкшить". Два независимых
+     * условия, оба обязательны:
+     *  1. Высота — минимум из высоты рельефа, сэмплированной ВОКРУГ игрока
+     *     (не под ним — под ним его же столб, highestBlockYAt там всегда
+     *     вернёт верх столба, бессмысленно) на радиусе
+     *     PILLAR_GROUND_SAMPLE_RADIUS в 4 стороны. Игрок должен быть выше
+     *     этого на PILLAR_HEIGHT_THRESHOLD блоков — обычная поверхностная
+     *     драка (в том числе у стен/на невысоких постройках) почти всегда
+     *     ниже порога сама по себе, без доп. условий.
+     *  2. Изоляция — на уровне игрока в радиусе PILLAR_ISOLATION_RADIUS
+     *     почти всё воздух (допуск PILLAR_MAX_SOLID_NEARBY). Отсекает
+     *     легитимные широкие постройки (башня/стена с площадкой) — там
+     *     соседних солид-блоков заведомо больше, чем у голого 1×1 столба.
+     */
+    private boolean isPillared(Location loc) {
+        World w = loc.getWorld();
+        if (w == null) return false;
+
+        int x = loc.getBlockX();
+        int y = loc.getBlockY();
+        int z = loc.getBlockZ();
+
+        int groundEstimate = Integer.MAX_VALUE;
+        int[][] samples = {{PILLAR_GROUND_SAMPLE_RADIUS, 0}, {-PILLAR_GROUND_SAMPLE_RADIUS, 0}, {0, PILLAR_GROUND_SAMPLE_RADIUS}, {0, -PILLAR_GROUND_SAMPLE_RADIUS}};
+        for (int[] s : samples) {
+            groundEstimate = Math.min(groundEstimate, w.getHighestBlockYAt(x + s[0], z + s[1]));
+        }
+        if (y - groundEstimate < PILLAR_HEIGHT_THRESHOLD) return false;
+
+        int solidNearby = 0;
+        for (int dx = -PILLAR_ISOLATION_RADIUS; dx <= PILLAR_ISOLATION_RADIUS; dx++) {
+            for (int dz = -PILLAR_ISOLATION_RADIUS; dz <= PILLAR_ISOLATION_RADIUS; dz++) {
+                if (dx == 0 && dz == 0) continue;
+                if (w.getBlockAt(x + dx, y, z + dz).getType().isSolid()) solidNearby++;
+                if (solidNearby > PILLAR_MAX_SOLID_NEARBY) return false; // ранний выход — не столб
+            }
         }
         return true;
     }
