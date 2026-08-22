@@ -97,6 +97,22 @@ public final class MilitaryAnchorService implements Listener {
         }
 
         Player p = e.getPlayer();
+
+        // Живой тест 2026-08-22 — БАГА НЕ БЫЛО ВООБЩЕ НИКАКОЙ проверки, чей
+        // это игрок: любой чужак (в т.ч. вражеская по войне страна) мог
+        // зайти на объект и поставить свой колокол — он тут же биндился как
+        // НОВЫЙ якорь (replacing=true), угоняя/подменяя настоящий якорь
+        // владельца без всякого разрешения. Владелец узнаёт об этом только
+        // постфактум, когда Диверсия вдруг идёт не по тому колоколу.
+        // Биндить может только гражданин страны-владельца объекта — для
+        // остальных колокол молча остаётся обычным блоком (та же логика
+        // "не раскрывать механику", что и isAnchorCapable выше).
+        String ownerCountry = zone.getCountryName();
+        String placerCountry = UnityLauncher.getInstance().countryRegistryJdbc.getCountryOfPlayer(p.getName());
+        if (ownerCountry == null || placerCountry == null || !placerCountry.equalsIgnoreCase(ownerCountry)) {
+            return;
+        }
+
         if (!isExposed(loc)) {
             p.sendMessage(ChatColor.RED + "Колокол должен стоять выше Y63 либо быть открыт небу (не закопан) — иначе не считается якорем.");
             return;
