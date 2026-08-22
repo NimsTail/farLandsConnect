@@ -111,6 +111,20 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
     private static final double KNOCKBACK_STRENGTH = 0.5;
     private static final int DARKNESS_TICKS = 20 * 3; // 3с
 
+    // Живой тест 2026-08-22 (раунд 6) — "партиклы пара/angry villager раз в
+    // несколько разрушений" — лёгкий, но заметно нарастающий фидбек прямо
+    // на месте засчитанных сломов (не путать с EARLY_FEEDBACK_INTERVAL_MS
+    // ниже — тот по времени и легче, этот по факту разрушений и гуще).
+    private static final int BREAKS_PER_FEEDBACK_BURST = 3;
+
+    // Живой тест 2026-08-22 (раунд 6) — "при финальном взрыве сильнее
+    // откидывать игроков". Ванильный createExplosion уже толкает всех в
+    // радиусе сам по себе, это ДОПОЛНИТЕЛЬНЫЙ явный импульс поверх него —
+    // тот же приём, что и у майлстоуна 33% (KNOCKBACK_STRENGTH), только
+    // заметно сильнее и в большем радиусе — это кульминация, а не промежуточный щелчок.
+    private static final double FINAL_KNOCKBACK_RADIUS = 8.0;
+    private static final double FINAL_KNOCKBACK_STRENGTH = 1.6;
+
     private static final int FIRE_RADIUS = 2;
     private static final long FIRE_INTERVAL_MS = 4_000L;
     private static final int FIRE_BLOCKS_PER_BURST = 2;
@@ -170,6 +184,11 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         // происходит" — таймер лёгкой периодической обратной связи, не
         // привязанной к майлстоунам.
         long lastFeedbackAt;
+        // Фидбек 2026-08-22 (раунд 6) — "партиклы пара/angry villager раз в
+        // несколько разрушений". Счётчик ЗАСЧИТАННЫХ сломов (см.
+        // onAnchorBreakAttempt) — растёт только вместе с прогрессом, не по
+        // тикам, поэтому "раз в несколько разрушений" считается буквально.
+        int breakCount;
     }
 
     private final Map<String, SabotageState> statesByZone = new ConcurrentHashMap<>();
@@ -425,6 +444,20 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
             w.spawnParticle(Particle.CLOUD, anchor, 60, 1.2, 1.0, 1.2, 0.06);
             w.playSound(anchor, Sound.BLOCK_LAVA_EXTINGUISH, 3.0f, 1.0f);
 
+            // Живой тест 2026-08-22 (раунд 6) — "при финальном взрыве
+            // сильнее откидывать игроков". Ванильный createExplosion уже
+            // толкает всех в радиусе сам по себе — это ДОПОЛНИТЕЛЬНЫЙ явный
+            // импульс поверх него, тот же приём, что и у майлстоуна 33%
+            // (KNOCKBACK_STRENGTH), только заметно сильнее и в большем
+            // радиусе — кульминация, а не промежуточный щелчок.
+            var countryRegistry = UnityLauncher.getInstance().countryRegistryJdbc;
+            var warCache = UnityLauncher.getInstance().warStatusCache;
+            for (Player p : nearbyEnemies(anchor, zone.getCountryName(), FINAL_KNOCKBACK_RADIUS, countryRegistry, warCache)) {
+                Vector away = p.getLocation().toVector().subtract(anchor.toVector());
+                if (away.lengthSquared() < 1e-4) away = new Vector(ThreadLocalRandom.current().nextDouble() - 0.5, 0, ThreadLocalRandom.current().nextDouble() - 0.5);
+                p.setVelocity(away.normalize().multiply(FINAL_KNOCKBACK_STRENGTH).setY(0.6));
+            }
+
             // Рассыпчатая куча-конус: пик высоты/плотности над анкером, тает к краю.
             for (int dx = -MOUND_RADIUS; dx <= MOUND_RADIUS; dx++) {
                 for (int dz = -MOUND_RADIUS; dz <= MOUND_RADIUS; dz++) {
@@ -466,6 +499,7 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         state.attackerCountryName = null;
         state.diggingPlayerName = null;
         state.diggingActive = false;
+        state.breakCount = 0;
     }
 
     // ---- Реальное копание якоря (фидбек 2026-08-22) ----
@@ -562,6 +596,18 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         // держать ПКМ, клиент сам почти сразу пришлёт новый BlockDamageEvent
         // (см. onAnchorDigStart), который снова выставит true.
         state.diggingActive = false;
+
+        // Живой тест 2026-08-22 (раунд 6) — "партиклы пара/angry villager
+        // раз в несколько разрушений" — считаем буквально по факту
+        // засчитанных сломов, не по времени.
+        state.breakCount++;
+        if (state.breakCount % BREAKS_PER_FEEDBACK_BURST == 0) {
+            World w = e.getBlock().getWorld();
+            Location anchor = e.getBlock().getLocation().add(0.5, 0.5, 0.5);
+            w.spawnParticle(Particle.CLOUD, anchor, 20, 0.4, 0.4, 0.4, 0.05);
+            w.spawnParticle(Particle.ANGRY_VILLAGER, anchor, 6, 0.4, 0.4, 0.4, 0.0);
+            w.playSound(anchor, Sound.ENTITY_VILLAGER_NO, 1.0f, 0.8f);
+        }
     }
 
     @Override
