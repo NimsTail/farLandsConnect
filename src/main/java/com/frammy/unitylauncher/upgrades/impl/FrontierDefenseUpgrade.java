@@ -295,21 +295,25 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
         return true;
     }
 
+    // Фидбек 2026-08-22 (третий раунд) — блоки, которые НЕЛЬЗЯ ломать даже
+    // соседним с найденным воздухом: бедрок физически неломаем, обсидиан/
+    // магма — шрам от Диверсии (§17.10), не должны сами же его портить.
+    private static final java.util.Set<Material> UNBREAKABLE_UNDERGROUND =
+            java.util.EnumSet.of(Material.BEDROCK, Material.OBSIDIAN, Material.MAGMA_BLOCK);
+
     /**
      * Точка рядом с игроком: на поверхности — по highestBlockYAt (с
      * проверкой на реальную проходимость — навес/листва не должны душить
      * моба, фидбек п.2).
      *
-     * Под землёй — фидбек 2026-08-22 (второй раунд): "рыть тоннель не
-     * нужно, надо просто спавнить там, где уже есть доступ к воздуху — у
-     * игрока". Никакой прокопки/модификации чужого мира больше нет вообще
-     * (прошлый раунд с carveTunnel — отменён целиком). Ищем ТОЛЬКО
-     * естественный воздушный карман в тесном радиусе (1-3 блока, "в
-     * упоре") вокруг игрока — раз сам игрок там физически стоит и дышит,
-     * воздух в его непосредственной близости точно есть. Если в этом
-     * тесном пузыре подходящей точки нет вообще — возвращаем null, вызывающий
-     * просто не спавнит этого конкретного моба в этот раз, не форсируя
-     * ничего и не трогая блоки.
+     * Под землёй — фидбек 2026-08-22 (третий раунд): "искать воздух рядом
+     * с игроком, и рядом с этим блоком воздуха ЛОМАТЬ блок и спавнить на
+     * его место". Не полноценный туннель (раунд 2 — отменён) и не "просто
+     * не спавнить, если тесно" (тоже раунд 2) — средний вариант: находим
+     * УЖЕ существующую воздушную клетку рядом с игроком (значит, она точно
+     * связана с его пространством), ломаем ОДИН её солид-сосед и спавним
+     * моба туда — минимальное вмешательство в мир, гарантированная связность
+     * (клетка вплотную примыкает к подтверждённому воздуху).
      */
     private Location randomPointNear(Location base, boolean shielded) {
         World w = base.getWorld();
@@ -340,17 +344,38 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
         }
 
         for (int i = 0; i < RANDOM_POINT_ATTEMPTS; i++) {
-            double radius = 1.0 + rnd.nextDouble() * 2.0; // 1-3 блока — тесно, "в упоре"
+            double radius = rnd.nextDouble() * 3.0; // 0-3 блока — "в упоре"
             double angle = rnd.nextDouble() * Math.PI * 2;
-            double x = base.getX() + Math.cos(angle) * radius;
-            double z = base.getZ() + Math.sin(angle) * radius;
-            double y = base.getY() + rnd.nextInt(3) - 1; // тот же уровень +-1
-            Location candidate = new Location(w, x, y, z);
-            if (isPassableColumn(w, candidate.getBlockX(), candidate.getBlockY(), candidate.getBlockZ(), SPAWN_HEIGHT_CHECK)) {
-                return candidate;
-            }
+            int bx = (int) Math.floor(base.getX() + Math.cos(angle) * radius);
+            int bz = (int) Math.floor(base.getZ() + Math.sin(angle) * radius);
+            int by = base.getBlockY() + rnd.nextInt(3) - 1; // тот же уровень +-1
+
+            if (w.getBlockAt(bx, by, bz).getType() != Material.AIR) continue; // ищем именно УЖЕ воздух
+            Location dug = breakAdjacentAndSpawn(w, bx, by, bz);
+            if (dug != null) return dug;
         }
-        return null; // тесно вокруг — в этот раз не спавним вообще, ничего не копаем
+        return null; // рядом вообще нет воздуха (или все соседи неломаемые) — не спавним в этот раз
+    }
+
+    /** Ломает один случайный солид-блок, примыкающий к уже подтверждённому воздуху, и (если и он солид) клетку над ним для роста — спавнит моба в эту новую полость. */
+    private Location breakAdjacentAndSpawn(World w, int ax, int ay, int az) {
+        int[][] dirs = {{1, 0, 0}, {-1, 0, 0}, {0, 0, 1}, {0, 0, -1}, {0, 1, 0}};
+        List<int[]> order = new ArrayList<>(List.of(dirs));
+        java.util.Collections.shuffle(order, ThreadLocalRandom.current());
+
+        for (int[] d : order) {
+            int nx = ax + d[0], ny = ay + d[1], nz = az + d[2];
+            Material m = w.getBlockAt(nx, ny, nz).getType();
+            if (m == Material.AIR || UNBREAKABLE_UNDERGROUND.contains(m)) continue;
+
+            w.getBlockAt(nx, ny, nz).setType(Material.AIR);
+            org.bukkit.block.Block above = w.getBlockAt(nx, ny + 1, nz);
+            if (above.getType().isSolid() && !UNBREAKABLE_UNDERGROUND.contains(above.getType())) {
+                above.setType(Material.AIR); // немного роста в высоту, чтобы моб реально помещался
+            }
+            return new Location(w, nx + 0.5, ny, nz + 0.5);
+        }
+        return null; // все соседи этой воздушной клетки — либо уже воздух, либо неломаемые
     }
 
     // ---- 2. "Отголосок" (§17.4) / 3. Фантомы на столбе ----
