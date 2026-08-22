@@ -115,7 +115,14 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
     // несколько разрушений" — лёгкий, но заметно нарастающий фидбек прямо
     // на месте засчитанных сломов (не путать с EARLY_FEEDBACK_INTERVAL_MS
     // ниже — тот по времени и легче, этот по факту разрушений и гуще).
-    private static final int BREAKS_PER_FEEDBACK_BURST = 3;
+    //
+    // Живой тест 2026-08-22 (раунд 7) — "рандомно раз в 2-5 разрушений, а
+    // не каждый 3" — фиксированный модуль давал предсказуемый, механический
+    // ритм (ровно на 3, 6, 9...). Порог теперь перебрасывается случайно в
+    // диапазоне [MIN, MAX] после каждого срабатывания — см.
+    // SabotageState.nextFeedbackBurstThreshold.
+    private static final int FEEDBACK_BURST_MIN_BREAKS = 2;
+    private static final int FEEDBACK_BURST_MAX_BREAKS = 5;
 
     // Живой тест 2026-08-22 (раунд 6) — "при финальном взрыве сильнее
     // откидывать игроков". Ванильный createExplosion уже толкает всех в
@@ -184,11 +191,13 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         // происходит" — таймер лёгкой периодической обратной связи, не
         // привязанной к майлстоунам.
         long lastFeedbackAt;
-        // Фидбек 2026-08-22 (раунд 6) — "партиклы пара/angry villager раз в
-        // несколько разрушений". Счётчик ЗАСЧИТАННЫХ сломов (см.
-        // onAnchorBreakAttempt) — растёт только вместе с прогрессом, не по
-        // тикам, поэтому "раз в несколько разрушений" считается буквально.
-        int breakCount;
+        // Фидбек 2026-08-22 (раунд 6/7) — "партиклы пара/angry villager
+        // рандомно раз в 2-5 разрушений". breaksSinceLastBurst считает
+        // ЗАСЧИТАННЫЕ сломы (см. onAnchorBreakAttempt) с последнего залпа
+        // партиклов; nextFeedbackBurstThreshold — случайный порог
+        // [FEEDBACK_BURST_MIN_BREAKS, MAX], 0 значит "ещё не брошен".
+        int breaksSinceLastBurst;
+        int nextFeedbackBurstThreshold;
     }
 
     private final Map<String, SabotageState> statesByZone = new ConcurrentHashMap<>();
@@ -499,7 +508,8 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         state.attackerCountryName = null;
         state.diggingPlayerName = null;
         state.diggingActive = false;
-        state.breakCount = 0;
+        state.breaksSinceLastBurst = 0;
+        state.nextFeedbackBurstThreshold = 0;
     }
 
     // ---- Реальное копание якоря (фидбек 2026-08-22) ----
@@ -597,11 +607,20 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         // (см. onAnchorDigStart), который снова выставит true.
         state.diggingActive = false;
 
-        // Живой тест 2026-08-22 (раунд 6) — "партиклы пара/angry villager
-        // раз в несколько разрушений" — считаем буквально по факту
-        // засчитанных сломов, не по времени.
-        state.breakCount++;
-        if (state.breakCount % BREAKS_PER_FEEDBACK_BURST == 0) {
+        // Живой тест 2026-08-22 (раунд 6/7) — "партиклы пара/angry villager
+        // рандомно раз в 2-5 разрушений" — считаем буквально по факту
+        // засчитанных сломов, не по времени; порог перебрасывается заново
+        // после каждого срабатывания, а не фиксированный модуль (тот давал
+        // механический ритм ровно на 3, 6, 9...).
+        if (state.nextFeedbackBurstThreshold <= 0) {
+            state.nextFeedbackBurstThreshold = FEEDBACK_BURST_MIN_BREAKS
+                    + ThreadLocalRandom.current().nextInt(FEEDBACK_BURST_MAX_BREAKS - FEEDBACK_BURST_MIN_BREAKS + 1);
+        }
+        state.breaksSinceLastBurst++;
+        if (state.breaksSinceLastBurst >= state.nextFeedbackBurstThreshold) {
+            state.breaksSinceLastBurst = 0;
+            state.nextFeedbackBurstThreshold = 0; // перебросится заново при следующем сломе
+
             World w = e.getBlock().getWorld();
             Location anchor = e.getBlock().getLocation().add(0.5, 0.5, 0.5);
             w.spawnParticle(Particle.CLOUD, anchor, 20, 0.4, 0.4, 0.4, 0.05);
