@@ -397,12 +397,27 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
         arrow.remove();
     }
 
-    /** Небольшой ванильный взрыв, расчищающий путь стрелы — с безусловным восстановлением якоря-колокола, если взрыв случайно его задел (см. onArrowHit/tick()). */
+    /**
+     * Небольшой ванильный взрыв, расчищающий путь стрелы — с безусловным
+     * восстановлением якоря-колокола, если взрыв случайно его задел (см.
+     * onArrowHit/tick()).
+     *
+     * Живой тест 2026-08-22 — тот же ДЮП, что и у финального взрыва
+     * Диверсии (см. SabotageUpgrade.completeSabotage): если якорь попадает
+     * в радиус (spawnLoc — всего 1.2 блока от него), breakBlocks=true
+     * реально ломает блок и роняет физический item колокола, а мы следом
+     * всё равно ставили BELL обратно — получался дюп. Убираем якорь ДО
+     * взрыва (без дропа), возвращаем после.
+     */
     private void clearBlockingBlock(Location loc, Location anchor) {
         World w = loc.getWorld();
         if (w == null) return;
+        boolean anchorPresent = anchor != null && anchor.getWorld() != null;
+        if (anchorPresent) {
+            anchor.getBlock().setType(Material.AIR);
+        }
         w.createExplosion(loc, BLOCK_CLEAR_EXPLOSION_POWER, false, true);
-        if (anchor != null && anchor.getWorld() != null && anchor.getBlock().getType() != Material.BELL) {
+        if (anchorPresent) {
             anchor.getBlock().setType(Material.BELL);
         }
     }
