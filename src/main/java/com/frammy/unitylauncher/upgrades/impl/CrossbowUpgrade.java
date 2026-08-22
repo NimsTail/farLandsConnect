@@ -185,7 +185,16 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
             // цепляется за что-то рядом — ощущается как "в упор"). Считаем
             // spawnLoc один раз и используем её ВЕЗДЕ — и для проверки, и
             // для самого выстрела, вместо двух разных точек отсчёта.
-            Location spawnLoc = origin.clone().add(0, 1.2, 0);
+            //
+            // Живой тест 2026-08-22 — эксплойт "поставить блок прямо над
+            // колоколом": фиксированная точка спавна (0, 1.2, 0) оказывалась
+            // внутри поставленного блока — стрела спавнилась замурованной и
+            // физически не могла никуда полететь, Арбалет молча "стрелял в
+            // никуда" бесконечно. findClearSpawnLoc ищет ближайшую
+            // непроходимую точку рядом с якорем вместо жёстко зашитой одной —
+            // один поставленный блок больше не глушит выстрел безнаказанно.
+            Location spawnLoc = findClearSpawnLoc(origin);
+            if (spawnLoc == null) continue; // якорь полностью закупорен со всех сторон — стрелять физически некуда
 
             List<Player> targets = findTargets(spawnLoc, cfg, z.getCountryName(), MAX_TARGETS);
             if (targets.isEmpty()) continue;
@@ -227,6 +236,26 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
         }
         candidates.sort(Comparator.comparingDouble(p -> p.getLocation().distance(origin)));
         return candidates.size() > max ? candidates.subList(0, max) : candidates;
+    }
+
+    // Живой тест 2026-08-22 — точки-кандидаты для спавна стрелы вокруг
+    // якоря, в порядке предпочтения: сперва штатная (0, 1.2, 0) как раньше,
+    // затем небольшие горизонтальные смещения на той же высоте, затем чуть
+    // выше/ниже. Блокировать все сразу одним блоком уже не выйдет — нужно
+    // обложить якорь буквально со всех сторон.
+    private static final double[][] SPAWN_CANDIDATE_OFFSETS = {
+            {0, 1.2, 0},
+            {0.6, 1.2, 0}, {-0.6, 1.2, 0}, {0, 1.2, 0.6}, {0, 1.2, -0.6},
+            {0, 1.8, 0}, {0, 0.6, 0},
+    };
+
+    /** Первая проходимая (не заблокированная поставленным блоком) точка спавна рядом с якорем — см. SPAWN_CANDIDATE_OFFSETS. null, если якорь закупорен со всех сторон. */
+    private Location findClearSpawnLoc(Location origin) {
+        for (double[] o : SPAWN_CANDIDATE_OFFSETS) {
+            Location candidate = origin.clone().add(o[0], o[1], o[2]);
+            if (candidate.getBlock().isPassable()) return candidate;
+        }
+        return null;
     }
 
     /** Видимость от якоря до игрока — Location у Player.hasLineOfSight(Block) нет подходящей перегрузки, трассируем блоки сами. */
