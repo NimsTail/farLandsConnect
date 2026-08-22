@@ -61,8 +61,11 @@ import java.util.concurrent.ThreadLocalRandom;
  * lib/militaryZones.ts), этот класс лишь один раз шлёт репорт.
  *
  * Прогресс показывается actionbar-баром из "|" (цвет по состоянию, серый —
- * незаполненная часть, число % справа) ТОЛЬКО игрокам физически внутри
- * границ этого военного объекта (z.contains2D) — не всему серверу.
+ * незаполненная часть, число % справа) игрокам физически внутри границ
+ * этого военного объекта ИЛИ в NEARBY_RADIUS от самого якоря (не от центра
+ * зоны — колокол может стоять где угодно внутри неё) — не всему серверу.
+ * Если рядом активны сразу несколько сеансов (соседние военные объекты) —
+ * показывается статус БЛИЖАЙШЕГО якоря, см. broadcastNearestProgress.
  *
  * Свой собственный колокол владелец по-прежнему ломает/переносит как
  * обычно — перехват работает только для игроков вражеской (по войне)
@@ -180,12 +183,16 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         }
     }
 
+    /** Один активный (progress > 0) сеанс Диверсии — собирается за проход по зонам, показывается игрокам ПОСЛЕ него, см. broadcastNearestProgress. */
+    private record ActiveSabotage(ZoneInfo zone, Location anchor, SabotageState state, boolean digging) {}
+
     private void tick() {
         var subtypeService = UnityLauncher.getInstance().militaryDefenseSubtypeService;
         var countryRegistry = UnityLauncher.getInstance().countryRegistryJdbc;
         var warCache = UnityLauncher.getInstance().warStatusCache;
         long now = System.currentTimeMillis();
         double decayPerTick = DECAY_PERCENT_PER_SECOND * (TICK_PERIOD_TICKS * 50.0 / 1000.0);
+        java.util.List<ActiveSabotage> active = new java.util.ArrayList<>();
 
         for (ZoneInfo z : zones().getAllZonesSnapshot()) {
             if (z.getType() != ZoneType.MILITARY) continue;
@@ -217,11 +224,13 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
                 state.progress = Math.max(0.0, state.progress - decayPerTick);
             }
 
-            // Фидбек 2026-08-22 (раунд 4) — палочки с цветным прогрессом,
-            // число % справа, видно ТОЛЬКО игрокам физически внутри зоны
-            // этого объекта (не всему серверу без причины) — см.
-            // broadcastProgress ниже.
-            broadcastProgress(z, anchor, state, digging);
+            // Фидбек 2026-08-22 (раунд 5) — не шлём actionbar прямо здесь:
+            // рядом может быть другая военная зона с ТОЖЕ активной Диверсией
+            // (см. broadcastNearestProgress) — нужно сперва собрать ВСЕ
+            // активные сеансы за проход и разрулить между ними после.
+            if (state.progress > 0) {
+                active.add(new ActiveSabotage(z, anchor, state, digging));
+            }
 
             // Фидбек 2026-08-22 (второй раунд) — "первые 30% даже не понятно,
             // что ты копаешь" — лёгкая частица/звук раз в EARLY_FEEDBACK_INTERVAL_MS
@@ -239,23 +248,61 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
             }
         }
 
+        broadcastNearestProgress(active);
+
         statesByZone.keySet().removeIf(id -> zones().getAllZonesSnapshot().stream().noneMatch(z -> id.equals(z.getMarkerID())));
+    }
+
+    // Фидбек 2026-08-22 (раунд 5) — "статус показывать не только в зоне, но
+    // и тем, кто в минимальном радиусе — и это должен быть ближайший
+    // статус. Сами колокола могут быть не по центру зоны". Радиус — от
+    // САМОГО ЯКОРЯ (физической точки колокола), не от зоны/её центра, ровно
+    // по этой причине. Черновое число, как и весь баланс §17.10.
+    private static final double NEARBY_RADIUS = 24.0;
+
+    /** true, если игроку положено видеть статус Диверсии этой зоны: либо физически внутри её границ, либо в NEARBY_RADIUS от самого якоря (не от центра зоны — якорь может стоять где угодно внутри неё). */
+    private boolean isVisibleTo(ZoneInfo z, Location anchor, Player p) {
+        Location loc = p.getLocation();
+        if (loc.getWorld() == null || anchor.getWorld() == null) return false;
+        if (z.contains2D(loc)) return true;
+        if (!loc.getWorld().getUID().equals(anchor.getWorld().getUID())) return false;
+        return loc.distanceSquared(anchor) <= NEARBY_RADIUS * NEARBY_RADIUS;
+    }
+
+    /**
+     * Фидбек 2026-08-22 (раунд 5) — "иногда могут быть две зоны рядом и у
+     * обоих происходит Диверсия — надо отображать верный". Один игрок может
+     * одновременно попадать под видимость НЕСКОЛЬКИХ активных сеансов
+     * (например стоит в зоне A, а якорь зоны B рядом за забором, в её
+     * NEARBY_RADIUS) — шлём только ОДИН бар, статус БЛИЖАЙШЕГО по факту
+     * якоря, а не первый попавшийся/случайный по порядку обхода зон.
+     */
+    private void broadcastNearestProgress(java.util.List<ActiveSabotage> active) {
+        if (active.isEmpty()) return;
+        for (Player p : org.bukkit.Bukkit.getOnlinePlayers()) {
+            ActiveSabotage nearest = null;
+            double nearestDistSq = Double.MAX_VALUE;
+            for (ActiveSabotage a : active) {
+                if (!isVisibleTo(a.zone(), a.anchor(), p)) continue;
+                double d = p.getLocation().getWorld().getUID().equals(a.anchor().getWorld().getUID())
+                        ? p.getLocation().distanceSquared(a.anchor()) : Double.MAX_VALUE;
+                if (d < nearestDistSq) {
+                    nearestDistSq = d;
+                    nearest = a;
+                }
+            }
+            if (nearest != null) sendProgressBar(p, nearest.state(), nearest.digging());
+        }
     }
 
     /**
      * Фидбек 2026-08-22 (раунд 4) — "текст превратить в ||||||||| палочками с
-     * цветным прогрессом. Справа число %. Показывать только непосредственно
-     * в зоне этого объекта, чтобы весь сервер не получал одинаковый actionbar
-     * без причины". Заполненная часть — цвет по состоянию (золото — идёт
-     * реальная долбёжка, красный — тает без атаки), незалитая часть — серая.
-     * z.contains2D — та же проверка попадания в полигон зоны, что уже
-     * используется по всему плагину (см. ZoneInfo) — не весь сервер, а
-     * только игроки физически внутри границ этого военного объекта.
+     * цветным прогрессом. Справа число %." Заполненная часть — цвет по
+     * состоянию (золото — идёт реальная долбёжка, красный — тает без
+     * атаки), незалитая часть — серая.
      */
-    private void broadcastProgress(ZoneInfo z, Location anchor, SabotageState state, boolean digging) {
-        if (state.progress <= 0) return;
-        World w = anchor.getWorld();
-        if (w == null) return;
+    private void sendProgressBar(Player p, SabotageState state, boolean digging) {
+        if (state.progress <= 0) return; // мог обнулиться этим же тиком (completeSabotage) — не шлём стрелку в никуда
 
         NamedTextColor filledColor = digging ? NamedTextColor.GOLD : NamedTextColor.RED;
         int filled = (int) Math.round(state.progress / 100.0 * PROGRESS_BAR_LENGTH);
@@ -266,9 +313,7 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
                 .append(Component.text("|".repeat(PROGRESS_BAR_LENGTH - filled), NamedTextColor.DARK_GRAY))
                 .append(Component.text(" " + Math.round(state.progress) + "%", NamedTextColor.WHITE));
 
-        for (Player p : w.getPlayers()) {
-            if (z.contains2D(p.getLocation())) p.sendActionBar(text);
-        }
+        p.sendActionBar(text);
     }
 
     private MilitaryDefenseSubtype activeSubtypeOf(ZoneInfo z, MilitaryDefenseSubtypeService subtypeService) {
@@ -356,14 +401,24 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
     private void completeSabotage(ZoneInfo zone, Location anchor, String markerId, SabotageState state) {
         World w = anchor.getWorld();
         if (w != null) {
+            // Живой тест 2026-08-22 — ДЮП колокола: ванильный взрыв с
+            // breakBlocks=true реально ломает блок анкера, если тот попадает
+            // в радиус (а он в самом центре взрыва — попадает всегда) — это
+            // настоящий блок-брейк, роняющий физический item колокола в мир.
+            // Мы следом БЕЗУСЛОВНО ставили блок BELL обратно — получался и
+            // дропнутый item, и восстановленный блок одновременно, то есть
+            // колокол буквально дублировался. Убираем блок анкера ДО взрыва
+            // (просто setType, не через BlockBreakEvent — без дропа), взрыв
+            // всё равно центрируется в той же точке.
+            anchor.getBlock().setType(Material.AIR);
+
             // Настоящий взрыв — частицы/звук/урон+отталкивание нанесёт сам,
             // не нужно вручную. fire=false (свой контролируемый огонь уже
             // есть, см. igniteAround), breakBlocks=true — реально срывает
             // блоки вокруг радиусом ~3-4 (та самая "рассыпчатость" бесплатно).
             w.createExplosion(anchor, EXPLOSION_POWER, false, true);
 
-            // Взрыв мог случайно задеть и сам блок анкера — восстанавливаем
-            // его безусловно, он "просто становится неактивным", не исчезает.
+            // Анкер "просто становится неактивным", не исчезает — теперь без дропа.
             anchor.getBlock().setType(Material.BELL);
 
             // Доп. партиклы/звук поверх ванильного взрыва — пар/сталь, не дублируем сам взрыв.
