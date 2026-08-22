@@ -27,6 +27,8 @@ import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -168,6 +170,19 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
                 state.attackerCountryName = countryRegistry.getCountryOfPlayer(state.diggingPlayerName);
             } else if (state.progress > 0 && now - state.lastGrowthAt > DECAY_GRACE_MS) {
                 state.progress = Math.max(0.0, state.progress - growthPerTick * DECAY_RATE);
+            }
+
+            // Фидбек 2026-08-22 — "добавить в тайтлбар (над хотбаром) отображение
+            // прогресса". Показываем и пока копает (растёт), и сразу после
+            // остановки, пока держится decay-отсрочка (падает) — чтобы было
+            // видно, что прогресс реально утекает, если бросил раньше времени.
+            if (state.progress > 0) {
+                Player digger = org.bukkit.Bukkit.getPlayerExact(state.diggingPlayerName);
+                if (digger != null) {
+                    NamedTextColor color = digging ? NamedTextColor.GOLD : NamedTextColor.RED;
+                    String verb = digging ? "Диверсия" : "Диверсия (остывает)";
+                    digger.sendActionBar(Component.text("⚒ " + verb + ": " + Math.round(state.progress) + "%", color));
+                }
             }
 
             applyMilestones(anchor, ownerCountryName, state, now, countryRegistry, warCache);
