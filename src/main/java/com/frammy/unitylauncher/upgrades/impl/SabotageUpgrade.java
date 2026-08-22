@@ -425,6 +425,20 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
      * та логика по-прежнему обрабатывает как раньше, чужой теперь не ломается
      * вообще без 100% прогресса. Реальный слом/шрам происходит программно в
      * completeSabotage, не через это событие.
+     *
+     * Живой тест 2026-08-22 — баг "нажал один раз, и дальше безвозвратно
+     * продолжается": BlockDamageAbortEvent прилетает, только если игрок
+     * прервал долбёжку РАНЬШЕ, чем она штатно завершилась бы (отпустил ПКМ
+     * до конца анимации трещин). Если долбёжка дошла до конца (мгновенный
+     * слом в креативе, быстрый инструмент, либо просто додержал до финальной
+     * трещины) — клиент считает действие завершённым, abort не шлётся
+     * вообще, а diggingActive так и остаётся true навсегда: прогресс растёт
+     * даже после того как игрок давно отпустил кнопку и ушёл. Поэтому сброс
+     * diggingActive нужен ЗДЕСЬ ЖЕ, в момент отмены ванильной попытки слома —
+     * это и есть настоящий конец текущей "сессии" долбёжки. Если игрок
+     * продолжает реально держать ПКМ дальше, клиент увидит, что блок никуда
+     * не делся, и сам заново пришлёт BlockDamageEvent — onAnchorDigStart
+     * снова выставит diggingActive=true, рост не прервётся.
      */
     @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
     public void onAnchorBreakAttempt(BlockBreakEvent e) {
@@ -436,6 +450,11 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         if (!isEnemyDigger(zone, e.getPlayer())) return; // свой — пусть ломает как обычно
 
         e.setCancelled(true);
+
+        SabotageState state = statesByZone.get(zone.getMarkerID());
+        if (state != null && e.getPlayer().getName().equals(state.diggingPlayerName)) {
+            state.diggingActive = false;
+        }
     }
 
     @Override
