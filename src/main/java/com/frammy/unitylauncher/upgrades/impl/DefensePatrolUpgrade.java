@@ -20,7 +20,6 @@ import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
-import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityTargetLivingEntityEvent;
 import org.bukkit.metadata.FixedMetadataValue;
 import org.bukkit.scheduler.BukkitTask;
@@ -31,12 +30,16 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-// infra/military-diplomacy-design.md §3.3/§13 Фаза 2+4, §14.2/§14.4/§14.5
-// "Оборона". Примета (патруль) — Фаза 2. Нейтрализация (PVE_WAVES, §14.4) —
-// Фаза 4: 5 волн подряд отбитых без паузы >3 мин репортится на сайт
-// (routes/plugin.ts "/plugin/military/neutralize"), который сам решает War
-// Score/CONTESTED/HQ-уязвимость (lib/militaryZones.ts) — этот класс только
-// считает волны и шлёт репорт, ничего не решает сам.
+// infra/military-diplomacy-design.md §3.3/§13 Фаза 2+4, §14.2/§14.5 "Оборона".
+// Примета (слабый фоновый патруль) — Фаза 2.
+//
+// Фидбек 2026-08-22 — PVE_WAVES (5 волн подряд без паузы >3 мин = нейтрализация)
+// убран как способ нейтрализации оборонительных сооружений: "это требование
+// было изначально как заглушка". Единственный способ теперь — "Диверсия"
+// (SabotageUpgrade, долгий канал у якоря-колокола с майлстоунами). Патруль
+// этого класса остаётся — просто фоновая угроза/отвлечение, которое
+// прикрывающему всё ещё нужно отбивать, пока напарник ведёт диверсию, но
+// сам он больше ничего не решает и никуда не репортится.
 //
 // Фидбек 2026-08-14 — переработка условий срабатывания:
 //  1. Раньше работал на ЛЮБОМ объекте со специализацией DEFENSE, независимо
@@ -57,10 +60,6 @@ public final class DefensePatrolUpgrade extends BaseUpgrade implements Listener 
     private static final UpgradeKey KEY = UpgradeKey.of("military.defense");
     private static final String META_KEY = "unityMilitaryGuardCountry";
 
-    // §14.5 черновые числа.
-    private static final int WAVES_TO_NEUTRALIZE = 5;
-    private static final long WAVE_GAP_RESET_MS = 3 * 60 * 1000;
-
     @Override public UpgradeKey key() { return KEY; }
     @Override public UpgradeScope scope() { return UpgradeScope.COUNTRY; }
     @Override public Listener listener() { return this; }
@@ -68,11 +67,6 @@ public final class DefensePatrolUpgrade extends BaseUpgrade implements Listener 
     // markerId зоны -> живые мобы патруля этой зоны (в памяти — переживать
     // рестарт плагина не обязано, как и остальные in-memory кеши апгрейдов).
     private final Map<String, List<UUID>> guardsByZone = new ConcurrentHashMap<>();
-    private final Map<String, Integer> waveStreakByZone = new ConcurrentHashMap<>();
-    private final Map<String, Long> lastWaveClearedByZone = new ConcurrentHashMap<>();
-    // Последний игрок (страна врага), нанёсший урон патрулю этой зоны — тот,
-    // кому в итоге засчитается нейтрализация, если стрик дойдёт до 5.
-    private final Map<String, String> lastAttackerCountryByZone = new ConcurrentHashMap<>();
     // Фидбек 2026-08-14 п.3 — следующий момент, когда ЭТОЙ зоне разрешено
     // (снова) заспавнить патруль. Инициализируется случайным сдвигом в
     // пределах одного периода при первом появлении зоны — так все объекты
@@ -121,14 +115,10 @@ public final class DefensePatrolUpgrade extends BaseUpgrade implements Listener 
 
             String markerId = z.getMarkerID();
             List<UUID> alive = guardsByZone.computeIfAbsent(markerId, k -> new ArrayList<>());
-            boolean hadGuardsBefore = !alive.isEmpty();
             alive.removeIf(id -> {
                 Entity e = Bukkit.getEntity(id);
                 return e == null || !e.isValid();
             });
-            boolean waveFullyCleared = hadGuardsBefore && alive.isEmpty();
-
-            handleWaveOutcome(z, markerId, waveFullyCleared);
 
             long now = System.currentTimeMillis();
             // Первое появление этой зоны — случайный сдвиг фазы в пределах
@@ -179,27 +169,6 @@ public final class DefensePatrolUpgrade extends BaseUpgrade implements Listener 
             }
         }
         return false;
-    }
-
-    /** §14.4/§14.5 — a fully-cleared wave (with no >3min gap since the last one) advances the streak; anything else resets it. */
-    private void handleWaveOutcome(ZoneInfo z, String markerId, boolean waveFullyCleared) {
-        if (!waveFullyCleared) return; // no wave existed yet, or it wasn't cleared — streak stays as-is either way (next spawn already tops it back up)
-
-        long now = System.currentTimeMillis();
-        Long lastClear = lastWaveClearedByZone.get(markerId);
-        int streak = (lastClear != null && now - lastClear <= WAVE_GAP_RESET_MS) ? waveStreakByZone.getOrDefault(markerId, 0) + 1 : 1;
-        lastWaveClearedByZone.put(markerId, now);
-        waveStreakByZone.put(markerId, streak);
-
-        if (streak < WAVES_TO_NEUTRALIZE) return;
-
-        String attackerCountry = lastAttackerCountryByZone.get(markerId);
-        waveStreakByZone.put(markerId, 0);
-        lastAttackerCountryByZone.remove(markerId);
-        if (attackerCountry == null) return; // no credited attacker (e.g. mobs infighting) — no report
-
-        var api = UnityLauncher.getInstance().getFarLandsApi();
-        if (api != null) api.reportMilitaryNeutralize(markerId, attackerCountry);
     }
 
     // GH#30 п.4 — сколько раз пробовать случайную точку внутри AABB, прежде
@@ -263,26 +232,6 @@ public final class DefensePatrolUpgrade extends BaseUpgrade implements Listener 
         }
     }
 
-    /** §14.4 attribution — remembers which enemy country most recently damaged this zone's patrol, credited if the streak completes. */
-    @EventHandler(ignoreCancelled = true)
-    public void onGuardDamaged(EntityDamageByEntityEvent e) {
-        List<org.bukkit.metadata.MetadataValue> meta = e.getEntity().getMetadata(META_KEY);
-        if (meta.isEmpty()) return;
-        if (!(e.getDamager() instanceof Player p)) return;
-
-        String markerId = meta.get(0).asString();
-        String zoneCountryName = zones().getAllZonesSnapshot().stream()
-                .filter(z -> markerId.equals(z.getMarkerID()))
-                .findFirst()
-                .map(ZoneInfo::getCountryName)
-                .orElse(null);
-        String attackerCountryName = UnityLauncher.getInstance().countryRegistryJdbc.getCountryOfPlayer(p.getName());
-        if (attackerCountryName == null || zoneCountryName == null || attackerCountryName.equalsIgnoreCase(zoneCountryName)) return;
-        if (!UnityLauncher.getInstance().warStatusCache.isAtWar(attackerCountryName, zoneCountryName)) return;
-
-        lastAttackerCountryByZone.put(markerId, attackerCountryName);
-    }
-
     @Override
     protected void onDisable() {
         if (task != null) {
@@ -296,9 +245,6 @@ public final class DefensePatrolUpgrade extends BaseUpgrade implements Listener 
             }
         }
         guardsByZone.clear();
-        waveStreakByZone.clear();
-        lastWaveClearedByZone.clear();
-        lastAttackerCountryByZone.clear();
         nextSpawnAtByZone.clear();
     }
 }

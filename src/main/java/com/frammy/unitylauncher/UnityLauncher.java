@@ -906,7 +906,10 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                 LiveDefensePostUpgrade.class, AuraUpgrade.class, ScorchUpgrade.class, CrossbowUpgrade.class,
                 // military-diplomacy-design.md §17.3/§17.4 (2026-08-22) — дефолтное
                 // состояние "Обороны" на линии фронта (§16): pity-патруль + "Отголосок"
-                FrontierDefenseUpgrade.class
+                FrontierDefenseUpgrade.class,
+                // §17.10 (2026-08-22) — "Диверсия", единственный способ нейтрализовать
+                // оборонительное сооружение (заменяет PVE_WAVES/BREAK_ANCHOR у DEFENSE)
+                SabotageUpgrade.class
             };
 
             int registered = 0;

@@ -46,10 +46,19 @@ public final class MilitaryAnchorService implements Listener {
         this.defenseSubtypeService = defenseSubtypeService;
     }
 
-    /** RECON специализация, либо DEFENSE-объект, реально вкачанный в CROSSBOW — единственные два потребителя якоря сейчас. */
+    /**
+     * RECON, либо ЛЮБОЙ активный подтип DEFENSE. Раньше якорь требовался
+     * только у Арбалета (для прицела) — фидбек 2026-08-22: "Диверсия" (см.
+     * SabotageUpgrade) заменяет собой весь механизм нейтрализации
+     * оборонительных сооружений, ей нужна физическая точка на любом из
+     * четырёх подтипов, не только на Арбалете.
+     */
     private boolean isAnchorCapable(ZoneInfo zone) {
         if (specializationService.current(zone) == MilitarySpecialization.RECON) return true;
-        return defenseSubtypeService.isActiveAs(zone, MilitaryDefenseSubtype.CROSSBOW);
+        for (MilitaryDefenseSubtype subtype : MilitaryDefenseSubtype.values()) {
+            if (defenseSubtypeService.isActiveAs(zone, subtype)) return true;
+        }
+        return false;
     }
 
     // GH#24 (твоя заметка про закапывание) — анкер обязан быть либо выше
@@ -126,6 +135,15 @@ public final class MilitaryAnchorService implements Listener {
         // войны (тот же паттерн атрибуции, что и DefensePatrolUpgrade); вне
         // войны это просто грабёж чужого блока, не военная нейтрализация.
         if (!UnityLauncher.getInstance().warStatusCache.isAtWar(breakerCountry, zoneCountry)) return;
+
+        // Фидбек 2026-08-22 — для DEFENSE-объектов мгновенный слом колокола
+        // больше НЕ нейтрализует объект: "Диверсия" (SabotageUpgrade) — теперь
+        // единственный способ, долгий процесс с майлстоунами, не один клик.
+        // Физический слом якоря здесь всё ещё просто сбрасывает
+        // militaryAnchorLocation (выше) — владелец теряет точку, пока не
+        // поставит новый колокол, но War Score/CONTESTED за это не даётся.
+        // Разведку (RECON) не трогаем — её BREAK_ANCHOR остаётся как был.
+        if (specializationService.current(zone) == MilitarySpecialization.DEFENSE) return;
 
         var api = UnityLauncher.getInstance().getFarLandsApi();
         if (api != null) api.reportMilitaryNeutralize(zone.getMarkerID(), breakerCountry);
