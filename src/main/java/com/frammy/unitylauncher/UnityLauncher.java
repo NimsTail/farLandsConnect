@@ -903,7 +903,10 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                 DefensePatrolUpgrade.class, MilitaryHospitalRegenUpgrade.class,
                 AttackSupportUpgrade.class, LogisticsUpgrade.class,
                 // GH#24 — оборонительные сооружения (саб-роли под DEFENSE), идеи 1-4 (5-я отложена)
-                LiveDefensePostUpgrade.class, AuraUpgrade.class, ScorchUpgrade.class, CrossbowUpgrade.class
+                LiveDefensePostUpgrade.class, AuraUpgrade.class, ScorchUpgrade.class, CrossbowUpgrade.class,
+                // military-diplomacy-design.md §17.3/§17.4 (2026-08-22) — дефолтное
+                // состояние "Обороны" на линии фронта (§16): pity-патруль + "Отголосок"
+                FrontierDefenseUpgrade.class
             };
 
             int registered = 0;

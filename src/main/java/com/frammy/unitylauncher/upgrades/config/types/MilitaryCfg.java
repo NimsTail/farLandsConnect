@@ -15,12 +15,17 @@ public record MilitaryCfg(
         LiveDefenseCfg liveDefense,
         AuraCfg aura,
         ScorchCfg scorch,
-        CrossbowCfg crossbow
+        CrossbowCfg crossbow,
+        // infra/military-diplomacy-design.md §17.3/§17.4 (2026-08-22) — дефолтное
+        // состояние апгрейда "Оборона" на линии фронта (§16): pity-патруль +
+        // "Отголосок". Тюнингуется 2_militaryFrontier* узлами в seed-данных.
+        FrontierDefenseCfg frontierDefense
 ) {
     public static MilitaryCfg defaults() {
         return new MilitaryCfg(
                 DefensePatrolCfg.defaults(), HospitalRegenCfg.defaults(), AttackSupportCfg.defaults(), LogisticsCfg.defaults(),
-                LiveDefenseCfg.defaults(), AuraCfg.defaults(), ScorchCfg.defaults(), CrossbowCfg.defaults()
+                LiveDefenseCfg.defaults(), AuraCfg.defaults(), ScorchCfg.defaults(), CrossbowCfg.defaults(),
+                FrontierDefenseCfg.defaults()
         );
     }
 
@@ -84,6 +89,18 @@ public record MilitaryCfg(
         dirty |= def(c, "military.crossbow.radius", cb.radius());
         dirty |= def(c, "military.crossbow.damage", cb.damage());
         dirty |= def(c, "military.crossbow.blindSpotDegrees", cb.blindSpotDegrees());
+
+        var fd = FrontierDefenseCfg.defaults();
+        dirty |= def(c, "military.frontierDefense.enabled", fd.enabled());
+        dirty |= def(c, "military.frontierDefense.periodTicks", fd.periodTicks());
+        dirty |= def(c, "military.frontierDefense.baseChancePermBase", fd.baseChancePermBase());
+        dirty |= def(c, "military.frontierDefense.pityPermBase", fd.pityPermBase());
+        dirty |= def(c, "military.frontierDefense.witherPermission", fd.witherPermission());
+        dirty |= def(c, "military.frontierDefense.echoPermBase", fd.echoPermBase());
+        dirty |= def(c, "military.frontierDefense.idleThresholdTicks", fd.idleThresholdTicks());
+        dirty |= def(c, "military.frontierDefense.pulsePeriodTicks", fd.pulsePeriodTicks());
+        dirty |= def(c, "military.frontierDefense.pulseBaseDamage", fd.pulseBaseDamage());
+        dirty |= def(c, "military.frontierDefense.undergroundMargin", fd.undergroundMargin());
 
         return dirty;
     }
@@ -163,7 +180,21 @@ public record MilitaryCfg(
                 c.getDouble("military.crossbow.blindSpotDegrees", cbD.blindSpotDegrees())
         );
 
-        return new MilitaryCfg(dp, hr, as, lg, ld, au, sc, cb);
+        var fdD = FrontierDefenseCfg.defaults();
+        var fd = new FrontierDefenseCfg(
+                c.getBoolean("military.frontierDefense.enabled", fdD.enabled()),
+                c.getLong("military.frontierDefense.periodTicks", fdD.periodTicks()),
+                str(c, "military.frontierDefense.baseChancePermBase", fdD.baseChancePermBase()),
+                str(c, "military.frontierDefense.pityPermBase", fdD.pityPermBase()),
+                str(c, "military.frontierDefense.witherPermission", fdD.witherPermission()),
+                str(c, "military.frontierDefense.echoPermBase", fdD.echoPermBase()),
+                c.getInt("military.frontierDefense.idleThresholdTicks", fdD.idleThresholdTicks()),
+                c.getLong("military.frontierDefense.pulsePeriodTicks", fdD.pulsePeriodTicks()),
+                c.getDouble("military.frontierDefense.pulseBaseDamage", fdD.pulseBaseDamage()),
+                c.getInt("military.frontierDefense.undergroundMargin", fdD.undergroundMargin())
+        );
+
+        return new MilitaryCfg(dp, hr, as, lg, ld, au, sc, cb, fd);
     }
 
     // §14.5: волна = 3 моба, новая волна раз в 90с (черновые числа).
@@ -226,5 +257,42 @@ public record MilitaryCfg(
     public record CrossbowCfg(boolean enabled, String permBase, long periodTicks, int radius, double damage, double blindSpotDegrees) {
         // GH#29 (фидбек раунд 3) — "повысь ему немного радиус действия" — было 20.
         public static CrossbowCfg defaults() { return new CrossbowCfg(true, "unity.military.crossbow", 20L * 3, 26, 3.0, 20.0); }
+    }
+
+    // infra/military-diplomacy-design.md §17.3/§17.4 (2026-08-22) — дефолтное
+    // состояние "Обороны" на линии фронта (§16), без доп. покупки: асинхронный
+    // pity-патруль (сильнее под землёй) + "Отголосок" (эскалирующий урон
+    // сквозь блоки для закопавшегося неподвижного игрока). Требует только
+    // владения базовым узлом (permBase у DefensePatrolCfg, "unity.military.defense")
+    // — см. FrontierDefenseManager.
+    public record FrontierDefenseCfg(
+            boolean enabled,
+            long periodTicks,
+            // §17.6 — базовый шанс/pity-прирост читаются countryMaxLevel(basePrefix, N)
+            // по этим двум permission-префиксам (2_militaryFrontierChance/Pity).
+            String baseChancePermBase,
+            String pityPermBase,
+            // §17.6 — 2_militaryFrontierWither, одноразовая нода (без уровня).
+            String witherPermission,
+            // §17.6 — 2_militaryFrontierEcho.
+            String echoPermBase,
+            int idleThresholdTicks,
+            long pulsePeriodTicks,
+            double pulseBaseDamage,
+            int undergroundMargin
+    ) {
+        // Черновые числа §17.3/§17.4 (документ — источник правды, тут только default):
+        // period 5с (чаще presence-репорта в 60с — для отзывчивости pity-роллов),
+        // idle-порог 30с (20 тиков/с * 30 = 600), пульс раз в 10с, база 2♥ = 4.0
+        // единиц урона (Bukkit EntityDamageEvent — 1 сердце = 2.0), запас "открыт
+        // небу" в 2 блока (тот же порядок, что у якоря Разведки/молнии Жгучего).
+        public static FrontierDefenseCfg defaults() {
+            return new FrontierDefenseCfg(
+                    true, 20L * 5,
+                    "unity.military.frontier_chance", "unity.military.frontier_pity",
+                    "unity.military.frontier_wither", "unity.military.frontier_echo",
+                    20 * 30, 20L * 10, 4.0, 2
+            );
+        }
     }
 }
