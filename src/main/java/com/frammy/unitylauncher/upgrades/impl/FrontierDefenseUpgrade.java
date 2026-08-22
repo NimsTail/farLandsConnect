@@ -148,10 +148,19 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
             // Оборона доступна только если защищающаяся страна вообще купила базовый узел.
             if (UpgradeCondition.countryMaxLevel(defenderCountry, "unity.military.defense", 1) < 1) continue;
 
-            boolean underground = isUnderground(loc, cfg.undergroundMargin());
+            // GH#32 (фидбек 2026-08-22) — "коробка вокруг себя с открытым
+            // верхом" обходила чистую проверку "под землёй" (open-to-sky =
+            // формально не underground), хотя патрульным мобам всё равно
+            // некуда зайти — тот же эксплойт, что и закапывание, просто
+            // сверху вместо снизу. isUnderground остаётся (быстрый общий
+            // случай), но триггер теперь шире — "укрыт" в принципе: либо
+            // ниже уровня земли, либо обложен сплошными блоками со всех
+            // 4 сторон на уровне ног И головы (реальная коробка), вне
+            // зависимости от того, открыта крыша или нет.
+            boolean shielded = isUnderground(loc, cfg.undergroundMargin()) || isEnclosed(loc);
 
-            rollPityPatrol(p, loc, defenderCountry, defenderCountryName, underground, cfg);
-            handleEcho(p, loc, defenderCountry, underground, cfg);
+            rollPityPatrol(p, loc, defenderCountry, defenderCountryName, shielded, cfg);
+            handleEcho(p, loc, defenderCountry, shielded, cfg);
         }
 
         // Чистим состояние игроков, которые вышли из релевантной территории/офлайн —
@@ -161,7 +170,7 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
 
     // ---- 1. Pity-патруль (§17.3) ----
 
-    private void rollPityPatrol(Player p, Location loc, String defenderCountry, String defenderCountryName, boolean underground, MilitaryCfg.FrontierDefenseCfg cfg) {
+    private void rollPityPatrol(Player p, Location loc, String defenderCountry, String defenderCountryName, boolean shielded, MilitaryCfg.FrontierDefenseCfg cfg) {
         int chanceLevel = UpgradeCondition.countryMaxLevel(defenderCountry, cfg.baseChancePermBase(), BASE_CHANCE.length - 1);
         int pityLevel = UpgradeCondition.countryMaxLevel(defenderCountry, cfg.pityPermBase(), PITY_GROWTH.length - 1);
         double baseChance = BASE_CHANCE[chanceLevel];
@@ -175,19 +184,19 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
             // §17.6 — 2_militaryFrontierWither, max_level 1: тот же countryMaxLevel(prefix, 1)
             // паттерн, что и у остальных одноуровневых проверок в этом файле/GEAR_PERM_BASE и т.п.
             boolean witherUnlocked = UpgradeCondition.countryMaxLevel(defenderCountry, cfg.witherPermission(), 1) > 0;
-            spawnPatrol(loc, defenderCountryName, underground, witherUnlocked);
+            spawnPatrol(loc, defenderCountryName, shielded, witherUnlocked);
         } else {
             state.pityChance()[0] = Math.min(PITY_CAP, chance + growth); // накопление к следующей проверке
         }
     }
 
-    private void spawnPatrol(Location near, String defenderCountryName, boolean underground, boolean witherUnlocked) {
+    private void spawnPatrol(Location near, String defenderCountryName, boolean shielded, boolean witherUnlocked) {
         World w = near.getWorld();
         if (w == null) return;
 
         boolean noDefendersOnline = onlineCitizens(defenderCountryName) == 0;
         List<EntityType> composition = new ArrayList<>();
-        if (underground) {
+        if (shielded) {
             composition.add(EntityType.ZOMBIE);
             composition.add(EntityType.SKELETON);
             if (witherUnlocked) composition.add(EntityType.WITHER_SKELETON);
@@ -199,7 +208,7 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
         if (noDefendersOnline) composition.add(composition.get(0)); // GH#30-стиль усиление — некому защищаться
 
         for (EntityType type : composition) {
-            Location spawnLoc = randomPointNear(near, underground);
+            Location spawnLoc = randomPointNear(near, shielded);
             Entity e = spawnLoc.getWorld().spawnEntity(spawnLoc, type);
             if (!(e instanceof LivingEntity mob)) continue;
             mob.setMetadata(META_KEY, new FixedMetadataValue(plugin(), defenderCountryName));
@@ -218,18 +227,18 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
     }
 
     /** Точка рядом с игроком: на поверхности — по highestBlockYAt, под землёй — на его же уровне Y с проверкой на проходимость. */
-    private Location randomPointNear(Location base, boolean underground) {
+    private Location randomPointNear(Location base, boolean shielded) {
         World w = base.getWorld();
         if (w == null) return base;
         ThreadLocalRandom rnd = ThreadLocalRandom.current();
 
         for (int i = 0; i < RANDOM_POINT_ATTEMPTS; i++) {
-            double radius = underground ? (4 + rnd.nextDouble() * 5) : (5 + rnd.nextDouble() * 8);
+            double radius = shielded ? (4 + rnd.nextDouble() * 5) : (5 + rnd.nextDouble() * 8);
             double angle = rnd.nextDouble() * Math.PI * 2;
             double x = base.getX() + Math.cos(angle) * radius;
             double z = base.getZ() + Math.sin(angle) * radius;
 
-            if (!underground) {
+            if (!shielded) {
                 int y = w.getHighestBlockYAt((int) Math.floor(x), (int) Math.floor(z));
                 return new Location(w, x, y, z);
             }
@@ -245,7 +254,7 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
 
     // ---- 2. "Отголосок" (§17.4) ----
 
-    private void handleEcho(Player p, Location loc, String defenderCountry, boolean underground, MilitaryCfg.FrontierDefenseCfg cfg) {
+    private void handleEcho(Player p, Location loc, String defenderCountry, boolean shielded, MilitaryCfg.FrontierDefenseCfg cfg) {
         EngagementState state = stateByPlayer.get(p.getName());
         if (state == null) return; // rollPityPatrol уже создал состояние в этом же тике — но на всякий случай
 
@@ -255,12 +264,12 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
         double dz = loc.getZ() - state.lastZ()[0];
         boolean moved = (dx * dx + dy * dy + dz * dz) > IDLE_MOVE_EPSILON_SQ;
 
-        if (moved || !underground) {
+        if (moved || !shielded) {
             state.lastX()[0] = loc.getX();
             state.lastY()[0] = loc.getY();
             state.lastZ()[0] = loc.getZ();
             state.lastMoveAtMs()[0] = now;
-            state.echoPulses()[0] = 0; // реальное движение (или вышел на поверхность) — полный сброс эскалации
+            state.echoPulses()[0] = 0; // реальное движение (или вышел из укрытия) — полный сброс эскалации
             return;
         }
 
@@ -289,6 +298,35 @@ public final class FrontierDefenseUpgrade extends BaseUpgrade implements Listene
         if (w == null) return false;
         int highest = w.getHighestBlockYAt(loc.getBlockX(), loc.getBlockZ());
         return loc.getBlockY() < highest - margin;
+    }
+
+    /**
+     * GH#32 (фидбек 2026-08-22) — "коробка вокруг себя с открытым верхом"
+     * обходит isUnderground (небо над головой открыто, значит формально
+     * не под землёй), но обычные наземные мобы патруля физически не могут
+     * дойти до игрока за стенами — та же ситуация, что и закапывание,
+     * просто сверху. Проверяет сплошной блок в 1 блоке по всем 4 сторонам
+     * света на уровне ног И головы — то есть реально замкнутая коробка, не
+     * просто "стоит у одной стены" (иначе ложные срабатывания у любой
+     * постройки/забора рядом). Крыша намеренно не проверяется — именно её
+     * отсутствие и есть эксплойт, который это закрывает.
+     */
+    private boolean isEnclosed(Location loc) {
+        World w = loc.getWorld();
+        if (w == null) return false;
+
+        int x = loc.getBlockX();
+        int feetY = loc.getBlockY();
+        int headY = feetY + 1;
+        int z = loc.getBlockZ();
+
+        int[][] sides = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        for (int[] side : sides) {
+            Material feet = w.getBlockAt(x + side[0], feetY, z + side[1]).getType();
+            Material head = w.getBlockAt(x + side[0], headY, z + side[1]).getType();
+            if (!feet.isSolid() || !head.isSolid()) return false; // хотя бы одна сторона открыта — не коробка
+        }
+        return true;
     }
 
     /** Без дропа/опыта — тот же паттерн, что у Живого поста/обычного патруля Обороны. */
