@@ -11,10 +11,15 @@ import com.frammy.unitylauncher.zones.ZoneInfo;
 import com.frammy.unitylauncher.zones.ZoneType;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.World;
+import org.bukkit.block.Block;
 import org.bukkit.entity.Arrow;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.entity.ProjectileHitEvent;
+import org.bukkit.metadata.FixedMetadataValue;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.FluidCollisionMode;
@@ -128,9 +133,16 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
     private final Map<String, Long> lastShotByZone = new ConcurrentHashMap<>();
     private BukkitTask task;
 
+    // Живой тест 2026-08-22 — метка на стрелах Арбалета (для onArrowHit
+    // ниже, отличить их от любых других стрел на сервере) и сила взрыва
+    // блока, в который такая стрела воткнулась — небольшая, только чтобы
+    // расчистить сам блок и пару соседних, не кратер.
+    private static final String ARROW_METADATA_KEY = "military_crossbow_arrow";
+    private static final float BLOCK_CLEAR_EXPLOSION_POWER = 1.2f;
+
     @Override public UpgradeKey key() { return KEY; }
     @Override public UpgradeScope scope() { return UpgradeScope.COUNTRY; }
-    @Override public Listener listener() { return null; }
+    @Override public Listener listener() { return this; }
 
     @Override
     public boolean enabledByConfig(UpgradeContext ctx) {
@@ -187,14 +199,13 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
             // для самого выстрела, вместо двух разных точек отсчёта.
             //
             // Живой тест 2026-08-22 — эксплойт "поставить блок прямо над
-            // колоколом": фиксированная точка спавна (0, 1.2, 0) оказывалась
-            // внутри поставленного блока — стрела спавнилась замурованной и
-            // физически не могла никуда полететь, Арбалет молча "стрелял в
-            // никуда" бесконечно. findClearSpawnLoc ищет ближайшую
-            // непроходимую точку рядом с якорем вместо жёстко зашитой одной —
-            // один поставленный блок больше не глушит выстрел безнаказанно.
-            Location spawnLoc = findClearSpawnLoc(origin);
-            if (spawnLoc == null) continue; // якорь полностью закупорен со всех сторон — стрелять физически некуда
+            // колоколом" (стрела спавнится замурованной, физически никуда не
+            // летит) чиним НЕ сдвигом точки спавна (фидбек: "не надо менять
+            // место выпуска стрелы"), а тем, что стрела при попадании в блок
+            // сама расчищает себе путь — см. onArrowHit ниже: блок подрывается,
+            // стрела считается потраченной ("сгорела"), а следующий залп уже
+            // летит свободно.
+            Location spawnLoc = origin.clone().add(0, 1.2, 0);
 
             List<Player> targets = findTargets(spawnLoc, cfg, z.getCountryName(), MAX_TARGETS);
             if (targets.isEmpty()) continue;
@@ -236,26 +247,6 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
         }
         candidates.sort(Comparator.comparingDouble(p -> p.getLocation().distance(origin)));
         return candidates.size() > max ? candidates.subList(0, max) : candidates;
-    }
-
-    // Живой тест 2026-08-22 — точки-кандидаты для спавна стрелы вокруг
-    // якоря, в порядке предпочтения: сперва штатная (0, 1.2, 0) как раньше,
-    // затем небольшие горизонтальные смещения на той же высоте, затем чуть
-    // выше/ниже. Блокировать все сразу одним блоком уже не выйдет — нужно
-    // обложить якорь буквально со всех сторон.
-    private static final double[][] SPAWN_CANDIDATE_OFFSETS = {
-            {0, 1.2, 0},
-            {0.6, 1.2, 0}, {-0.6, 1.2, 0}, {0, 1.2, 0.6}, {0, 1.2, -0.6},
-            {0, 1.8, 0}, {0, 0.6, 0},
-    };
-
-    /** Первая проходимая (не заблокированная поставленным блоком) точка спавна рядом с якорем — см. SPAWN_CANDIDATE_OFFSETS. null, если якорь закупорен со всех сторон. */
-    private Location findClearSpawnLoc(Location origin) {
-        for (double[] o : SPAWN_CANDIDATE_OFFSETS) {
-            Location candidate = origin.clone().add(o[0], o[1], o[2]);
-            if (candidate.getBlock().isPassable()) return candidate;
-        }
-        return null;
     }
 
     /** Видимость от якоря до игрока — Location у Player.hasLineOfSight(Block) нет подходящей перегрузки, трассируем блоки сами. */
@@ -300,6 +291,9 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
         Arrow arrow = (Arrow) spawnLoc.getWorld().spawnEntity(spawnLoc, EntityType.ARROW);
         arrow.setVelocity(direction.multiply(ARROW_SPEED));
         arrow.setDamage(cfg.damage());
+        // Живой тест 2026-08-22 — метим стрелу, чтобы onArrowHit ниже отличал
+        // её от любой другой стрелы на сервере (игрока, скелета и т.д.).
+        arrow.setMetadata(ARROW_METADATA_KEY, new FixedMetadataValue(plugin(), true));
 
         if (effectsLevel >= 1 && ThreadLocalRandom.current().nextDouble() < EFFECT_CHANCE[chanceLevel]) {
             EffectPreset preset = resolveActivePreset(canonicalCountry);
@@ -355,6 +349,31 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
 
         Vector offset = right.multiply(Math.cos(rotation) * spreadMagnitude).add(up.multiply(Math.sin(rotation) * spreadMagnitude));
         return dir.clone().add(offset).normalize();
+    }
+
+    /**
+     * Живой тест 2026-08-22 — "поставить блок над колоколом безнаказанно
+     * глушит выстрел" (спавн-точка та же самая, см. javadoc п.6/tick()) —
+     * вместо переноса точки спавна стрела сама прочищает себе дорогу:
+     * попала в блок — блок подрывается (небольшой ванильный взрыв, не
+     * кратер), стрела считается потраченной ("сгорела") и убирается.
+     * Следующий залп с той же spawnLoc уже летит свободно. Метка
+     * ARROW_METADATA_KEY отсекает чужие стрелы (игроков, скелетов и т.д.) —
+     * этот хендлер реагирует только на выстрелы этого класса.
+     */
+    @EventHandler
+    public void onArrowHit(ProjectileHitEvent e) {
+        if (!(e.getEntity() instanceof Arrow arrow)) return;
+        if (!arrow.hasMetadata(ARROW_METADATA_KEY)) return;
+
+        Block hitBlock = e.getHitBlock();
+        if (hitBlock != null) {
+            World w = hitBlock.getWorld();
+            if (w != null) {
+                w.createExplosion(hitBlock.getLocation().add(0.5, 0.5, 0.5), BLOCK_CLEAR_EXPLOSION_POWER, false, true);
+            }
+        }
+        arrow.remove();
     }
 
     @Override
