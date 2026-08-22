@@ -46,12 +46,12 @@ import java.util.concurrent.ThreadLocalRandom;
  * введено для всех четырёх подтипов DEFENSE, не только Арбалета — см.
  * MilitaryAnchorService), не просто стоять поблизости. Обычный ванильный
  * слом колокола врагом всегда отменяется (onAnchorBreakAttempt) — вместо
- * этого держим у блока искусственно увеличенное время ломания: копится,
- * пока игрок реально долбит блок без остановки (BlockDamageEvent старт /
- * BlockDamageAbortEvent — прервался), тает (decay, НЕ мгновенный сброс),
- * если остановился. Долгий процесс намеренно — один долбит, другой
- * прикрывает от фонового патруля Обороны/собственного эффекта объекта,
- * никакого искусственного headcount-гейта. Майлстоуны на пути бьют по
+ * этого прогресс копится ДИСКРЕТНО, за каждый реально доломанный до конца
+ * блок (раунд 4 живого теста — "не по угадайке сколько времени будет
+ * ломать, а по фактическому количеству сколько раз блок был сломанным"):
+ * штатное завершение долбёжки = один "слом" = случайные 3-4%; бросил
+ * раньше (BlockDamageAbortEvent) — 0%, не засчитано. Тает (decay), если
+ * давно не было ни одного засчитанного слома. Майлстоуны на пути бьют по
  * атакующей стороне: 33% — отталкивание, 66% — тьма, 75%+ — периодически
  * занимающийся вокруг огонь (нарастающая цена простоя рядом). 100% —
  * партиклы/звук/толчок + шрам из обсидиана/камня/магмы на месте анкера
@@ -59,6 +59,10 @@ import java.util.concurrent.ThreadLocalRandom;
  * ванильный BlockBreakEvent — тот у врага всегда отменён) — дальше уже
  * обычный поток (CONTESTED/War Score/иммунитет/платный ремонт,
  * lib/militaryZones.ts), этот класс лишь один раз шлёт репорт.
+ *
+ * Прогресс показывается actionbar-баром из "|" (цвет по состоянию, серый —
+ * незаполненная часть, число % справа) ТОЛЬКО игрокам физически внутри
+ * границ этого военного объекта (z.contains2D) — не всему серверу.
  *
  * Свой собственный колокол владелец по-прежнему ломает/переносит как
  * обычно — перехват работает только для игроков вражеской (по войне)
@@ -73,48 +77,30 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
 
     private static final UpgradeKey KEY = UpgradeKey.of("military.sabotage");
 
-    // Черновые числа §17.10 — под правку по живому тесту, как и весь баланс документа.
-    // Живой тест 2026-08-22 (раунд 3) — "задержка ощущается": прогресс/actionbar/
-    // пинг активности обновлялись раз в 2с — заметная ступенька на глаз при
-    // непрерывной долбёжке. growthPerTick пересчитывается от самого
-    // TICK_PERIOD_TICKS (см. tick() ниже), поэтому итоговая скорость роста
-    // (100% за CHANNEL_SECONDS) не меняется от смены периода — просто более
-    // мелкие, частые шаги вместо редких крупных.
+    // Живой тест 2026-08-22 (раунд 3) — "задержка ощущается" на статусе/
+    // партиклах, ниже период тика.
     private static final long TICK_PERIOD_TICKS = 10L; // 0.5с
-    private static final double CHANNEL_SECONDS = 120.0; // "долгий процесс" — 2 минуты полного НЕПРЕРЫВНОГО копания
+
+    // Живой тест 2026-08-22 (раунд 4) — "не по угадайке сколько времени
+    // будет ломать игрок, а по фактическому количеству сколько раз блок был
+    // сломанным": прогресс раньше копился НЕПРЕРЫВНО за время удержания
+    // (сколько ощущается — не проверить). Теперь дискретно: каждый раз,
+    // когда игрок реально доламывает якорь до конца (BlockBreakEvent —
+    // штатное завершение, которое мы отменяем, см. onAnchorBreakAttempt),
+    // засчитывается один "слом" — случайные 3-4%. Если бросил раньше
+    // (BlockDamageAbortEvent — см. onAnchorDigAbort) — 0%, не засчитано.
+    private static final double PROGRESS_PER_BREAK_MIN = 3.0;
+    private static final double PROGRESS_PER_BREAK_MAX = 4.0;
 
     // "Декай нужен, но держится явно меньше", чем на линии фронта (§17.2/§17.8:
     // там 7 мин/0.4×) — это активный ближний бой, а не пассивная площадь.
-    private static final long DECAY_GRACE_MS = 10_000L; // 10с без атакующего рядом — и начинает таять
-    private static final double DECAY_RATE = 0.8; // от скорости роста
+    private static final long DECAY_GRACE_MS = 10_000L; // 10с без ЗАСЧИТАННОГО слома — и начинает таять
+    private static final double DECAY_PERCENT_PER_SECOND = 0.5; // черновое число, как и весь баланс §17.10
 
-    // Живой тест 2026-08-22 (раунд 2) — ни BlockDamageEvent, ни
-    // BlockDamageAbortEvent НЕ надёжны как единственный источник правды о
-    // "копает ли игрок прямо сейчас": abort прилетает только при
-    // ДОСРОЧНОМ отпускании, а штатное завершение долбёжки (дошёл до конца
-    // анимации трещин) вообще не шлёт ни одного из двух событий — просто
-    // BlockBreakEvent, который мы отменяем.
-    //
-    // Живой тест 2026-08-22 (раунд 2, первая попытка, ОШИБОЧНАЯ) — общий
-    // "пинг с таймаутом" на КАЖДОЕ событие сломан для реального долгого
-    // держания: BlockDamageEvent шлётся РОВНО ОДИН РАЗ на весь сеанс
-    // долбёжки (не повторяется каждый тик, пока держишь кнопку) — то есть
-    // между стартом и штатным завершением/отменой может пройти много
-    // секунд БЕЗ единого нового события вообще. Таймаут короче реального
-    // времени долбёжки (что для колокола рукой — не мгновенно) обнулял
-    // прогресс ПРЯМО ПОСЕРЕДИНЕ честного непрерывного держания.
-    //
-    // Правильная модель: сам dig-start НЕ протухает сам по себе (держит
-    // diggingActive=true бессрочно) — единственные события, что-то
-    // решающие: onAnchorDigAbort (точно отпустил раньше времени — сбрасываем
-    // немедленно) и onAnchorBreakAttempt (штатно "доломал", отменили —
-    // неоднозначно: либо реально отпустил в этот момент без abort, либо
-    // продолжает держать и клиент вот-вот сам пришлёт новый dig-start).
-    // Второй случай решаем коротким окном ожидания awaitingRestartSince —
-    // если новый dig-start/break-attempt не подтвердит продолжение в
-    // течение RESTART_GRACE_MS, вот тогда и только тогда diggingActive
-    // сбрасывается.
-    private static final long RESTART_GRACE_MS = 2_500L;
+    // Живой тест 2026-08-22 (раунд 4) — "текст превратить в палочки с
+    // цветным прогрессом, число % справа. Показывать только в зоне объекта,
+    // не всему серверу". PROGRESS_BAR_LENGTH — число символов "|" в баре.
+    private static final int PROGRESS_BAR_LENGTH = 20;
 
     private static final double MILESTONE_KNOCKBACK_AT = 33.0;
     private static final double MILESTONE_DARKNESS_AT = 66.0;
@@ -177,10 +163,6 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         // true, а не просто пока враг где-то рядом.
         String diggingPlayerName;
         boolean diggingActive;
-        // != 0, когда штатное завершение долбёжки (onAnchorBreakAttempt)
-        // ждёт подтверждения, что игрок продолжает держать — см.
-        // RESTART_GRACE_MS выше.
-        long awaitingRestartSince;
         // Фидбек 2026-08-22 (второй раунд) — "первые 30% ничего не
         // происходит" — таймер лёгкой периодической обратной связи, не
         // привязанной к майлстоунам.
@@ -203,7 +185,7 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         var countryRegistry = UnityLauncher.getInstance().countryRegistryJdbc;
         var warCache = UnityLauncher.getInstance().warStatusCache;
         long now = System.currentTimeMillis();
-        double growthPerTick = 100.0 * (TICK_PERIOD_TICKS * 50.0 / 1000.0) / CHANNEL_SECONDS;
+        double decayPerTick = DECAY_PERCENT_PER_SECOND * (TICK_PERIOD_TICKS * 50.0 / 1000.0);
 
         for (ZoneInfo z : zones().getAllZonesSnapshot()) {
             if (z.getType() != ZoneType.MILITARY) continue;
@@ -220,39 +202,26 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
             String markerId = z.getMarkerID();
             SabotageState state = statesByZone.computeIfAbsent(markerId, k -> new SabotageState());
 
-            // Штатное завершение долбёжки ждало RESTART_GRACE_MS подтверждения,
-            // что игрок продолжает держать (см. onAnchorBreakAttempt) — время
-            // вышло без нового dig-start/break-attempt, значит правда отпустил.
-            if (state.awaitingRestartSince != 0 && now - state.awaitingRestartSince > RESTART_GRACE_MS) {
-                state.diggingActive = false;
-                state.awaitingRestartSince = 0;
-            }
-
-            // Фидбек 2026-08-22 — рост только пока игрок РЕАЛЬНО копает
-            // (диспетчер онлайн, флаг не сброшен BlockDamageAbortEvent'ом/
-            // истёкшим окном ожидания выше), не просто стоит рядом.
+            // "digging" здесь чисто косметика для actionbar (цвет/глагол) и
+            // раннего фидбека — реальный прогресс больше НЕ копится по
+            // тикам, только дискретно за засчитанные сломы (см.
+            // onAnchorBreakAttempt). Держится true, пока не прилетит
+            // onAnchorDigAbort (бросил раньше) или сам сброс после
+            // засчитанного слома — новый цикл долбёжки снова выставит true.
             boolean digging = state.diggingActive && state.diggingPlayerName != null
                     && org.bukkit.Bukkit.getPlayerExact(state.diggingPlayerName) != null;
-            if (digging) {
-                state.progress = Math.min(100.0, state.progress + growthPerTick);
-                state.lastGrowthAt = now;
-                state.attackerCountryName = countryRegistry.getCountryOfPlayer(state.diggingPlayerName);
-            } else if (state.progress > 0 && now - state.lastGrowthAt > DECAY_GRACE_MS) {
-                state.progress = Math.max(0.0, state.progress - growthPerTick * DECAY_RATE);
+
+            // Decay — только если давно не было ни одного ЗАСЧИТАННОГО слома
+            // (lastGrowthAt обновляется исключительно в onAnchorBreakAttempt).
+            if (state.progress > 0 && now - state.lastGrowthAt > DECAY_GRACE_MS) {
+                state.progress = Math.max(0.0, state.progress - decayPerTick);
             }
 
-            // Фидбек 2026-08-22 — "добавить в тайтлбар (над хотбаром) отображение
-            // прогресса". Показываем и пока копает (растёт), и сразу после
-            // остановки, пока держится decay-отсрочка (падает) — чтобы было
-            // видно, что прогресс реально утекает, если бросил раньше времени.
-            if (state.progress > 0) {
-                Player digger = org.bukkit.Bukkit.getPlayerExact(state.diggingPlayerName);
-                if (digger != null) {
-                    NamedTextColor color = digging ? NamedTextColor.GOLD : NamedTextColor.RED;
-                    String verb = digging ? "Диверсия" : "Диверсия (остывает)";
-                    digger.sendActionBar(Component.text("⚒ " + verb + ": " + Math.round(state.progress) + "%", color));
-                }
-            }
+            // Фидбек 2026-08-22 (раунд 4) — палочки с цветным прогрессом,
+            // число % справа, видно ТОЛЬКО игрокам физически внутри зоны
+            // этого объекта (не всему серверу без причины) — см.
+            // broadcastProgress ниже.
+            broadcastProgress(z, anchor, state, digging);
 
             // Фидбек 2026-08-22 (второй раунд) — "первые 30% даже не понятно,
             // что ты копаешь" — лёгкая частица/звук раз в EARLY_FEEDBACK_INTERVAL_MS
@@ -271,6 +240,35 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         }
 
         statesByZone.keySet().removeIf(id -> zones().getAllZonesSnapshot().stream().noneMatch(z -> id.equals(z.getMarkerID())));
+    }
+
+    /**
+     * Фидбек 2026-08-22 (раунд 4) — "текст превратить в ||||||||| палочками с
+     * цветным прогрессом. Справа число %. Показывать только непосредственно
+     * в зоне этого объекта, чтобы весь сервер не получал одинаковый actionbar
+     * без причины". Заполненная часть — цвет по состоянию (золото — идёт
+     * реальная долбёжка, красный — тает без атаки), незалитая часть — серая.
+     * z.contains2D — та же проверка попадания в полигон зоны, что уже
+     * используется по всему плагину (см. ZoneInfo) — не весь сервер, а
+     * только игроки физически внутри границ этого военного объекта.
+     */
+    private void broadcastProgress(ZoneInfo z, Location anchor, SabotageState state, boolean digging) {
+        if (state.progress <= 0) return;
+        World w = anchor.getWorld();
+        if (w == null) return;
+
+        NamedTextColor filledColor = digging ? NamedTextColor.GOLD : NamedTextColor.RED;
+        int filled = (int) Math.round(state.progress / 100.0 * PROGRESS_BAR_LENGTH);
+        filled = Math.max(0, Math.min(PROGRESS_BAR_LENGTH, filled));
+
+        Component text = Component.text("⚒ ", filledColor)
+                .append(Component.text("|".repeat(filled), filledColor))
+                .append(Component.text("|".repeat(PROGRESS_BAR_LENGTH - filled), NamedTextColor.DARK_GRAY))
+                .append(Component.text(" " + Math.round(state.progress) + "%", NamedTextColor.WHITE));
+
+        for (Player p : w.getPlayers()) {
+            if (z.contains2D(p.getLocation())) p.sendActionBar(text);
+        }
     }
 
     private MilitaryDefenseSubtype activeSubtypeOf(ZoneInfo z, MilitaryDefenseSubtypeService subtypeService) {
@@ -413,7 +411,6 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         state.attackerCountryName = null;
         state.diggingPlayerName = null;
         state.diggingActive = false;
-        state.awaitingRestartSince = 0;
     }
 
     // ---- Реальное копание якоря (фидбек 2026-08-22) ----
@@ -438,7 +435,7 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         return UnityLauncher.getInstance().warStatusCache.isAtWar(ownerCountry, diggerCountry);
     }
 
-    /** Начало копания (ЛКМ по блоку) — если это чужой якорь DEFENSE-объекта под Диверсией, помечаем прогресс как растущий. */
+    /** Начало копания (ЛКМ по блоку) — если это чужой якорь DEFENSE-объекта под Диверсией, помечаем как реально копающего (чисто для actionbar/раннего фидбека — сам прогресс за это НЕ начисляется, см. onAnchorBreakAttempt). */
     @EventHandler(ignoreCancelled = true)
     public void onAnchorDigStart(BlockDamageEvent e) {
         if (e.getBlock().getType() != Material.BELL) return;
@@ -451,10 +448,9 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         SabotageState state = statesByZone.computeIfAbsent(zone.getMarkerID(), k -> new SabotageState());
         state.diggingPlayerName = e.getPlayer().getName();
         state.diggingActive = true;
-        state.awaitingRestartSince = 0; // подтверждённое продолжение — снимаем ожидание, если было
     }
 
-    /** Игрок отпустил ЛКМ раньше, чем блок реально сломался (мы и не даём ему сломаться обычным способом, см. onAnchorBreakAttempt) — копание прервано, дальше decay в tick(). Единственный НАДЁЖНЫЙ сигнал "точно остановился" — сбрасываем сразу, не дожидаясь окна ожидания. */
+    /** Игрок отпустил ЛКМ раньше, чем блок реально сломался — сам "слом" НЕ засчитан (см. class javadoc: "если не сломалось до конца — не засчитываем"), никакого прогресса не даёт, только гасит косметический indicator долбёжки. */
     @EventHandler(ignoreCancelled = true)
     public void onAnchorDigAbort(BlockDamageAbortEvent e) {
         if (e.getBlock().getType() != Material.BELL) return;
@@ -463,7 +459,6 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         SabotageState state = statesByZone.get(zone.getMarkerID());
         if (state != null && e.getPlayer().getName().equals(state.diggingPlayerName)) {
             state.diggingActive = false;
-            state.awaitingRestartSince = 0;
         }
     }
 
@@ -475,27 +470,20 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
      * вообще без 100% прогресса. Реальный слом/шрам происходит программно в
      * completeSabotage, не через это событие.
      *
-     * Живой тест 2026-08-22 (раунд 1) — баг "нажал один раз, и дальше
-     * безвозвратно продолжается": BlockDamageAbortEvent прилетает, только
-     * если игрок прервал долбёжку РАНЬШЕ, чем она штатно завершилась бы
-     * (отпустил ПКМ до конца анимации трещин). Штатное завершение
-     * (мгновенный слом в креативе, быстрый инструмент, либо додержал до
-     * финальной трещины) не шлёт вообще ни одного из двух событий — только
-     * этот BlockBreakEvent, который мы отменяем.
+     * Живой тест 2026-08-22 (раунды 1-3) — непрерывный time-based рост
+     * ("копится, пока держишь") оказался хрупким относительно протокола
+     * майнкрафта (BlockDamageEvent шлётся один раз на весь сеанс, не каждый
+     * тик) — несколько раундов фиксов гонялись за границей "точно
+     * остановился / ещё держит".
      *
-     * Живой тест 2026-08-22 (раунд 2) — первая попытка фикса (жёсткий сброс
-     * diggingActive=false прямо здесь) породила противоположный баг:
-     * "остывает и не сбить" — после ОДНОГО такого срабатывания рост
-     * навсегда переставал возобновляться, даже когда игрок реально начинал
-     * долбить заново.
-     *
-     * Итоговая модель (раунд 3) — само событие неоднозначно: либо игрок
-     * реально отпустил именно в этот момент (без отдельного abort — так
-     * бывает при штатном завершении), либо продолжает держать и клиент
-     * вот-вот сам пришлёт новый BlockDamageEvent. Не решаем это здесь сразу:
-     * просто отмечаем awaitingRestartSince, а tick() через RESTART_GRACE_MS
-     * без подтверждения (новый dig-start снимает флаг, см.
-     * onAnchorDigStart) сам сбросит diggingActive.
+     * Живой тест 2026-08-22 (раунд 4) — "не угадайка сколько времени будет
+     * ломать, а по фактическому количеству сколько раз блок был сломанным":
+     * это событие — и есть тот самый факт "блок был сломан" (штатное
+     * завершение долбёжки, которое мы лишь отменяем результат для реального
+     * мира). Больше не нужно гадать, продолжает ли игрок держать — сам факт
+     * долбёжки ДО КОНЦА один раз надёжно засчитывается прямо здесь,
+     * случайные PROGRESS_PER_BREAK_MIN..MAX%. Аборт (см. onAnchorDigAbort)
+     * по-прежнему не даёт ничего.
      */
     @EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
     public void onAnchorBreakAttempt(BlockBreakEvent e) {
@@ -509,9 +497,16 @@ public final class SabotageUpgrade extends BaseUpgrade implements Listener {
         e.setCancelled(true);
 
         SabotageState state = statesByZone.computeIfAbsent(zone.getMarkerID(), k -> new SabotageState());
+        double gain = PROGRESS_PER_BREAK_MIN + ThreadLocalRandom.current().nextDouble() * (PROGRESS_PER_BREAK_MAX - PROGRESS_PER_BREAK_MIN);
+        state.progress = Math.min(100.0, state.progress + gain);
+        state.lastGrowthAt = System.currentTimeMillis();
+        state.attackerCountryName = UnityLauncher.getInstance().countryRegistryJdbc.getCountryOfPlayer(e.getPlayer().getName());
+
         state.diggingPlayerName = e.getPlayer().getName();
-        state.diggingActive = true; // ещё не сбрасываем — ждём RESTART_GRACE_MS в tick()
-        state.awaitingRestartSince = System.currentTimeMillis();
+        // Этот конкретный слом засчитан и закончен — если игрок продолжает
+        // держать ПКМ, клиент сам почти сразу пришлёт новый BlockDamageEvent
+        // (см. onAnchorDigStart), который снова выставит true.
+        state.diggingActive = false;
     }
 
     @Override
