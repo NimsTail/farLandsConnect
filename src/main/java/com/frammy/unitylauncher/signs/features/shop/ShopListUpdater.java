@@ -73,7 +73,33 @@ public record ShopListUpdater(UnityLauncher plugin, ZoneManager zoneManager, Sig
                                      Set<Location> sourceSigns) {
         if (shopKey == null || listSigns == null || listSigns.isEmpty()) return;
 
+        List<ItemData> allItems = computeItemsForSourceSigns(sourceSigns);
+
+        // линии для таблички списка
+        List<String> itemLines = allItems.stream().map(ItemData::displayName).toList();
+
+        for (Location signLoc : listSigns) {
+            signLoc = SignStore.keyLoc(signLoc);
+            store.signPages().put(signLoc, itemLines);
+            store.signItemData().put(signLoc, allItems);
+
+            Block block = signLoc.getBlock();
+            if (block.getState() instanceof Sign sign) {
+                renderer.updateSignView(sign, itemLines, 0);
+            }
+        }
+    }
+
+    /**
+     * Собственно расчёт ItemData по набору SHOP_SOURCE-табличек одного
+     * магазина — вынесено из updateShopListsByKey, чтобы GH#34's
+     * "shop_inventory_sync" (см. ZoneRequestPoller/SignManager) мог
+     * переиспользовать РОВНО тот же расчёт, что уже строит таблички
+     * SHOP_LIST, вместо второго отдельного сканирования тех же сундуков.
+     */
+    public List<ItemData> computeItemsForSourceSigns(Set<Location> sourceSigns) {
         List<ItemData> allItems = new ArrayList<>();
+        if (sourceSigns == null) return allItems;
 
         for (Location srcLoc : sourceSigns) {
             srcLoc = SignStore.keyLoc(srcLoc);
@@ -125,19 +151,7 @@ public record ShopListUpdater(UnityLauncher plugin, ZoneManager zoneManager, Sig
             }
         }
 
-        // линии для таблички списка
-        List<String> itemLines = allItems.stream().map(ItemData::displayName).toList();
-
-        for (Location signLoc : listSigns) {
-            signLoc = SignStore.keyLoc(signLoc);
-            store.signPages().put(signLoc, itemLines);
-            store.signItemData().put(signLoc, allItems);
-
-            Block block = signLoc.getBlock();
-            if (block.getState() instanceof Sign sign) {
-                renderer.updateSignView(sign, itemLines, 0);
-            }
-        }
+        return allItems;
     }
 
     private static Location parseChestLocation(Location srcLoc, String raw) {

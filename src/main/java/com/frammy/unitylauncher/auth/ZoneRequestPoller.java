@@ -85,6 +85,10 @@ public class ZoneRequestPoller {
                 processStartReconMinigame(req);
                 return;
             }
+            if ("shop_inventory_sync".equals(req.action())) {
+                processShopInventorySync(req);
+                return;
+            }
             processMutation(req);
         } catch (Exception e) {
             log.warning("[ZoneRequestPoller] processing " + req.id() + " (" + req.action() + ") failed: " + e);
@@ -253,6 +257,40 @@ public class ZoneRequestPoller {
 
         boolean started = UnityLauncher.getInstance().militaryReconMinigame.start(zone, sessionId);
         api.reportZoneRequestResult(req.id(), started, started ? null : "not_specialized_or_no_anchor", null);
+    }
+
+    /**
+     * Read-only — GH#34 (личный кабинет продавца / автолистинг из сундуков
+     * магазина, farlandsconnect infra/personal-upgrades-catalog.md
+     * обсуждение 2026-08-27). Возвращает то же самое ItemData[], что уже
+     * строит ShopListUpdater для табличек SHOP_LIST этого магазина —
+     * никакого нового сканирования сундуков не добавляется, сайт просто
+     * запрашивает уже готовый снимок по требованию (открыл "Мои магазины",
+     * нажал "Обновить", или раз в 5 минут для магазинов с включённым
+     * автолистингом — см. lib/shopSync.ts на сайте), а не каждый тик.
+     */
+    private void processShopInventorySync(FarLandsApiClient.PendingZoneRequest req) {
+        String markerId = req.markerId();
+        if (markerId == null) {
+            api.reportZoneRequestResult(req.id(), false, "missing_marker_id", null);
+            return;
+        }
+
+        var items = com.frammy.unitylauncher.UnityLauncher.getInstance().getSignManager().getShopItemsByMarkerId(markerId);
+
+        JsonArray snapshot = new JsonArray();
+        for (var it : items) {
+            JsonObject o = new JsonObject();
+            o.addProperty("materialKey", it.materialKey());
+            o.addProperty("dealQuantity", it.dealQuantity());
+            o.addProperty("totalQuantity", it.totalQuantity());
+            o.addProperty("dealPrice", it.dealPrice());
+            o.addProperty("chestX", it.chestLocation().getBlockX());
+            o.addProperty("chestY", it.chestLocation().getBlockY());
+            o.addProperty("chestZ", it.chestLocation().getBlockZ());
+            snapshot.add(o);
+        }
+        api.reportZoneRequestResult(req.id(), true, null, null, snapshot);
     }
 
     private JsonObject zoneToJson(ZoneInfo z) {

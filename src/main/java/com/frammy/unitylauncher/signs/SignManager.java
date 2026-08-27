@@ -389,6 +389,34 @@ public final class SignManager implements Listener {
         shopLists.rebuildAllListsLater();
     }
 
+    /**
+     * GH#34 (личный кабинет продавца, farlandsconnect infra/personal-upgrades-
+     * catalog.md, 2026-08-27) — read-only снимок живого содержимого сундуков
+     * одного SHOP-магазина по markerId, для ZoneRequestPoller's
+     * "shop_inventory_sync". Переиспользует ТОТ ЖЕ расчёт
+     * (ShopListUpdater.computeItemsForSourceSigns), что уже строит таблички
+     * SHOP_LIST на каждой продаже/правке — никакого нового периодического
+     * сканирования сундуков здесь не добавляется, это просто чтение уже
+     * готового индекса shopToSourceSigns по требованию сайта.
+     */
+    public List<com.frammy.unitylauncher.signs.features.shop.ItemData> getShopItemsByMarkerId(String markerId) {
+        if (markerId == null) return List.of();
+
+        var zone = zoneManager.getAllZonesSnapshot().stream()
+                .filter(z -> markerId.equals(z.getMarkerID()))
+                .findFirst()
+                .orElse(null);
+        if (zone == null || zone.getType() != com.frammy.unitylauncher.zones.ZoneType.SHOP) return List.of();
+
+        World world = zone.getWorld();
+        String name = zone.getName();
+        if (world == null || name == null || name.isBlank()) return List.of();
+
+        String key = world.getUID() + ":" + name;
+        Set<Location> sourceSigns = shopToSourceSigns.getOrDefault(key, Set.of());
+        return shopLists.computeItemsForSourceSigns(sourceSigns);
+    }
+
     private static final String SIGNS_BYPASS_PERM = "unity.signs.bypass";
 
     /** Локация блока-опоры для конкретной таблички в мире. */
