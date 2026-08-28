@@ -160,13 +160,19 @@ public final class PhantomDeliveryController implements Listener {
             activeIds.add(trade.id());
 
             Location target = computePosition(world, trade);
-            boolean playerNearby = isAnyPlayerNear(world, target);
-            // GH#36 п.4 — момент прибытия определяется временем (тем же
-            // etaAtMs, что использует sweep-job на сайте — lib/phantomDelivery.ts),
-            // не расстоянием до точки назначения: target уже ground-snapped
-            // (Y = самый верхний блок + 1), а объявленный адрес покупателя
-            // может стоять на чуть другой высоте — сравнение расстояний
-            // между ними было бы хрупким.
+            // GH#36 (2026-08-28, третий раунд) — БАГ: "рядом ли игрок" всегда
+            // проверялось расстоянием до ИДЕАЛЬНОЙ по времени точки, даже для
+            // уже заспавненной сущности. Пока торговец реально идёт (тем более
+            // теперь, с lookahead-целью — см. LOOKAHEAD_MS), его физическая
+            // позиция закономерно отстаёт от идеальной, и это расхождение
+            // растёт. Если оно превышало VISIBILITY_RADIUS_BLOCKS, планировщик
+            // решал "игрока рядом нет" и удалял сущность, СТОЯЩУЮ буквально
+            // рядом с игроком — а на следующем тике игрок всё ещё рядом с
+            // (уже другой) идеальной точкой, и торговец спавнился заново там
+            // — то самое "телепортирование" на глазах у игрока. Для уже
+            // существующей сущности нужно мерить от её РЕАЛЬНОЙ позиции, не
+            // от идеальной — идеальная точка годится только для решения
+            // "спавнить ли", раз реальной позиции ещё нет.
             boolean arrived = System.currentTimeMillis() >= trade.etaAtMs();
 
             UUID entityId = spawned.get(trade.id());
@@ -185,7 +191,7 @@ public final class PhantomDeliveryController implements Listener {
                     stuckTicks.remove(trade.id());
                     continue;
                 }
-                if (!playerNearby) {
+                if (!isAnyPlayerNear(world, existing.getLocation())) {
                     existing.remove();
                     spawned.remove(trade.id());
                     lastSeenLoc.remove(trade.id());
@@ -193,7 +199,7 @@ public final class PhantomDeliveryController implements Listener {
                 } else if (existing instanceof Mob mob) {
                     progressOrCorrect(world, trade, mob, target);
                 }
-            } else if (playerNearby) {
+            } else if (isAnyPlayerNear(world, target)) {
                 if (arrived) {
                     // Никто не видел торговца всю дорогу, а к моменту, когда
                     // игрок наконец оказался рядом, маршрут уже пройден по
@@ -301,7 +307,7 @@ public final class PhantomDeliveryController implements Listener {
         }
 
         Location dest = destinationLocation(world, trade);
-        Container container = containerAt(dest);
+        Container container = findContainerNear(dest, DEST_CONTAINER_SEARCH_RADIUS);
 
         if (traderEntity != null) traderEntity.remove();
 
@@ -347,9 +353,44 @@ public final class PhantomDeliveryController implements Listener {
         world.dropItem(at, stack);
     }
 
+    // GH#36 (2026-08-28, третий раунд) — точка на клике по карте у адреса
+    // покупателя: X/Z с карты, а Y ("тот же приём, что у pickupPlace" —
+    // см. infra/phantom-delivery-design.md) вводится ИГРОКОМ ВРУЧНУЮ. Даже
+    // на один блок неверный Y — и точный блок оказывается воздухом рядом с
+    // реальным сундуком, а не самим сундуком: "он просто бросает вещи рядом,
+    // хотя сундук вот же" — искали строго в упор, без допуска. Небольшой
+    // радиус поиска терпим к такой погрешности, не требуя от игрока
+    // ювелирной точности координат.
+    private static final int DEST_CONTAINER_SEARCH_RADIUS = 1;
+
     private static Container containerAt(Location loc) {
         var state = loc.getBlock().getState();
         return state instanceof Container c ? c : null;
+    }
+
+    /** Как containerAt, но терпимо к небольшой погрешности координат — ищет ближайший контейнер в кубе radius вокруг center. */
+    private static Container findContainerNear(Location center, int radius) {
+        Container exact = containerAt(center);
+        if (exact != null) return exact;
+
+        Container best = null;
+        double bestDistSq = Double.MAX_VALUE;
+        for (int dx = -radius; dx <= radius; dx++) {
+            for (int dy = -radius; dy <= radius; dy++) {
+                for (int dz = -radius; dz <= radius; dz++) {
+                    if (dx == 0 && dy == 0 && dz == 0) continue; // уже проверили выше
+                    Location candidate = center.clone().add(dx, dy, dz);
+                    Container c = containerAt(candidate);
+                    if (c == null) continue;
+                    double distSq = candidate.distanceSquared(center);
+                    if (distSq < bestDistSq) {
+                        bestDistSq = distSq;
+                        best = c;
+                    }
+                }
+            }
+        }
+        return best;
     }
 
     private Location destinationLocation(World world, FarLandsApiClient.PhantomTrade trade) {
@@ -464,7 +505,12 @@ public final class PhantomDeliveryController implements Listener {
 
     private void withdrawFromSource(World world, FarLandsApiClient.PhantomTrade trade, Material material) {
         Location src = new Location(world, trade.sourceX(), trade.sourceY(), trade.sourceZ());
-        Container container = containerAt(src);
+        // GH#36 (2026-08-28, третий раунд) — тот же допуск, что и у
+        // findContainerNear для назначения: у ручных лотов источник — тоже
+        // ручной клик по карте + ручной Y, подвержен той же погрешности.
+        // У авто-лотов координаты точные (из ShopChestItem), точное
+        // совпадение находится сразу, цикл поиска не выполняется.
+        Container container = findContainerNear(src, DEST_CONTAINER_SEARCH_RADIUS);
         if (container == null) {
             plugin.getLogger().warning("[PhantomDelivery] в точке источника заказа " + trade.id() + " нет сундука — товар материализован без списания.");
             return;
