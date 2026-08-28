@@ -278,18 +278,12 @@ public class ZoneRequestPoller {
 
         var items = com.frammy.unitylauncher.UnityLauncher.getInstance().getSignManager().getShopItemsByMarkerId(markerId);
 
+        // GH#35 (2026-08-28) — тот же payload shape, что и у push-пути
+        // (FarLandsApiClient.pushShopInventory) — общая сериализация,
+        // единственное отличие pull vs push — транспорт (ответ на запрос
+        // сайта vs звонок плагина самому себе по факту события).
         JsonArray snapshot = new JsonArray();
-        for (var it : items) {
-            JsonObject o = new JsonObject();
-            o.addProperty("materialKey", it.materialKey());
-            o.addProperty("dealQuantity", it.dealQuantity());
-            o.addProperty("totalQuantity", it.totalQuantity());
-            o.addProperty("dealPrice", it.dealPrice());
-            o.addProperty("chestX", it.chestLocation().getBlockX());
-            o.addProperty("chestY", it.chestLocation().getBlockY());
-            o.addProperty("chestZ", it.chestLocation().getBlockZ());
-            snapshot.add(o);
-        }
+        for (var it : items) snapshot.add(FarLandsApiClient.shopItemToJson(it));
         api.reportZoneRequestResult(req.id(), true, null, null, snapshot);
     }
 

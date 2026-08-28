@@ -1482,8 +1482,41 @@ public final class ShopController {
         var holder = e.getInventory().getHolder();
         List<Location> locs = resolveContainerLocations(holder);
         for (Location l : locs) {
-            try { shopLists.updateAllRelatedShopListSigns(SignStore.keyLoc(l)); } catch (Throwable ignored) {}
+            Location loc = SignStore.keyLoc(l);
+            try { shopLists.updateAllRelatedShopListSigns(loc); } catch (Throwable ignored) {}
+            pushSiteSyncIfShop(loc);
         }
+    }
+
+    // GH#35 (мгновенный синк, 2026-08-28) — по закрытию любого контейнера,
+    // если он лежит внутри чьей-то SHOP-зоны, толкаем свежий снимок на сайт
+    // напрямую (FarLandsApiClient.pushShopInventory), не дожидаясь, пока
+    // продавец сам зайдёт на сайт и нажмёт "Обновить" — тот путь остаётся
+    // резервным (см. lib/shopSync.ts на сайте). Не завязано на то, привязан
+    // ли именно этот контейнер к SHOP_SOURCE-табличке — расчёт (computeItemsForShop)
+    // сам смотрит на ВСЕ source-таблички этого магазина, так что пуш
+    // безопасен и достаточен, даже если игрок открыл ровно один из
+    // нескольких сундуков магазина.
+    private final Map<String, Boolean> pendingSitePush = new ConcurrentHashMap<>();
+
+    private void pushSiteSyncIfShop(Location containerLoc) {
+        ZoneInfo zone = zoneManager.getShopZoneAt(containerLoc);
+        if (zone == null) return;
+        String markerId = zone.getMarkerID();
+        if (markerId == null || markerId.isBlank()) return;
+
+        // Дебаунс на 0.5с — double chest закрывается как два отдельных
+        // Container-локейшна (resolveContainerLocations), без этого один
+        // клик "закрыть" слал бы два одинаковых POST подряд.
+        if (pendingSitePush.putIfAbsent(markerId, Boolean.TRUE) != null) return;
+        Bukkit.getScheduler().runTaskLater(plugin, () -> {
+            pendingSitePush.remove(markerId);
+            try {
+                List<ItemData> items = shopLists.computeItemsForShop(containerLoc);
+                var api = UnityLauncher.getInstance().getFarLandsApi();
+                if (api != null) api.pushShopInventory(markerId, items);
+            } catch (Throwable ignored) {}
+        }, 10L);
     }
 
     private static List<Location> resolveContainerLocations(Object holder) {

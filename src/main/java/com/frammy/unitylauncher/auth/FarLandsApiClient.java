@@ -563,6 +563,115 @@ public class FarLandsApiClient {
         send("POST", "/plugin/military/frontier-presence", body);
     }
 
+    // infra/phantom-delivery-design.md — фантомная доставка: гружёный
+    // Странствующий торговец, реально идущий по маршруту, спавнится только
+    // при зрителях. Позиция считается на стороне плагина (см.
+    // PhantomDeliveryController) — этот клиент только тянет список активных
+    // заказов и шлёт два вебхука по факту смерти торговца/подбора груза.
+    public record PhantomTrade(
+            String id, String itemMaterial, int quantity, String buyerUsername,
+            double sourceX, double sourceY, double sourceZ,
+            double destX, double destY, double destZ,
+            long startedAtMs, long etaAtMs
+    ) {}
+
+    /** Blocking GET, тот же паттерн, что fetchActiveWars — вызывается из
+     * собственного планировщика PhantomDeliveryController. */
+    public List<PhantomTrade> fetchPhantomActiveTrades() {
+        List<PhantomTrade> out = new ArrayList<>();
+        if (!isEnabled()) return out;
+
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/plugin/marketplace/phantom-active"))
+                    .timeout(Duration.ofSeconds(10))
+                    .header("Authorization", "Bearer " + token)
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 300) {
+                log.warning("[FarLandsApi] GET /plugin/marketplace/phantom-active -> HTTP " + response.statusCode());
+                return out;
+            }
+
+            JsonObject body = GSON.fromJson(response.body(), JsonObject.class);
+            JsonArray trades = body.getAsJsonArray("trades");
+            for (JsonElement el : trades) {
+                JsonObject o = el.getAsJsonObject();
+                JsonObject src = o.getAsJsonObject("source");
+                JsonObject dst = o.getAsJsonObject("destination");
+                if (src == null || dst == null) continue;
+                Long startedAtMs = o.get("startedAtMs").isJsonNull() ? null : o.get("startedAtMs").getAsLong();
+                Long etaAtMs = o.get("etaAtMs").isJsonNull() ? null : o.get("etaAtMs").getAsLong();
+                if (startedAtMs == null || etaAtMs == null) continue;
+                out.add(new PhantomTrade(
+                        o.get("id").getAsString(),
+                        o.get("itemMaterial").getAsString(),
+                        o.get("quantity").getAsInt(),
+                        o.get("buyerUsername").getAsString(),
+                        src.get("x").getAsDouble(), src.get("y").getAsDouble(), src.get("z").getAsDouble(),
+                        dst.get("x").getAsDouble(), dst.get("y").getAsDouble(), dst.get("z").getAsDouble(),
+                        startedAtMs, etaAtMs
+                ));
+            }
+        } catch (Exception e) {
+            log.warning("[FarLandsApi] fetchPhantomActiveTrades failed: " + e);
+        }
+        return out;
+    }
+
+    /** Покупатель сам подобрал груз своего же заказа — не ограбление, обычная досрочная доставка. */
+    public void reportPhantomDelivered(String tradeId) {
+        send("POST", "/plugin/marketplace/" + encode(tradeId) + "/phantom-delivered", new JsonObject());
+    }
+
+    /** Груз подобрал кто-то другой (или деспавнился неподобранным) — настоящее ограбление. */
+    public void reportPhantomRobbed(String tradeId) {
+        send("POST", "/plugin/marketplace/" + encode(tradeId) + "/phantom-robbed", new JsonObject());
+    }
+
+    /**
+     * GH#35 (мгновенный синк сундуков, 2026-08-28) — вызывается из
+     * ShopController.onInventoryClose как только меняется содержимое
+     * SHOP_SOURCE-сундука, вместо ожидания, пока сайт сам спросит
+     * (action="shop_inventory_sync" — тот путь остаётся резервным, см.
+     * lib/shopSync.ts на сайте). Fire-and-forget, как и остальные send().
+     */
+    public void pushShopInventory(String markerId, List<com.frammy.unitylauncher.signs.features.shop.ItemData> items) {
+        if (markerId == null || markerId.isBlank()) return;
+
+        JsonObject body = new JsonObject();
+        body.addProperty("markerId", markerId);
+        JsonArray arr = new JsonArray();
+        for (var it : items) arr.add(shopItemToJson(it));
+        body.add("items", arr);
+        send("POST", "/plugin/shops/push-sync", body);
+    }
+
+    /** Общая сериализация ItemData -> JSON, используется и здесь (push), и
+     * ZoneRequestPoller.processShopInventorySync (pull) — один и тот же payload
+     * shape на обоих путях (см. backend routes/plugin.ts's PluginChestItemRow). */
+    public static JsonObject shopItemToJson(com.frammy.unitylauncher.signs.features.shop.ItemData it) {
+        JsonObject o = new JsonObject();
+        o.addProperty("materialKey", it.materialKey());
+        o.addProperty("dealQuantity", it.dealQuantity());
+        o.addProperty("totalQuantity", it.totalQuantity());
+        o.addProperty("dealPrice", it.dealPrice());
+        o.addProperty("chestX", it.chestLocation().getBlockX());
+        o.addProperty("chestY", it.chestLocation().getBlockY());
+        o.addProperty("chestZ", it.chestLocation().getBlockZ());
+        JsonArray ench = new JsonArray();
+        for (String slug : it.enchantments()) ench.add(slug);
+        o.add("enchantSlugs", ench);
+        if (it.durabilityPct() != null) {
+            o.addProperty("durabilityPct", it.durabilityPct());
+        } else {
+            o.add("durabilityPct", com.google.gson.JsonNull.INSTANCE);
+        }
+        return o;
+    }
+
     public record WarPair(String countryA, String countryB) {}
 
     /** Blocking GET — called from WarStatusCache's own scheduler thread (mirrors fetchPendingCountryCreateRequests). Country NAMES, not site cuids — see routes/plugin.ts. */
