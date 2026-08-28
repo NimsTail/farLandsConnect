@@ -112,16 +112,24 @@ public final class PhantomDeliveryController implements Listener {
     // идти сам, как может.
     private final Map<String, Location> lastSeenLoc = new ConcurrentHashMap<>();
     private final Map<String, Integer> stuckTicks = new ConcurrentHashMap<>();
-    private static final double STUCK_THRESHOLD_BLOCKS = 0.4;
+    // GH#36 (2026-08-28, четвёртый раунд) — застревание меряется прогрессом
+    // расстояния до НАЗНАЧЕНИЯ между тиками (см. progressOrCorrect), не
+    // сырым перемещением сущности — реальный лог показал, что застрявший
+    // (упёршийся в препятствие) торговец всё равно каждый тик слегка
+    // топчется/дёргается на месте, что маскировало отсутствие прогресса
+    // при старой метрике.
+    private final Map<String, Double> lastSeenDistToDest = new ConcurrentHashMap<>();
+    private static final double STUCK_PROGRESS_THRESHOLD_BLOCKS = 0.4;
     private static final int STUCK_TICKS_LIMIT = 5; // ~5 тиков планировщика (см. start()) без прогресса
 
-    // GH#36 п.1 — цель для pathfinder'а берётся не "ровно сейчас" (там
-    // сущность почти сразу её достигает на полной скорости и потом просто
-    // стоит до следующего тика планировщика — то самое "шаг-стоп-шаг"),
-    // а на несколько секунд ВПЕРЁД по маршруту — так у неё всегда есть
-    // расстояние, которое реально нужно пройти, и путь не приходится
-    // пересчитывать с нуля каждую секунду ради лишних пары блоков.
-    private static final long LOOKAHEAD_MS = 3000L;
+    // GH#36 (2026-08-28, четвёртый раунд) — БАГ найден по debug-логам:
+    // цель для pathfinder'а раньше бралась как "где торговец ДОЛЖЕН быть
+    // по времени" — если он отставал (препятствие), эта цель убегала от
+    // него быстрее, чем он мог догнать, разрыв рос без ограничений
+    // (реально дошло до ~60 блоков за 20с в одном заказе). Теперь —
+    // фиксированное расстояние вперёд по маршруту от РЕАЛЬНОЙ текущей
+    // позиции (см. computeWalkTarget) — всегда достижимая цель.
+    private static final double LOOKAHEAD_DISTANCE_BLOCKS = 12.0;
     // Обычная скорость ходьбы (не спринт) — значение 1.0 у Pathfinder.moveTo
     // читается как "спринт-подобный" множитель для WanderingTrader и на
     // практике и давало эффект слишком резких рывков.
@@ -191,7 +199,7 @@ public final class PhantomDeliveryController implements Listener {
             // GH#36 (2026-08-28, третий раунд) — БАГ: "рядом ли игрок" всегда
             // проверялось расстоянием до ИДЕАЛЬНОЙ по времени точки, даже для
             // уже заспавненной сущности. Пока торговец реально идёт (тем более
-            // теперь, с lookahead-целью — см. LOOKAHEAD_MS), его физическая
+            // теперь, с lookahead-целью — см. LOOKAHEAD_DISTANCE_BLOCKS), его физическая
             // позиция закономерно отстаёт от идеальной, и это расхождение
             // растёт. Если оно превышало VISIBILITY_RADIUS_BLOCKS, планировщик
             // решал "игрока рядом нет" и удалял сущность, СТОЯЩУЮ буквально
@@ -226,6 +234,7 @@ public final class PhantomDeliveryController implements Listener {
                     completeDelivery(world, trade, existing);
                     spawned.remove(trade.id());
                     lastSeenLoc.remove(trade.id());
+                    lastSeenDistToDest.remove(trade.id());
                     stuckTicks.remove(trade.id());
                     continue;
                 }
@@ -236,6 +245,7 @@ public final class PhantomDeliveryController implements Listener {
                     existing.remove();
                     spawned.remove(trade.id());
                     lastSeenLoc.remove(trade.id());
+                    lastSeenDistToDest.remove(trade.id());
                     stuckTicks.remove(trade.id());
                 } else if (existing instanceof Mob mob) {
                     progressOrCorrect(world, trade, mob, target);
@@ -265,6 +275,7 @@ public final class PhantomDeliveryController implements Listener {
             debug(shortId(e.getKey()) + ": заказ больше не в активном списке сайта — убираю " + (leftover != null ? "живую сущность в " + fmtLoc(leftover.getLocation()) : "(сущности уже не было)"));
             if (leftover != null) leftover.remove();
             lastSeenLoc.remove(e.getKey());
+            lastSeenDistToDest.remove(e.getKey());
             stuckTicks.remove(e.getKey());
             return true;
         });
@@ -278,22 +289,49 @@ public final class PhantomDeliveryController implements Listener {
     }
 
     /**
-     * GH#36 (2026-08-28, второй раунд) — ведёт сущность к точке с запасом
-     * на несколько секунд вперёд по маршруту (не к "ровно сейчас"), реже
-     * дёргая pathfinder — это осталось от первой версии фикса и по отзыву
-     * реально помогло ("в разы лучше"). Коррекция телепортом убрана (см.
-     * комментарий у STUCK_TICKS_LIMIT) — застревание теперь только честно
-     * показывается ближайшим игрокам (notifyDelayed), торговец никуда не
-     * прыгает сам.
+     * GH#36 (2026-08-28, четвёртый раунд) — НАСТОЯЩАЯ причина оставшейся
+     * "телепортации", найденная по логам (debug-диагностика третьего
+     * раунда): цель для pathfinder'а бралась как "где торговец ДОЛЖЕН
+     * быть через LOOKAHEAD_MS по времени от старта заказа" — если он хоть
+     * немного отстаёт (уткнулся в препятствие), такая цель убегает от
+     * него быстрее, чем он успевает её догнать, и отставание растёт БЕЗ
+     * ОГРАНИЧЕНИЙ. В реальном логе разрыв дошёл до ~60 блоков за 20 секунд
+     * — торговец физически топтался на месте (мелкие шевеления ~1-5
+     * блоков за тик обходили старый порог "застревания"), а к моменту
+     * arrived=true (по времени) стоял в 60 блоках от места назначения.
+     * Судя по всему, это и объясняет "два торговца телепортировались в
+     * одной точке" — оба маршрута, скорее всего, упёрлись в один и тот же
+     * рельеф, а не общий баг состояния между заказами.
+     *
+     * Цель теперь — фиксированное расстояние (LOOKAHEAD_DISTANCE_BLOCKS)
+     * вперёд по направлению источник->назначение от РЕАЛЬНОЙ текущей
+     * позиции торговца (computeWalkTarget), не от идеальной по времени —
+     * всегда достижимая точка, отставание больше не может накапливаться
+     * бесконечно. Итоговое время доставки как считалось по etaAtMs на
+     * сайте, так и считается — эта цель влияет только на то, КАК торговец
+     * физически идёт, не на то, когда заказ формально завершится.
      */
     private void progressOrCorrect(World world, FarLandsApiClient.PhantomTrade trade, Mob mob, Location idealNow) {
         Location current = mob.getLocation();
-        Location lastSeen = lastSeenLoc.get(trade.id());
-        double movedSince = (lastSeen != null && lastSeen.getWorld() == current.getWorld()) ? lastSeen.distance(current) : -1;
-        if (lastSeen != null && lastSeen.getWorld() == current.getWorld()
-                && lastSeen.distance(current) < STUCK_THRESHOLD_BLOCKS) {
+
+        // GH#36 (четвёртый раунд) — БАГ старой версии: застревание мерилось
+        // сырым перемещением "за последний тик", но по логам торговец,
+        // физически упёршийся в препятствие, всё равно каждый тик слегка
+        // топтался (~1-5 блоков дёрганья/коррекции пути) — это маскировало
+        // отсутствие реального прогресса. Теперь меряем расстояние по
+        // прямой до НАЗНАЧЕНИЯ (не до соседней лукахед-точки) — застревание
+        // это когда оно не сокращается несколько тиков подряд, даже если
+        // сама сущность немного шевелится на месте.
+        double dx = trade.destX() - current.getX();
+        double dz = trade.destZ() - current.getZ();
+        double distToDest = Math.sqrt(dx * dx + dz * dz);
+        Double lastDist = lastSeenDistToDest.get(trade.id());
+        double progressed = lastDist != null ? lastDist - distToDest : Double.MAX_VALUE;
+
+        if (progressed < STUCK_PROGRESS_THRESHOLD_BLOCKS) {
             int stuck = stuckTicks.merge(trade.id(), 1, Integer::sum);
-            debug(shortId(trade.id()) + ": застревание, счётчик=" + stuck + "/" + STUCK_TICKS_LIMIT + " (сдвинулся на " + movedSince + " за тик)");
+            debug(shortId(trade.id()) + ": застревание, счётчик=" + stuck + "/" + STUCK_TICKS_LIMIT
+                    + " (прогресс к цели за тик: " + String.format(Locale.ROOT, "%.2f", progressed) + " блоков)");
             if (stuck >= STUCK_TICKS_LIMIT) {
                 debug(shortId(trade.id()) + ": уведомляю игроков о задержке (телепорта НЕТ, только сообщение)");
                 notifyDelayed(world, idealNow);
@@ -302,12 +340,34 @@ public final class PhantomDeliveryController implements Listener {
         } else {
             stuckTicks.remove(trade.id());
         }
+        lastSeenDistToDest.put(trade.id(), distToDest);
         lastSeenLoc.put(trade.id(), current);
 
-        Location lookahead = computePositionAt(world, trade, System.currentTimeMillis() + LOOKAHEAD_MS);
-        debug(shortId(trade.id()) + ": moveTo lookahead=" + fmtLoc(lookahead) + " (сдвинулся с прошлого тика на "
-                + (movedSince >= 0 ? String.format(Locale.ROOT, "%.1f", movedSince) : "n/a") + ")");
-        mob.getPathfinder().moveTo(lookahead, WALK_SPEED);
+        Location walkTarget = computeWalkTarget(world, trade, current);
+        debug(shortId(trade.id()) + ": moveTo walkTarget=" + fmtLoc(walkTarget) + " (осталось до назначения по прямой: "
+                + String.format(Locale.ROOT, "%.1f", distToDest) + " блоков)");
+        mob.getPathfinder().moveTo(walkTarget, WALK_SPEED);
+    }
+
+    /** См. комментарий у progressOrCorrect — точка на фиксированном расстоянии вперёд по маршруту от РЕАЛЬНОЙ позиции, не от идеальной по времени. */
+    private Location computeWalkTarget(World world, FarLandsApiClient.PhantomTrade trade, Location currentPos) {
+        double dx = trade.destX() - trade.sourceX();
+        double dz = trade.destZ() - trade.sourceZ();
+        double routeLen = Math.sqrt(dx * dx + dz * dz);
+        if (routeLen < 0.01) return destinationLocation(world, trade);
+
+        double ux = dx / routeLen;
+        double uz = dz / routeLen;
+
+        double remainingX = trade.destX() - currentPos.getX();
+        double remainingZ = trade.destZ() - currentPos.getZ();
+        double remaining = Math.sqrt(remainingX * remainingX + remainingZ * remainingZ);
+        double step = Math.min(LOOKAHEAD_DISTANCE_BLOCKS, remaining);
+
+        double aheadX = currentPos.getX() + ux * step;
+        double aheadZ = currentPos.getZ() + uz * step;
+        int groundY = world.getHighestBlockYAt((int) Math.floor(aheadX), (int) Math.floor(aheadZ));
+        return new Location(world, aheadX, groundY + 1, aheadZ);
     }
 
     /** GH#36 (2026-08-28, второй раунд) — честно, вместо телепорта: игрокам рядом с точкой, где торговец должен быть, видно, что он задерживается. */
@@ -553,6 +613,7 @@ public final class PhantomDeliveryController implements Listener {
 
         spawned.put(trade.id(), mob.getUniqueId());
         lastSeenLoc.put(trade.id(), at);
+        lastSeenDistToDest.remove(trade.id());
         stuckTicks.remove(trade.id());
     }
 
@@ -598,6 +659,7 @@ public final class PhantomDeliveryController implements Listener {
         // предмете и сработает, когда предмет реально появится в мире.
         spawned.remove(tradeId);
         lastSeenLoc.remove(tradeId);
+        lastSeenDistToDest.remove(tradeId);
         stuckTicks.remove(tradeId);
     }
 
