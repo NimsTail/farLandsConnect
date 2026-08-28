@@ -130,6 +130,31 @@ public final class PhantomDeliveryController implements Listener {
     // Дальше этого радиуса от любого игрока сущность не спавнится/деспавнится.
     private static final double VISIBILITY_RADIUS_BLOCKS = 48.0;
 
+    // GH#36 (2026-08-28, четвёртый раунд) — пользователь всё ещё видит
+    // телепортацию (двух торговцев сразу, в одной точке) даже после фикса
+    // "мерить от реальной позиции" третьего раунда — временная подробная
+    // диагностика по его же просьбе, вместо очередной догадки вслепую.
+    // Пишет в лог сервера каждое решение планировщика по каждому активному
+    // заказу — spawn/despawn (с причиной и координатами), дрейф реальной
+    // позиции от идеальной, срабатывания notifyDelayed, завершение доставки.
+    // Убрать (или выключить DEBUG=false) после того, как причина найдена —
+    // на каждый тик планировщика (раз в секунду) на каждый активный заказ,
+    // может быть многословно при нескольких одновременных доставках.
+    private static final boolean DEBUG = true;
+
+    private void debug(String msg) {
+        if (DEBUG) plugin.getLogger().info("[PhantomDelivery][DEBUG] " + msg);
+    }
+
+    private static String shortId(String tradeId) {
+        return tradeId == null ? "null" : tradeId.length() <= 8 ? tradeId : tradeId.substring(0, 8);
+    }
+
+    private static String fmtLoc(Location loc) {
+        if (loc == null) return "null";
+        return String.format(Locale.ROOT, "(%.1f, %.1f, %.1f)", loc.getX(), loc.getY(), loc.getZ());
+    }
+
     public PhantomDeliveryController(UnityLauncher plugin, FarLandsApiClient api) {
         this.plugin = plugin;
         this.api = api;
@@ -156,6 +181,9 @@ public final class PhantomDeliveryController implements Listener {
         if (world == null) return;
 
         Set<String> activeIds = new HashSet<>();
+        if (DEBUG && !trades.isEmpty()) {
+            debug("=== тик, активных заказов: " + trades.size() + " ===");
+        }
         for (FarLandsApiClient.PhantomTrade trade : trades) {
             activeIds.add(trade.id());
 
@@ -178,6 +206,15 @@ public final class PhantomDeliveryController implements Listener {
             UUID entityId = spawned.get(trade.id());
             Entity existing = entityId != null ? Bukkit.getEntity(entityId) : null;
 
+            if (DEBUG) {
+                double distEntityToTarget = existing != null ? existing.getLocation().distance(target) : -1;
+                debug(shortId(trade.id()) + ": target=" + fmtLoc(target) + " arrived=" + arrived
+                        + " entityId=" + (entityId == null ? "none" : entityId.toString().substring(0, 8))
+                        + " entityValid=" + (existing != null && existing.isValid())
+                        + " entityLoc=" + (existing != null ? fmtLoc(existing.getLocation()) : "n/a")
+                        + " |entity-target|=" + (distEntityToTarget >= 0 ? String.format(Locale.ROOT, "%.1f", distEntityToTarget) : "n/a"));
+            }
+
             if (existing != null && existing.isValid()) {
                 // GH#36 п.4 — доехал до места назначения: выдаём груз (в
                 // сундук, если он там есть, иначе роняем на месте — тем же
@@ -185,13 +222,17 @@ public final class PhantomDeliveryController implements Listener {
                 // существующие onItemPickup/onItemDespawn) и закрываем заказ,
                 // вместо того чтобы торговец просто стоял истуканом.
                 if (arrived) {
+                    debug(shortId(trade.id()) + ": ПРИБЫЛ, завершаю доставку (была реальная сущность в " + fmtLoc(existing.getLocation()) + ")");
                     completeDelivery(world, trade, existing);
                     spawned.remove(trade.id());
                     lastSeenLoc.remove(trade.id());
                     stuckTicks.remove(trade.id());
                     continue;
                 }
-                if (!isAnyPlayerNear(world, existing.getLocation())) {
+                boolean nearReal = isAnyPlayerNear(world, existing.getLocation());
+                if (!nearReal) {
+                    debug(shortId(trade.id()) + ": ДЕСПАВН — ни одного игрока в радиусе " + VISIBILITY_RADIUS_BLOCKS
+                            + " от РЕАЛЬНОЙ позиции сущности " + fmtLoc(existing.getLocation()));
                     existing.remove();
                     spawned.remove(trade.id());
                     lastSeenLoc.remove(trade.id());
@@ -205,9 +246,11 @@ public final class PhantomDeliveryController implements Listener {
                     // игрок наконец оказался рядом, маршрут уже пройден по
                     // времени — не спавним истукана специально чтобы тут же
                     // его убрать, просто сразу завершаем доставку.
+                    debug(shortId(trade.id()) + ": ПРИБЫЛ ещё до первого спавна (никто не видел всю дорогу), завершаю без спавна");
                     completeDelivery(world, trade, null);
                     continue;
                 }
+                debug(shortId(trade.id()) + ": СПАВН у " + fmtLoc(target));
                 spawnTrader(world, trade, target);
             }
         }
@@ -219,6 +262,7 @@ public final class PhantomDeliveryController implements Listener {
         spawned.entrySet().removeIf(e -> {
             if (activeIds.contains(e.getKey())) return false;
             Entity leftover = Bukkit.getEntity(e.getValue());
+            debug(shortId(e.getKey()) + ": заказ больше не в активном списке сайта — убираю " + (leftover != null ? "живую сущность в " + fmtLoc(leftover.getLocation()) : "(сущности уже не было)"));
             if (leftover != null) leftover.remove();
             lastSeenLoc.remove(e.getKey());
             stuckTicks.remove(e.getKey());
@@ -245,10 +289,13 @@ public final class PhantomDeliveryController implements Listener {
     private void progressOrCorrect(World world, FarLandsApiClient.PhantomTrade trade, Mob mob, Location idealNow) {
         Location current = mob.getLocation();
         Location lastSeen = lastSeenLoc.get(trade.id());
+        double movedSince = (lastSeen != null && lastSeen.getWorld() == current.getWorld()) ? lastSeen.distance(current) : -1;
         if (lastSeen != null && lastSeen.getWorld() == current.getWorld()
                 && lastSeen.distance(current) < STUCK_THRESHOLD_BLOCKS) {
             int stuck = stuckTicks.merge(trade.id(), 1, Integer::sum);
+            debug(shortId(trade.id()) + ": застревание, счётчик=" + stuck + "/" + STUCK_TICKS_LIMIT + " (сдвинулся на " + movedSince + " за тик)");
             if (stuck >= STUCK_TICKS_LIMIT) {
+                debug(shortId(trade.id()) + ": уведомляю игроков о задержке (телепорта НЕТ, только сообщение)");
                 notifyDelayed(world, idealNow);
                 stuckTicks.put(trade.id(), 0); // не спамим — снова покажем через ещё STUCK_TICKS_LIMIT тиков без прогресса
             }
@@ -258,6 +305,8 @@ public final class PhantomDeliveryController implements Listener {
         lastSeenLoc.put(trade.id(), current);
 
         Location lookahead = computePositionAt(world, trade, System.currentTimeMillis() + LOOKAHEAD_MS);
+        debug(shortId(trade.id()) + ": moveTo lookahead=" + fmtLoc(lookahead) + " (сдвинулся с прошлого тика на "
+                + (movedSince >= 0 ? String.format(Locale.ROOT, "%.1f", movedSince) : "n/a") + ")");
         mob.getPathfinder().moveTo(lookahead, WALK_SPEED);
     }
 
@@ -285,6 +334,7 @@ public final class PhantomDeliveryController implements Listener {
      */
     private void completeDelivery(World world, FarLandsApiClient.PhantomTrade trade, Entity traderEntity) {
         if (!completedTrades.add(trade.id())) {
+            debug(shortId(trade.id()) + ": completeDelivery — уже выполнено раньше, пропускаю повтор (сайт ещё не убрал заказ из активных)");
             // Уже выполнено раньше в этом же процессе — сайт просто ещё не
             // успел убрать заказ из активных (см. комментарий у
             // completedTrades выше). Товар второй раз не выдаём, сущность
@@ -295,6 +345,7 @@ public final class PhantomDeliveryController implements Listener {
 
         Material material = resolveMaterial(trade);
         int amount = material != null ? clampToStack(trade.quantity(), material) : 0;
+        debug(shortId(trade.id()) + ": completeDelivery — material=" + material + " amount=" + amount);
 
         // GH#36 п.3 (дыра в первой версии этого же фикса) — если торговца
         // вообще ни разу не видели за весь путь (игрок оказался рядом уже
@@ -308,6 +359,8 @@ public final class PhantomDeliveryController implements Listener {
 
         Location dest = destinationLocation(world, trade);
         Container container = findContainerNear(dest, DEST_CONTAINER_SEARCH_RADIUS);
+        debug(shortId(trade.id()) + ": назначение=" + fmtLoc(dest) + " контейнер="
+                + (container == null ? "НЕ найден (роняю на землю)" : "найден в " + fmtLoc(container.getInventory().getLocation())));
 
         if (traderEntity != null) traderEntity.remove();
 
