@@ -54,6 +54,16 @@ import java.util.concurrent.ConcurrentHashMap;
  * 4. Доставка не завершалась по прибытии.
  * 5. С торговцем можно было торговать.
  * См. комментарии по месту ниже — каждый пункт закрыт отдельно.
+ *
+ * GH#36 (2026-08-28, второй раунд, "в разы лучше!" + два новых бага) —
+ * две правки поверх первого раунда:
+ * A. Телепорт-коррекция при застревании убрана — иногда телепортировала
+ *    торговца в непригодное место (вода без дна и т.п.), и он "испарялся"
+ *    навсегда. Заменена на честное сообщение игрокам рядом (notifyDelayed).
+ * B. Дюп предметов: completeDelivery могла сработать несколько раз подряд
+ *    для одного заказа, пока асинхронный вебхук "доставлено" долетал до
+ *    сайта — каждый повторный тик клал/ронял товар заново. completedTrades
+ *    гарантирует ровно одно исполнение за жизнь процесса.
  */
 public final class PhantomDeliveryController implements Listener {
 
@@ -77,11 +87,29 @@ public final class PhantomDeliveryController implements Listener {
     // поведения "то ли выдали, то ли нет").
     private final Set<String> pickedUpFromSource = ConcurrentHashMap.newKeySet();
 
-    // GH#36 п.1-2 — если сущность не сдвинулась заметно за несколько тиков
-    // подряд, хотя маршрут ещё не пройден (упёрлась в тупик, провалилась
-    // под текстуры, застряла в листве и т.п.) — принудительно
-    // телепортируем на актуальную идеальную точку вместо того, чтобы
-    // оставить её вязнуть или пропадать без следа.
+    // GH#36 (2026-08-28, второй раунд) — БАГ: reportPhantomDelivered — это
+    // fire-and-forget POST (см. FarLandsApiClient.send), сайт помечает заказ
+    // не-IN_TRANSIT не мгновенно. Пока webhook долетает и обрабатывается,
+    // api.fetchPhantomActiveTrades() продолжает возвращать этот же заказ ещё
+    // несколько тиков планировщика (раз в секунду) — без этой защёлки
+    // completeDelivery срабатывала повторно КАЖДУЮ секунду, пока сайт не
+    // догонит, и товар клался в сундук назначения (или ронялся) заново на
+    // каждый такой тик — дюп. Один tradeId — ровно одно исполнение эффектов
+    // (выдача товара + вебхук) за жизнь процесса плагина.
+    private final Set<String> completedTrades = ConcurrentHashMap.newKeySet();
+
+    // GH#36 (2026-08-28, второй раунд) — БАГ первой версии этого же фикса:
+    // если сущность не двигалась несколько тиков подряд, код телепортировал
+    // её на "идеальную" по времени точку — и торговец иногда буквально
+    // испарялся навсегда. Идеальная точка — просто снаппинг к самому
+    // верхнему блоку под X/Z, без всякой проверки на пригодность (вода без
+    // дна под ней, обрыв и т.п.) — телепорт мог закинуть его в дыру, откуда
+    // либо не выбраться, либо он тонул/погибал вне поля зрения игрока. Сам
+    // пользователь верно диагностировал причину: "если опаздывает —
+    // телепортируется" — по его просьбе телепорт убран целиком. Вместо
+    // магической коррекции — честное сообщение игрокам рядом, что курьер
+    // задерживается (см. notifyDelayed ниже), торговец просто продолжает
+    // идти сам, как может.
     private final Map<String, Location> lastSeenLoc = new ConcurrentHashMap<>();
     private final Map<String, Integer> stuckTicks = new ConcurrentHashMap<>();
     private static final double STUCK_THRESHOLD_BLOCKS = 0.4;
@@ -190,20 +218,23 @@ public final class PhantomDeliveryController implements Listener {
             stuckTicks.remove(e.getKey());
             return true;
         });
-        // pickedUpFromSource переживает даже заказы, которых не было в
-        // spawned вовсе (доставлены с первого тика, торговца никто не
-        // видел — см. completeDelivery(..., null)) — чистим по activeIds
-        // отдельно, иначе эти записи никогда бы не убрались.
+        // pickedUpFromSource/completedTrades переживают даже заказы,
+        // которых не было в spawned вовсе (доставлены с первого тика,
+        // торговца никто не видел — см. completeDelivery(..., null)) —
+        // чистим по activeIds отдельно, иначе эти записи никогда бы не
+        // убрались.
         pickedUpFromSource.removeIf(id -> !activeIds.contains(id));
+        completedTrades.removeIf(id -> !activeIds.contains(id));
     }
 
     /**
-     * GH#36 п.1-2 — ведёт сущность к точке с запасом на несколько секунд
-     * вперёд по маршруту (не к "ровно сейчас"), реже дёргая pathfinder, и
-     * следит за фактическим прогрессом: если сущность несколько тиков подряд
-     * не сдвинулась заметно (упёрлась в препятствие, провалилась и т.п.) —
-     * жёстко телепортирует её на актуальную идеальную точку, гарантируя, что
-     * доставка не зависнет и не потеряется навсегда.
+     * GH#36 (2026-08-28, второй раунд) — ведёт сущность к точке с запасом
+     * на несколько секунд вперёд по маршруту (не к "ровно сейчас"), реже
+     * дёргая pathfinder — это осталось от первой версии фикса и по отзыву
+     * реально помогло ("в разы лучше"). Коррекция телепортом убрана (см.
+     * комментарий у STUCK_TICKS_LIMIT) — застревание теперь только честно
+     * показывается ближайшим игрокам (notifyDelayed), торговец никуда не
+     * прыгает сам.
      */
     private void progressOrCorrect(World world, FarLandsApiClient.PhantomTrade trade, Mob mob, Location idealNow) {
         Location current = mob.getLocation();
@@ -212,10 +243,8 @@ public final class PhantomDeliveryController implements Listener {
                 && lastSeen.distance(current) < STUCK_THRESHOLD_BLOCKS) {
             int stuck = stuckTicks.merge(trade.id(), 1, Integer::sum);
             if (stuck >= STUCK_TICKS_LIMIT) {
-                mob.teleport(idealNow);
-                stuckTicks.remove(trade.id());
-                lastSeenLoc.put(trade.id(), idealNow);
-                return;
+                notifyDelayed(world, idealNow);
+                stuckTicks.put(trade.id(), 0); // не спамим — снова покажем через ещё STUCK_TICKS_LIMIT тиков без прогресса
             }
         } else {
             stuckTicks.remove(trade.id());
@@ -224,6 +253,16 @@ public final class PhantomDeliveryController implements Listener {
 
         Location lookahead = computePositionAt(world, trade, System.currentTimeMillis() + LOOKAHEAD_MS);
         mob.getPathfinder().moveTo(lookahead, WALK_SPEED);
+    }
+
+    /** GH#36 (2026-08-28, второй раунд) — честно, вместо телепорта: игрокам рядом с точкой, где торговец должен быть, видно, что он задерживается. */
+    private void notifyDelayed(World world, Location near) {
+        String msg = org.bukkit.ChatColor.GOLD + "🐌 Курьер с доставкой немного задерживается в пути…";
+        for (Player p : world.getPlayers()) {
+            if (p.getLocation().distanceSquared(near) <= VISIBILITY_RADIUS_BLOCKS * VISIBILITY_RADIUS_BLOCKS) {
+                p.spigot().sendMessage(net.md_5.bungee.api.ChatMessageType.ACTION_BAR, new net.md_5.bungee.api.chat.TextComponent(msg));
+            }
+        }
     }
 
     /**
@@ -239,6 +278,15 @@ public final class PhantomDeliveryController implements Listener {
      * груза покупателем — с точки зрения сайта это тот же самый исход).
      */
     private void completeDelivery(World world, FarLandsApiClient.PhantomTrade trade, Entity traderEntity) {
+        if (!completedTrades.add(trade.id())) {
+            // Уже выполнено раньше в этом же процессе — сайт просто ещё не
+            // успел убрать заказ из активных (см. комментарий у
+            // completedTrades выше). Товар второй раз не выдаём, сущность
+            // на всякий случай всё равно убираем, если она ещё жива.
+            if (traderEntity != null) traderEntity.remove();
+            return;
+        }
+
         Material material = resolveMaterial(trade);
         int amount = material != null ? clampToStack(trade.quantity(), material) : 0;
 
