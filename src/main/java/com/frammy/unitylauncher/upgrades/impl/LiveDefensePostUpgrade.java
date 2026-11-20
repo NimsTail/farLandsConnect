@@ -308,7 +308,7 @@ public final class LiveDefensePostUpgrade extends BaseUpgrade implements Listene
 
             // GH#30 (раунд 4, п.13) — состав пачки нужен уже здесь: кулдаун
             // зависит от её "мощности", не только от cfg/апгрейда.
-            int gearLevel = UpgradeCondition.countryMaxLevel(canonicalCountry, GEAR_PERM_BASE, GEAR_AT_LEAST_ONE_CHANCE.length - 1);
+            int gearLevel = UpgradeCondition.countryMaxLevel(canonicalCountry, GEAR_PERM_BASE, GEAR_SLOT1_CHANCE.length - 1);
             List<MobSpec> mobs = resolveActivePack(canonicalCountry);
             if (mobs == null) {
                 // Ничего не выбрано (узел не куплен вообще, или куплен но
