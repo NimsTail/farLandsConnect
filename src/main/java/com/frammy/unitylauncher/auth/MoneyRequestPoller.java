@@ -57,6 +57,8 @@ public class MoneyRequestPoller {
                 case "daydeal_status" -> processDaydealStatus(req);
                 case "country_treasury_deposit" -> processTreasuryDeposit(req);
                 case "country_treasury_withdraw" -> processTreasuryWithdraw(req);
+                case "site_charge" -> processSiteCharge(req);
+                case "site_credit" -> processSiteCredit(req);
                 default -> api.reportMoneyRequestResult(req.id(), false, "unknown_kind");
             }
         } catch (Exception e) {
@@ -215,6 +217,38 @@ public class MoneyRequestPoller {
             return;
         }
         boolean credited = UnityCommands.getInstance().applyMoneyDelta(req.toUsername(), req.amount(), "Снятие из казны страны");
+        api.reportMoneyRequestResult(req.id(), credited, credited ? null : "user_not_found");
+    }
+
+    /**
+     * Payment for something bought on the site itself (player upgrades,
+     * frames, founding a country): a pure sink, nobody in-game receives it.
+     * The site records its own ledger row (upgrade_purchase, frame_purchase,
+     * country_create — note says what), so the debit is silent (mirror=false).
+     * Before this kind existed the site only lowered its local balance mirror
+     * and the next balance_sync restored the real balance: those purchases
+     * were free (farlandsconnect review C3).
+     */
+    private void processSiteCharge(FarLandsApiClient.PendingMoneyRequest req) {
+        if (req.fromUsername() == null || !(req.amount() > 0)) {
+            api.reportMoneyRequestResult(req.id(), false, "missing_username");
+            return;
+        }
+        boolean debited = UnityCommands.getInstance().applyMoneyDelta(req.fromUsername(), -req.amount(), null, false);
+        api.reportMoneyRequestResult(req.id(), debited, debited ? null : "insufficient_funds");
+    }
+
+    /**
+     * Money the site pays out to a player (e.g. the partial refund for
+     * downgrading an upgrade): a pure source, silent for the same reason as
+     * site_charge — the site writes its own ledger row.
+     */
+    private void processSiteCredit(FarLandsApiClient.PendingMoneyRequest req) {
+        if (req.toUsername() == null || !(req.amount() > 0)) {
+            api.reportMoneyRequestResult(req.id(), false, "missing_username");
+            return;
+        }
+        boolean credited = UnityCommands.getInstance().applyMoneyDelta(req.toUsername(), req.amount(), null, false);
         api.reportMoneyRequestResult(req.id(), credited, credited ? null : "user_not_found");
     }
 }
