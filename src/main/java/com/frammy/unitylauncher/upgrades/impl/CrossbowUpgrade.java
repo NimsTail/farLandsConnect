@@ -87,7 +87,7 @@ public final class CrossbowUpgrade extends BaseUpgrade implements Listener {
     // выбора страной); 2: три слота (FULL_EFFECT_POOL, тоже фоллбек).
     private static final List<PotionEffectType> WEAK_EFFECT_POOL = List.of(PotionEffectType.SLOWNESS);
     private static final List<PotionEffectType> FULL_EFFECT_POOL =
-            List.of(PotionEffectType.SLOWNESS, PotionEffectType.WEAKNESS, PotionEffectType.NAUSEA);
+            List.of(PotionEffectType.SLOWNESS, PotionEffectType.WEAKNESS, PotionEffectType.DARKNESS);
     private static final int EFFECT_DURATION_TICKS = 20 * 4;
 
     // Фидбек 2026-08-14 (раунд 2) — "я как раз таки и подразумевал пикер
