@@ -14,6 +14,13 @@ public final class LoginRateLimiter {
     }
 
     private final Map<String, State> map = new ConcurrentHashMap<>();
+    /** Players with an async password check running (/login, /register, /ul change). Main thread only. */
+    private final java.util.Set<java.util.UUID> inFlight = new java.util.HashSet<>();
+
+    /** false = a check for this player is already running; otherwise call {@link #endCheck} when it's done. */
+    public boolean tryBeginCheck(java.util.UUID id) { return inFlight.add(id); }
+
+    public void endCheck(java.util.UUID id) { inFlight.remove(id); }
 
     /** @return 0 если можно, иначе — оставшиеся секунды блокировки (округлённые вверх). */
     public long checkAllowed(String key) {
