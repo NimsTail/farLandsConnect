@@ -58,6 +58,7 @@ public class ZoneWebRequestService {
 
     private List<ZoneWebRequest> fetchPending() {
         List<ZoneWebRequest> out = new ArrayList<>();
+        List<Long> badIds = new ArrayList<>();
         final String sql = """
             SELECT id, player_uuid, action, marker_id, zone_type, zone_name, world_name, payload_json
             FROM zone_requests
@@ -74,16 +75,23 @@ public class ZoneWebRequestService {
                 ps.setInt(1, BATCH_LIMIT);
                 try (ResultSet rs = ps.executeQuery()) {
                     while (rs.next()) {
-                        out.add(new ZoneWebRequest(
-                                rs.getLong("id"),
-                                UUID.fromString(rs.getString("player_uuid")),
-                                Action.valueOf(rs.getString("action")),
-                                rs.getString("marker_id"),
-                                rs.getString("zone_type"),
-                                rs.getString("zone_name"),
-                                rs.getString("world_name"),
-                                GSON.fromJson(rs.getString("payload_json"), JsonObject.class)
-                        ));
+                        long id = rs.getLong("id");
+                        // одна битая строка (неизвестный action, кривой uuid/json) не должна валить всю пачку
+                        try {
+                            out.add(new ZoneWebRequest(
+                                    id,
+                                    UUID.fromString(rs.getString("player_uuid")),
+                                    Action.valueOf(rs.getString("action")),
+                                    rs.getString("marker_id"),
+                                    rs.getString("zone_type"),
+                                    rs.getString("zone_name"),
+                                    rs.getString("world_name"),
+                                    GSON.fromJson(rs.getString("payload_json"), JsonObject.class)
+                            ));
+                        } catch (Exception badRow) {
+                            Bukkit.getLogger().warning("[ZoneWebRequestService] bad request row " + id + ": " + badRow);
+                            badIds.add(id);
+                        }
                     }
                 }
             }
@@ -92,6 +100,8 @@ public class ZoneWebRequestService {
         } catch (Throwable t) {
             Bukkit.getLogger().severe("[ZoneWebRequestService] fetchPending error: " + t);
         }
+        // уже на async-потоке; ERROR, чтобы строку не перечитывали каждые 5 с
+        for (long id : badIds) writeResult(id, ZoneWebRequestHandler.Result.error("bad_request_row"));
         return out;
     }
 
