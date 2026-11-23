@@ -6,7 +6,7 @@ public final class PasswordPolicy {
     private PasswordPolicy() {}
 
     // Настройки — можешь подправить
-    public static final int MIN_LEN = 7;
+    public static final int MIN_LEN = 8; // как isValidPassword на сайте (backend lib/validation.ts)
     public static final int MAX_LEN = 128;
     public static final int MAX_BYTES = 512; // safety на PBKDF2
 

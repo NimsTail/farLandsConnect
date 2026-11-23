@@ -45,8 +45,18 @@ public class MoneyRequestPoller {
         }
     }
 
+    /** Kinds that actually move money: amount (and debitAmount, if sent) must be a positive number. */
+    private static final java.util.Set<String> MONEY_KINDS = java.util.Set.of(
+            "transfer", "purchase", "invoice_pay", "salary_claim",
+            "country_treasury_deposit", "country_treasury_withdraw", "site_charge", "site_credit");
+
     private void process(FarLandsApiClient.PendingMoneyRequest req) {
         try {
+            if (MONEY_KINDS.contains(req.kind())
+                    && (!(req.amount() > 0) || (req.debitAmount() != null && !(req.debitAmount() > 0)))) {
+                api.reportMoneyRequestResult(req.id(), false, "invalid_amount");
+                return;
+            }
             switch (req.kind()) {
                 case "transfer" -> processTransfer(req);
                 case "purchase" -> processPurchase(req);
@@ -94,17 +104,9 @@ public class MoneyRequestPoller {
         }
         double debit = req.debitAmount() != null ? req.debitAmount() : req.amount();
 
-        UnityCommands cmds = UnityCommands.getInstance();
-        if (!cmds.applyMoneyDelta(req.fromUsername(), -debit, "Перевод игроку " + req.toUsername())) {
-            api.reportMoneyRequestResult(req.id(), false, "insufficient_funds");
-            return;
-        }
-        if (!cmds.applyMoneyDelta(req.toUsername(), req.amount(), "Перевод от " + req.fromUsername())) {
-            cmds.applyMoneyDelta(req.fromUsername(), debit, "Возврат: перевод игроку " + req.toUsername() + " не прошёл"); // best-effort refund
-            api.reportMoneyRequestResult(req.id(), false, "recipient_not_found");
-            return;
-        }
-        api.reportMoneyRequestResult(req.id(), true, null);
+        String err = UnityCommands.getInstance().transferMoney(req.fromUsername(), req.toUsername(), debit, req.amount(),
+                "Перевод игроку " + req.toUsername(), "Перевод от " + req.fromUsername(), true);
+        api.reportMoneyRequestResult(req.id(), err == null, err);
     }
 
     /**
@@ -122,17 +124,9 @@ public class MoneyRequestPoller {
         }
         double debit = req.debitAmount() != null ? req.debitAmount() : req.amount();
 
-        UnityCommands cmds = UnityCommands.getInstance();
-        if (!cmds.applyMoneyDelta(req.fromUsername(), -debit, null, false)) {
-            api.reportMoneyRequestResult(req.id(), false, "insufficient_funds");
-            return;
-        }
-        if (!cmds.applyMoneyDelta(req.toUsername(), req.amount(), null, false)) {
-            cmds.applyMoneyDelta(req.fromUsername(), debit, null, false); // best-effort refund
-            api.reportMoneyRequestResult(req.id(), false, "recipient_not_found");
-            return;
-        }
-        api.reportMoneyRequestResult(req.id(), true, null);
+        String err = UnityCommands.getInstance().transferMoney(req.fromUsername(), req.toUsername(), debit, req.amount(),
+                null, null, false);
+        api.reportMoneyRequestResult(req.id(), err == null, err);
     }
 
     private void processInvoicePay(FarLandsApiClient.PendingMoneyRequest req) {
@@ -149,18 +143,15 @@ public class MoneyRequestPoller {
 
         UnityCommands cmds = UnityCommands.getInstance();
         String payee = req.toUsername();
-        String payDesc = payee != null ? ("Оплата счёта игроку " + payee) : "Оплата счёта";
-        if (!cmds.applyMoneyDelta(req.fromUsername(), -debit, payDesc)) {
-            api.reportMoneyRequestResult(req.id(), false, "insufficient_funds");
-            return;
-        }
         // Server-issued invoices have no payee — the payer's debit is a pure sink.
-        if (payee != null && !cmds.applyMoneyDelta(payee, req.amount(), "Оплата счёта от " + req.fromUsername())) {
-            cmds.applyMoneyDelta(req.fromUsername(), debit, "Возврат: счёт не оплачен"); // best-effort refund
-            api.reportMoneyRequestResult(req.id(), false, "payee_not_found");
+        if (payee == null) {
+            boolean ok = cmds.applyMoneyDelta(req.fromUsername(), -debit, "Оплата счёта");
+            api.reportMoneyRequestResult(req.id(), ok, ok ? null : "insufficient_funds");
             return;
         }
-        api.reportMoneyRequestResult(req.id(), true, null);
+        String err = cmds.transferMoney(req.fromUsername(), payee, debit, req.amount(),
+                "Оплата счёта игроку " + payee, "Оплата счёта от " + req.fromUsername(), true);
+        api.reportMoneyRequestResult(req.id(), err == null, "recipient_not_found".equals(err) ? "payee_not_found" : err);
     }
 
     /** Read-only — no debit/credit, just reports the real current balance so the site can reconcile. */
@@ -200,7 +191,7 @@ public class MoneyRequestPoller {
             api.reportMoneyRequestResult(req.id(), false, "missing_username");
             return;
         }
-        boolean debited = UnityCommands.getInstance().applyMoneyDelta(req.fromUsername(), -req.amount(), "Пополнение казны страны");
+        boolean debited = UnityCommands.getInstance().applyMoneyDelta(req.fromUsername(), -req.amount(), null, false); // silent: routes/countries/treasury.ts пишет свою запись country_treasury_deposit и двигает зеркало сам
         api.reportMoneyRequestResult(req.id(), debited, debited ? null : "insufficient_funds");
     }
 
@@ -216,7 +207,7 @@ public class MoneyRequestPoller {
             api.reportMoneyRequestResult(req.id(), false, "missing_username");
             return;
         }
-        boolean credited = UnityCommands.getInstance().applyMoneyDelta(req.toUsername(), req.amount(), "Снятие из казны страны");
+        boolean credited = UnityCommands.getInstance().applyMoneyDelta(req.toUsername(), req.amount(), null, false); // silent: сайт сам пишет country_treasury_withdraw и двигает зеркало
         api.reportMoneyRequestResult(req.id(), credited, credited ? null : "user_not_found");
     }
 

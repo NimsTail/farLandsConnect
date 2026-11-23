@@ -536,21 +536,19 @@ public class UnityCommands {
             return;
         }
 
-        // Не пытаемся угадывать Material по "Brown Banner" — это ненадёжно.
-        // Но можем сделать минимальную проверку по displayName, если он задан:
-        // Если displayName совпадает — хорошо; если не задан — не мешаем.
-        boolean nameOk = true;
-        try {
-            var meta = hand.getItemMeta();
-            if (meta != null && meta.hasDisplayName()) {
-                String dn = org.bukkit.ChatColor.stripColor(meta.getDisplayName());
-                if (!dn.isBlank()) {
-                    nameOk = dn.equalsIgnoreCase(dd.itemName);
-                }
-            }
-        } catch (Exception ignored) {}
-
-        if (!nameOk) {
+        // Проверяем тип предмета. Сайт кладёт в itemName каталожное имя
+        // ("Brown Banner"), matchMaterial сам приводит его к BROWN_BANNER.
+        // Если в 6-м поле есть Bukkit-ключ материала — берём его. Не смогли
+        // распознать — не засчитываем (раньше подходил любой предмет).
+        String[] ddParts = dd.raw.split(";", -1);
+        String matKey = (ddParts.length >= 6 && !ddParts[5].isBlank()) ? ddParts[5].trim() : dd.itemName;
+        org.bukkit.Material need = org.bukkit.Material.matchMaterial(matKey);
+        if (need == null) {
+            p.sendMessage(ChatColor.RED + "Не удалось определить предмет задания (" + ChatColor.WHITE + dd.itemName
+                    + ChatColor.RED + "). Сообщи администрации.");
+            return;
+        }
+        if (hand.getType() != need) {
             p.sendMessage(ChatColor.RED + "В руке должен быть предмет: " + ChatColor.WHITE + dd.itemName);
             return;
         }
@@ -562,7 +560,22 @@ public class UnityCommands {
             return;
         }
 
-        // Списываем из ведущей руки ровно нужное количество
+        // Помечаем как выполненный: "0;item;amount;price;rerolls[;materialKey]" —
+        // меняем только код, хвост (рероллы, ключ материала) сохраняем как был.
+        // Условный UPDATE: флип проходит, только если в БД всё ещё ровно это
+        // невыполненное задание. Раньше писали безусловно, а повторный вызов
+        // в окне async-обновления кэша видел старое значение и платил второй раз.
+        String newRaw = "0" + dd.raw.substring(dd.raw.indexOf(';'));
+        if (!flipDayDealIfUnchanged(p.getName(), dd.raw, newRaw)) {
+            refreshPlayerCacheAsync(p.getName());
+            p.sendMessage(ChatColor.YELLOW + "Дейлик уже выполнен или изменился. Попробуй ещё раз через пару секунд.");
+            return;
+        }
+        refreshPlayerCacheAsync(p.getName());
+
+        // Списываем из ведущей руки ровно нужное количество (тот же тик, рука проверена выше)
+        org.bukkit.inventory.ItemStack taken = hand.clone();
+        taken.setAmount(dd.amount);
         if (have == dd.amount) {
             p.getInventory().setItemInMainHand(null);
         } else {
@@ -570,23 +583,21 @@ public class UnityCommands {
             p.getInventory().setItemInMainHand(hand);
         }
 
-        // Помечаем как выполненный: "0;item;amount;price;rerolls"
-        // Рероллы не трогаем — просто сохраняем хвост, если он есть
-        String[] parts = dd.raw.split(";", -1);
-        String rerollsPart = (parts.length >= 5) ? parts[4] : ""; // не показываем, но сохраняем
-        String newRaw = "0;" + dd.itemName + ";" + dd.amount + ";" +
-                // сохраняем price как было, но нормально: с запятой можно оставить
-                parts[3] + (parts.length >= 5 ? (";" + rerollsPart) : "");
-
-        // Запись в GeneralData.dayDealCode + обновление кэша через mergeAndUpdatePlayerData
-        mergeAndUpdatePlayerData(p.getName(), "GeneralData", java.util.Map.of("dayDealCode", newRaw));
-
         double baseTotal = dd.amount * dd.pricePerOne;
         double total = applyEducationBonusMaybe(p, baseTotal);
 
         boolean paid = addMoneyToPlayer(p.getName(), total);
 
         if (!paid) {
+            // Откатываем: задание снова открыто, предметы возвращаются игроку.
+            boolean reopened = flipDayDealIfUnchanged(p.getName(), newRaw, dd.raw);
+            refreshPlayerCacheAsync(p.getName());
+            p.getInventory().addItem(taken).values()
+                    .forEach(rest -> p.getWorld().dropItemNaturally(p.getLocation(), rest));
+            if (reopened) {
+                p.sendMessage(ChatColor.RED + "Не удалось начислить деньги (БД недоступна). Предметы возвращены, задание не закрыто — попробуй позже.");
+                return;
+            }
             p.sendMessage(ChatColor.RED + "Не удалось начислить деньги (БД недоступна).");
             p.sendMessage(ChatColor.GRAY + "DayDeal (для компенсации):");
             p.sendMessage(ChatColor.GRAY + "Предмет: " + ChatColor.WHITE + dd.itemName);
@@ -601,6 +612,24 @@ public class UnityCommands {
             p.sendMessage(ChatColor.GREEN + "Дейлик выполнен!");
             p.sendMessage(ChatColor.GRAY + "Получено: " + ChatColor.GOLD +
                     String.format(java.util.Locale.US, "%.2f", total) + ChatColor.GRAY + " Ⓕ");
+        }
+    }
+
+    /** dayDealCode: expected -> next, только если в БД сейчас ровно expected. true = флип прошёл. */
+    private boolean flipDayDealIfUnchanged(String playerName, String expected, String next) {
+        String sql = "UPDATE Users SET GeneralData = JSON_SET(GeneralData, '$.dayDealCode', ?) "
+                + "WHERE Name = ? AND TRIM(JSON_UNQUOTE(JSON_EXTRACT(GeneralData, '$.dayDealCode'))) = ?";
+        try (Connection con = DBConnect()) {
+            if (con == null) return false;
+            try (PreparedStatement ps = con.prepareStatement(sql)) {
+                ps.setString(1, next);
+                ps.setString(2, playerName);
+                ps.setString(3, expected);
+                return ps.executeUpdate() == 1;
+            }
+        } catch (Exception e) {
+            Bukkit.getLogger().warning("[UnityCommands] flipDayDealIfUnchanged failed: " + e);
+            return false;
         }
     }
 
@@ -674,22 +703,8 @@ public class UnityCommands {
                 writeUserMoney(con, playerName, next);
                 con.commit();
 
-                // sync cache
-                CachedPlayerRow cached = getOrLoadCachedPlayer(playerName);
-                if (cached != null && cached.general != null) {
-                    JsonObject newGen = cached.general.deepCopy();
-                    newGen.addProperty("money", next);
-                    upsertCacheAfterUpdate(playerName, "GeneralData", newGen);
-                }
-
-                // mirror to the site's /bank transaction history (best-effort, see FarLandsApiClient)
-                if (mirror) {
-                    UnityLauncher ul = UnityLauncher.getInstance();
-                    if (ul != null && ul.getFarLandsApi() != null) {
-                        ul.getFarLandsApi().transaction(playerName, Math.abs(delta), delta > 0, note);
-                    }
-                }
-
+                syncCachedMoney(playerName, next);
+                if (mirror) mirrorTransaction(playerName, delta, note);
                 return true;
 
             } catch (Exception e) {
@@ -702,6 +717,88 @@ public class UnityCommands {
         } catch (Exception e) {
             Bukkit.getLogger().warning("[UnityCommands] applyMoneyDelta outer failed: " + e);
             return false;
+        }
+    }
+
+    // Both helpers run AFTER commit: they must never throw, or the caller's
+    // catch would report a failure for money that already moved.
+    private void syncCachedMoney(String playerName, double money) {
+        try {
+            CachedPlayerRow cached = getOrLoadCachedPlayer(playerName);
+            if (cached != null && cached.general != null) {
+                JsonObject newGen = cached.general.deepCopy();
+                newGen.addProperty("money", money);
+                upsertCacheAfterUpdate(playerName, "GeneralData", newGen);
+            }
+        } catch (Exception e) {
+            Bukkit.getLogger().warning("[UnityCommands] money cache sync failed for " + playerName + ": " + e);
+        }
+    }
+
+    /** Mirror to the site's /bank transaction history (best-effort, see FarLandsApiClient). */
+    private static void mirrorTransaction(String playerName, double delta, String note) {
+        try {
+            UnityLauncher ul = UnityLauncher.getInstance();
+            if (ul != null && ul.getFarLandsApi() != null) {
+                ul.getFarLandsApi().transaction(playerName, Math.abs(delta), delta > 0, note);
+            }
+        } catch (Exception e) {
+            Bukkit.getLogger().warning("[UnityCommands] ledger mirror failed for " + playerName + ": " + e);
+        }
+    }
+
+    /**
+     * Player-to-player move in ONE transaction: debits {@code debit} from
+     * {@code from} and credits {@code credit} to {@code to}, both rows locked
+     * FOR UPDATE in a fixed (lower-cased name) order so two opposite transfers
+     * can't deadlock. Either both legs land or neither does — no best-effort
+     * refund. Returns null on success, otherwise an error code:
+     * bad_params, insufficient_funds, sender_not_found, recipient_not_found,
+     * db_error.
+     */
+    public String transferMoney(@NotNull String from, @NotNull String to, double debit, double credit,
+                                String fromNote, String toNote, boolean mirror) {
+        if (from.isBlank() || to.isBlank() || from.equalsIgnoreCase(to)) return "bad_params";
+        if (!(debit > 0) || !(credit > 0) || credit > debit + 1e-9) return "bad_params";
+
+        try (Connection con = DBConnect()) {
+            if (con == null) return "db_error";
+            con.setAutoCommit(false);
+            try {
+                boolean fromFirst = from.toLowerCase(java.util.Locale.ROOT).compareTo(to.toLowerCase(java.util.Locale.ROOT)) <= 0;
+                UserJsonRow a = lockAndReadUserMoney(con, fromFirst ? from : to);
+                UserJsonRow b = lockAndReadUserMoney(con, fromFirst ? to : from);
+                UserJsonRow fromRow = fromFirst ? a : b;
+                UserJsonRow toRow = fromFirst ? b : a;
+                if (fromRow == null) { con.rollback(); return "sender_not_found"; }
+                if (toRow == null) { con.rollback(); return "recipient_not_found"; }
+
+                double fromNext = (fromRow.money != null ? fromRow.money : 0.0) - debit;
+                if (fromNext < -1e-9) { con.rollback(); return "insufficient_funds"; }
+                if (fromNext < 0) fromNext = 0;
+                double toNext = (toRow.money != null ? toRow.money : 0.0) + credit;
+
+                writeUserMoney(con, from, fromNext);
+                writeUserMoney(con, to, toNext);
+                con.commit();
+
+                syncCachedMoney(from, fromNext);
+                syncCachedMoney(to, toNext);
+                if (mirror) {
+                    mirrorTransaction(from, -debit, fromNote);
+                    mirrorTransaction(to, credit, toNote);
+                }
+                return null;
+            } catch (Exception e) {
+                try { con.rollback(); } catch (Exception ignored) {}
+                Bukkit.getLogger().warning("[UnityCommands] transferMoney failed: " + e);
+                return "db_error";
+            } finally {
+                try { con.setAutoCommit(true); } catch (Exception ignored) {}
+            }
+        } catch (Exception e) {
+            Bukkit.getLogger().warning("[UnityCommands] transferMoney outer failed: " + e);
+            return "db_error";
         }
     }
 

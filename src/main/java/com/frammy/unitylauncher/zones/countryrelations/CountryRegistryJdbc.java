@@ -324,6 +324,43 @@ public class CountryRegistryJdbc {
         return true;
     }
 
+    /**
+     * Снять amount с казны, только если хватает: проверка и списание — один
+     * UPDATE (строка блокируется, условие перепроверяется на свежих данных),
+     * так что параллельные снятия не уводят казну в минус. Блокирующий —
+     * вызывать не с main thread. true = списано.
+     */
+    public boolean withdrawCountryMoneySync(String countryName, double amount) {
+        if (countryName == null || countryName.isBlank() || !(amount > 0)) return false;
+
+        final String sql = """
+        UPDATE Countries
+        SET CountryInfo = JSON_SET(
+            COALESCE(CountryInfo, JSON_OBJECT()),
+            '$.Money',
+            COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(CountryInfo,'$.Money')) AS DECIMAL(20,3)), 0) - ?
+        )
+        WHERE Name = ?
+          AND COALESCE(CAST(JSON_UNQUOTE(JSON_EXTRACT(CountryInfo,'$.Money')) AS DECIMAL(20,3)), 0) >= ?
+        """;
+
+        try (Connection con = DBConnect()) {
+            if (con == null) { logDb("withdrawCountryMoneySync"); return false; }
+            try (PreparedStatement ps = con.prepareStatement(sql)) {
+                ps.setDouble(1, amount);
+                ps.setString(2, countryName);
+                ps.setDouble(3, amount);
+                if (ps.executeUpdate() != 1) return false;
+            }
+        } catch (Throwable t) {
+            logDb("withdrawCountryMoneySync", t);
+            return false;
+        }
+
+        Bukkit.getScheduler().runTask(plugin, this::touchCacheNow);
+        return true;
+    }
+
     /** Получить страну игрока или null. */
     public String getCountryOfPlayer(String playerName) {
         if (playerName == null || playerName.isBlank()) return null;

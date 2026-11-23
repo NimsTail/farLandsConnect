@@ -12,6 +12,8 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
 /**
@@ -202,7 +204,7 @@ public class FarLandsApiClient {
         if (message != null) body.addProperty("message", message);
         if (markerId != null) body.addProperty("markerId", markerId);
         if (zonesSnapshot != null) body.add("zonesSnapshot", zonesSnapshot);
-        send("POST", "/plugin/zone-requests/" + encode(requestId) + "/result", body);
+        sendResult("/plugin/zone-requests/" + encode(requestId) + "/result", body);
     }
 
     /** A pending password-change request from the site (see PasswordChangeRequestPoller). */
@@ -244,7 +246,7 @@ public class FarLandsApiClient {
         JsonObject body = new JsonObject();
         body.addProperty("success", success);
         if (message != null) body.addProperty("message", message);
-        send("POST", "/plugin/password-requests/" + encode(requestId) + "/result", body);
+        sendResult("/plugin/password-requests/" + encode(requestId) + "/result", body);
     }
 
     /** Reports how a money request was actually resolved in-game — see MoneyRequestPoller. */
@@ -258,7 +260,7 @@ public class FarLandsApiClient {
         body.addProperty("success", success);
         if (message != null) body.addProperty("message", message);
         if (balance != null) body.addProperty("balance", balance);
-        send("POST", "/plugin/money-requests/" + encode(requestId) + "/result", body);
+        sendResult("/plugin/money-requests/" + encode(requestId) + "/result", body);
     }
 
     /**
@@ -344,7 +346,7 @@ public class FarLandsApiClient {
         JsonObject body = new JsonObject();
         body.addProperty("success", success);
         if (message != null) body.addProperty("message", message);
-        send("POST", "/plugin/upgrade-grants/" + encode(requestId) + "/result", body);
+        sendResult("/plugin/upgrade-grants/" + encode(requestId) + "/result", body);
     }
 
     /** A pending country-create request from the site (see CountryCreateRequestPoller, routes/countries.ts). */
@@ -387,7 +389,7 @@ public class FarLandsApiClient {
         JsonObject body = new JsonObject();
         body.addProperty("success", success);
         if (message != null) body.addProperty("message", message);
-        send("POST", "/plugin/country-create-requests/" + encode(requestId) + "/result", body);
+        sendResult("/plugin/country-create-requests/" + encode(requestId) + "/result", body);
     }
 
     /** Fire-and-forget batch sync — see PlanStatsReporter. body = {"players": [{username, playtimeSeconds, mobKills, deaths}, ...]}. */
@@ -436,7 +438,7 @@ public class FarLandsApiClient {
         JsonObject body = new JsonObject();
         body.addProperty("success", success);
         if (message != null) body.addProperty("message", message);
-        send("POST", "/plugin/country-delete-requests/" + encode(requestId) + "/result", body);
+        sendResult("/plugin/country-delete-requests/" + encode(requestId) + "/result", body);
     }
 
     /** GH #10 round 3 — a pending country-member-leave request (see CountryMemberLeaveRequestPoller). */
@@ -476,7 +478,7 @@ public class FarLandsApiClient {
         JsonObject body = new JsonObject();
         body.addProperty("success", success);
         if (message != null) body.addProperty("message", message);
-        send("POST", "/plugin/country-member-leave-requests/" + encode(requestId) + "/result", body);
+        sendResult("/plugin/country-member-leave-requests/" + encode(requestId) + "/result", body);
     }
 
     /** A pending country-sync request — groups is the raw JSON array from CountrySyncRequest.groupsJson (see schema.prisma). */
@@ -517,7 +519,7 @@ public class FarLandsApiClient {
         JsonObject body = new JsonObject();
         body.addProperty("success", success);
         if (message != null) body.addProperty("message", message);
-        send("POST", "/plugin/country-sync-requests/" + encode(requestId) + "/result", body);
+        sendResult("/plugin/country-sync-requests/" + encode(requestId) + "/result", body);
     }
 
     // ===== military-diplomacy-design.md §2.2.1/§14/§13 Фаза 4 (see
@@ -824,7 +826,23 @@ public class FarLandsApiClient {
         return java.net.URLEncoder.encode(s, java.nio.charset.StandardCharsets.UTF_8);
     }
 
+    /**
+     * Result POSTs for site job queues: retried (3 attempts, 2s/4s backoff, off
+     * the main thread) on a network error or 5xx, so a transient failure doesn't
+     * leave the request stuck in "processing" (review C10). Safe to repeat: the
+     * site flips processing -> done/error once and answers 404 to a repeat.
+     * Not used for /transactions — that one creates a row, a retry after a
+     * timeout that actually landed would double it.
+     */
+    private void sendResult(String path, JsonObject body) {
+        send("POST", path, body, 3);
+    }
+
     private void send(String method, String path, JsonObject body) {
+        send(method, path, body, 1);
+    }
+
+    private void send(String method, String path, JsonObject body, int attemptsLeft) {
         if (!isEnabled()) return;
 
         HttpRequest request = HttpRequest.newBuilder()
@@ -839,6 +857,15 @@ public class FarLandsApiClient {
         // run on the HTTP client's own thread instead of needing the main thread.
         HTTP.sendAsync(request, HttpResponse.BodyHandlers.ofString())
                 .whenComplete((response, error) -> {
+                    boolean retryable = error != null || response.statusCode() >= 500;
+                    if (retryable && attemptsLeft > 1) {
+                        long delaySec = 1L << (4 - attemptsLeft); // 2s, затем 4s
+                        log.warning("[FarLandsApi] " + method + " " + path + " failed ("
+                                + (error != null ? error : "HTTP " + response.statusCode()) + "), retry in " + delaySec + "s");
+                        CompletableFuture.delayedExecutor(delaySec, TimeUnit.SECONDS)
+                                .execute(() -> send(method, path, body, attemptsLeft - 1));
+                        return;
+                    }
                     if (error != null) {
                         log.warning("[FarLandsApi] " + method + " " + path + " failed: " + error);
                         return;

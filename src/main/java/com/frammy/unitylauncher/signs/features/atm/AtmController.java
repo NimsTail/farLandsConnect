@@ -810,18 +810,26 @@ public final class AtmController {
 
                     new BukkitRunnable() {
                         @Override public void run() {
-                            double countryMoney = UnityLauncher.getInstance().countryRegistryJdbc.getCountryMoney(myCountry);
-                            if (countryMoney < gross) {
+                            // Проверка и списание — одним условным UPDATE: раньше проверяли
+                            // кэш, списывали fire-and-forget и выдавали наличку в любом случае
+                            // (двойной клик/устаревший кэш/ошибка БД = наличка из воздуха).
+                            if (!UnityLauncher.getInstance().countryRegistryJdbc.withdrawCountryMoneySync(myCountry, gross)) {
+                                double countryMoney = UnityLauncher.getInstance().countryRegistryJdbc.getCountryMoney(myCountry);
                                 new BukkitRunnable(){ @Override public void run(){
-                                    p.sendMessage(ChatColor.RED + "В казне недостаточно средств. Доступно: "
+                                    p.sendMessage(ChatColor.RED + "В казне недостаточно средств (или БД недоступна). Доступно: "
                                             + ChatColor.YELLOW + round2(countryMoney) + ChatColor.RED + " Ⓕ.");
                                 }}.runTask(UnityLauncher.getInstance());
                                 return;
                             }
 
-                            UnityLauncher.getInstance().countryRegistryJdbc.addCountryMoney(myCountry, -gross);
-
                             new BukkitRunnable(){ @Override public void run(){
+                                if (!p.isOnline()) { // вышел, пока списывали: вернуть казне, иначе деньги пропадут
+                                    Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
+                                        if (!UnityLauncher.getInstance().countryRegistryJdbc.addCountryMoneySync(myCountry, gross))
+                                            Bukkit.getLogger().severe("[ATM] treasury refund FAILED: " + myCountry + " +" + gross);
+                                    });
+                                    return;
+                                }
                                 // Казна платит gross, игрок получает запрошенную сумму целиком.
                                 announceFee(p, amount, rate);
                                 plugin.moneyManager.giveCash(p, amount);
@@ -877,63 +885,37 @@ public final class AtmController {
 
         p.sendMessage(ChatColor.GRAY + "Проверяем данные и выполняем перевод...");
 
+        // Единая модель, зеркалит сайтовый /bank/transfer: получатель
+        // получает amount ЦЕЛИКОМ, отправитель платит gross = amount + комиссия.
+        // Обе ноги — одной транзакцией с блокировкой строк (transferMoney), а не
+        // абсолютной записью баланса из кэша.
+        String senderName = p.getName();
+
         new BukkitRunnable() {
             @Override public void run() {
-                List<String> keys = List.of("money");
-                Map<String, Object> senderMap = UnityCommands.getInstance()
-                        .getJsonFieldValues("Users", "GeneralData", "Name", p.getName(), keys);
-                Double senderMoney = senderMap.get("money") instanceof Number ? ((Number) senderMap.get("money")).doubleValue() : null;
+                // комиссия считается off-main, как и раньше (может трогать кэш стран/БД)
+                double rate = atmFeeRate(p, atmLoc, amount);
+                double fee = round2(amount * rate);
+                double gross = round2(amount + fee);
+                String err = UnityCommands.getInstance().transferMoney(senderName, targetName, gross, amount,
+                        "Перевод игроку " + targetName + " в банкомате", "Перевод от " + senderName + " в банкомате", true);
 
-                UnityCommands.getInstance().getPlayerInfo(targetName, targetData -> {
-                    if (senderMoney == null) {
-                        new BukkitRunnable(){ @Override public void run(){
-                            p.sendMessage(ChatColor.RED + "Не удалось получить твой баланс.");
-                        }}.runTask(UnityLauncher.getInstance());
-                        return;
+                new BukkitRunnable(){ @Override public void run(){
+                    if (err == null) {
+                        p.sendMessage(ChatColor.GREEN + "Перевод выполнен: " + ChatColor.YELLOW + round2(amount) + " Ⓕ"
+                                + ChatColor.GREEN + " → " + ChatColor.RESET + targetName
+                                + (fee > 0 ? (ChatColor.GRAY + " (получатель получил " + ChatColor.YELLOW + round2(amount) + " Ⓕ"
+                                + ChatColor.GRAY + " целиком, с тебя списано " + ChatColor.RED + round2(gross) + " Ⓕ"
+                                + ChatColor.GRAY + ", комиссия " + ChatColor.RED + fee + " Ⓕ" + ChatColor.GRAY + ")") : ""));
+                    } else if (err.equals("insufficient_funds")) {
+                        p.sendMessage(ChatColor.RED + "Недостаточно средств. Нужно: " + ChatColor.YELLOW + round2(gross)
+                                + ChatColor.RED + " Ⓕ" + (fee > 0 ? (ChatColor.GRAY + " (из них комиссия " + ChatColor.RED + fee + " Ⓕ" + ChatColor.GRAY + ")") : ""));
+                    } else if (err.equals("recipient_not_found")) {
+                        p.sendMessage(ChatColor.RED + "Игрок '" + targetName + "' не найден.");
+                    } else {
+                        p.sendMessage(ChatColor.RED + "Перевод не выполнен (ошибка БД). Деньги не списаны.");
                     }
-                    if (targetData == null) {
-                        new BukkitRunnable(){ @Override public void run(){
-                            p.sendMessage(ChatColor.RED + "Игрок '" + targetName + "' не найден.");
-                        }}.runTask(UnityLauncher.getInstance());
-                        return;
-                    }
-
-                    // Единая модель, зеркалит сайтовый /bank/transfer: получатель
-                    // получает amount ЦЕЛИКОМ, отправитель платит gross = amount + комиссия.
-                    double rate = atmFeeRate(p, atmLoc, amount);
-                    double fee = round2(amount * rate);
-                    double gross = round2(amount + fee);
-
-                    if (senderMoney < gross) {
-                        new BukkitRunnable(){ @Override public void run(){
-                            p.sendMessage(ChatColor.RED + "Недостаточно средств. Нужно: " + ChatColor.YELLOW + round2(gross)
-                                    + ChatColor.RED + " Ⓕ" + (fee > 0 ? (ChatColor.GRAY + " (из них комиссия " + ChatColor.RED + fee + " Ⓕ" + ChatColor.GRAY + ")") : "")
-                                    + ChatColor.RED + ". Доступно: " + ChatColor.YELLOW + senderMoney + ChatColor.RED + " Ⓕ.");
-                        }}.runTask(UnityLauncher.getInstance());
-                        return;
-                    }
-
-                    new BukkitRunnable(){ @Override public void run(){
-                        UnityCommands uc = UnityCommands.getInstance();
-
-                        Map<String, Object> updSender = new HashMap<>();
-                        updSender.put("money", round2(senderMoney - gross));
-                        uc.mergeAndUpdatePlayerData(p.getName(), "GeneralData", updSender);
-
-                        Map<String, Object> updTarget = new HashMap<>();
-                        updTarget.put("money", round2(targetData.money + amount));
-                        uc.mergeAndUpdatePlayerData(targetName, "GeneralData", updTarget);
-
-                        new BukkitRunnable(){ @Override public void run(){
-                            p.sendMessage(ChatColor.GREEN + "Перевод выполнен: " + ChatColor.YELLOW + round2(amount) + " Ⓕ"
-                                    + ChatColor.GREEN + " → " + ChatColor.RESET + targetName
-                                    + (fee > 0 ? (ChatColor.GRAY + " (получатель получил " + ChatColor.YELLOW + round2(amount) + " Ⓕ"
-                                    + ChatColor.GRAY + " целиком, с тебя списано " + ChatColor.RED + round2(gross) + " Ⓕ"
-                                    + ChatColor.GRAY + ", комиссия " + ChatColor.RED + fee + " Ⓕ" + ChatColor.GRAY + ")") : ""));
-                        }}.runTask(UnityLauncher.getInstance());
-
-                    }}.runTaskAsynchronously(UnityLauncher.getInstance());
-                });
+                }}.runTask(UnityLauncher.getInstance());
             }
         }.runTaskAsynchronously(UnityLauncher.getInstance());
 

@@ -203,7 +203,7 @@ public record ShopListUpdater(UnityLauncher plugin, ZoneManager zoneManager, Sig
      * в обычной ItemStack.getEnchantments() — оба случая нужны, продают и то,
      * и другое. Отсортировано — сигнатура не зависит от порядка перечисления.
      */
-    private static List<String> enchantSlugsOf(ItemStack stack) {
+    static List<String> enchantSlugsOf(ItemStack stack) {
         ItemMeta meta = stack.getItemMeta();
         Map<Enchantment, Integer> map = (meta instanceof EnchantmentStorageMeta esm)
                 ? esm.getStoredEnchants()

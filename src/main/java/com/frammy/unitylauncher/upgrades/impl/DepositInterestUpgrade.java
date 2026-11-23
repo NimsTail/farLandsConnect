@@ -134,13 +134,9 @@ public final class DepositInterestUpgrade extends BaseUpgrade {
     private void addMoneyToPlayerAccount(String playerName, double amount) {
         new BukkitRunnable() {
             @Override public void run() {
-                UnityCommands.getInstance().getPlayerInfo(playerName, data -> {
-                    if (data == null) return;
-                    double newBalance = round2(data.money + amount);
-                    Map<String, Object> upd = new HashMap<>();
-                    upd.put("money", newBalance);
-                    UnityCommands.getInstance().mergeAndUpdatePlayerData(playerName, "GeneralData", upd);
-                });
+                // атомарная дельта (FOR UPDATE), а не абсолютная запись из кэша,
+                // которая затирала параллельные списания
+                UnityCommands.getInstance().applyMoneyDelta(playerName, round2(amount), "Проценты по вкладу");
             }
         }.runTaskAsynchronously(plugin());
     }
