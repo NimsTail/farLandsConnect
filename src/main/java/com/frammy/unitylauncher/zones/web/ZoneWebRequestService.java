@@ -1,5 +1,6 @@
 package com.frammy.unitylauncher.zones.web;
 
+import java.util.concurrent.atomic.AtomicBoolean;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import org.bukkit.Bukkit;
@@ -45,14 +46,20 @@ public class ZoneWebRequestService {
         Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, this::pollOnce, periodTicks, periodTicks);
     }
 
-    private void pollOnce() {
-        List<ZoneWebRequest> batch = fetchPending();
-        if (batch.isEmpty()) return;
+    private final AtomicBoolean busy = new AtomicBoolean();
 
-        for (ZoneWebRequest req : batch) {
-            // переключаемся на главный поток для каждой заявки отдельно -
-            // так не блокируем игровой тик обработкой всей пачки разом
-            Bukkit.getScheduler().runTask(plugin, () -> processOnMainThread(req));
+    private void pollOnce() {
+        // async-запуски таймера могут наложиться, если БД тормозит дольше периода
+        if (!busy.compareAndSet(false, true)) return;
+        try {
+            List<ZoneWebRequest> batch = fetchPending();
+            for (ZoneWebRequest req : batch) {
+                // переключаемся на главный поток для каждой заявки отдельно -
+                // так не блокируем игровой тик обработкой всей пачки разом
+                Bukkit.getScheduler().runTask(plugin, () -> processOnMainThread(req));
+            }
+        } finally {
+            busy.set(false);
         }
     }
 
