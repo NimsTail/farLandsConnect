@@ -685,20 +685,30 @@ public class UnityCommands {
         }
     }
 
+    // Both helpers run AFTER commit: they must never throw, or the caller's
+    // catch would report a failure for money that already moved.
     private void syncCachedMoney(String playerName, double money) {
-        CachedPlayerRow cached = getOrLoadCachedPlayer(playerName);
-        if (cached != null && cached.general != null) {
-            JsonObject newGen = cached.general.deepCopy();
-            newGen.addProperty("money", money);
-            upsertCacheAfterUpdate(playerName, "GeneralData", newGen);
+        try {
+            CachedPlayerRow cached = getOrLoadCachedPlayer(playerName);
+            if (cached != null && cached.general != null) {
+                JsonObject newGen = cached.general.deepCopy();
+                newGen.addProperty("money", money);
+                upsertCacheAfterUpdate(playerName, "GeneralData", newGen);
+            }
+        } catch (Exception e) {
+            Bukkit.getLogger().warning("[UnityCommands] money cache sync failed for " + playerName + ": " + e);
         }
     }
 
     /** Mirror to the site's /bank transaction history (best-effort, see FarLandsApiClient). */
     private static void mirrorTransaction(String playerName, double delta, String note) {
-        UnityLauncher ul = UnityLauncher.getInstance();
-        if (ul != null && ul.getFarLandsApi() != null) {
-            ul.getFarLandsApi().transaction(playerName, Math.abs(delta), delta > 0, note);
+        try {
+            UnityLauncher ul = UnityLauncher.getInstance();
+            if (ul != null && ul.getFarLandsApi() != null) {
+                ul.getFarLandsApi().transaction(playerName, Math.abs(delta), delta > 0, note);
+            }
+        } catch (Exception e) {
+            Bukkit.getLogger().warning("[UnityCommands] ledger mirror failed for " + playerName + ": " + e);
         }
     }
 
