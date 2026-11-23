@@ -308,7 +308,9 @@ public final class PhantomDeliveryController implements Listener {
         }
         if (changed) saveCargo();
         reported.retainAll(activeIds);
-        decided.retainAll(activeIds);
+        // decided не чистим по activeIds: им пользуются и курьеры v2
+        // (PhantomCourierController), чьих заказов нет в этом списке.
+        // ponytail: растёт на один id за выпавший груз, до рестарта.
     }
 
     /**
@@ -416,9 +418,12 @@ public final class PhantomDeliveryController implements Listener {
 
         Material material = resolveMaterial(trade);
         if (material == null) {
-            // Материал не резолвится — выдать нечего, просто закрываем заказ,
-            // чтобы не завис навечно.
-            markDelivered(trade.id(), false);
+            // Материал не резолвится — выдать нечего. Закрываем как
+            // ограбление: покупателю возвращаются деньги (а не "доставлено"
+            // без товара), заказ не висит вечно.
+            cargo.set(trade.id() + ".state", CargoState.DROPPED.name());
+            saveCargo();
+            if (decided.add(trade.id())) api.reportPhantomRobbed(trade.id());
             return;
         }
 
@@ -505,7 +510,7 @@ public final class PhantomDeliveryController implements Listener {
     // хотя сундук вот же" — искали строго в упор, без допуска. Небольшой
     // радиус поиска терпим к такой погрешности, не требуя от игрока
     // ювелирной точности координат.
-    private static final int DEST_CONTAINER_SEARCH_RADIUS = 1;
+    static final int DEST_CONTAINER_SEARCH_RADIUS = 1;
 
     private static Container containerAt(Location loc) {
         var state = loc.getBlock().getState();
@@ -513,7 +518,7 @@ public final class PhantomDeliveryController implements Listener {
     }
 
     /** Как containerAt, но терпимо к небольшой погрешности координат — ищет ближайший контейнер в кубе radius вокруг center. */
-    private static Container findContainerNear(Location center, int radius) {
+    static Container findContainerNear(Location center, int radius) {
         Container exact = containerAt(center);
         if (exact != null) return exact;
 
@@ -580,13 +585,19 @@ public final class PhantomDeliveryController implements Listener {
     }
 
     private Material resolveMaterial(FarLandsApiClient.PhantomTrade trade) {
-        // materialKey — Bukkit-ключ, если сайт его прислал; иначе имя из
-        // каталога ("Blue Wool" / "Blue_Wool") — для большинства предметов
-        // совпадает с ключом с точностью до пробелов и регистра.
-        String key = trade.materialKey() != null ? trade.materialKey() : trade.itemMaterial().trim().replace(' ', '_');
+        return resolveMaterial(plugin.getLogger(), trade.itemMaterial(), trade.materialKey(), trade.id());
+    }
+
+    /**
+     * materialKey — Bukkit-ключ, если сайт его прислал; иначе имя из каталога
+     * ("Blue Wool" / "Blue_Wool") — для большинства предметов совпадает с
+     * ключом с точностью до пробелов и регистра. null — не резолвится.
+     */
+    static Material resolveMaterial(java.util.logging.Logger log, String itemMaterial, String materialKey, String orderId) {
+        String key = materialKey != null ? materialKey : itemMaterial == null ? "" : itemMaterial.trim().replace(' ', '_');
         Material m = Material.matchMaterial(key);
         if (m == null || !m.isItem()) {
-            plugin.getLogger().warning("[PhantomDelivery] неизвестный материал '" + key + "' для заказа " + trade.id());
+            log.warning("[PhantomDelivery] неизвестный материал '" + key + "' для заказа " + orderId);
             return null;
         }
         return m;
@@ -641,17 +652,27 @@ public final class PhantomDeliveryController implements Listener {
      * деньги покупателя уже списаны, застрявший заказ хуже. Пишется в лог.
      */
     private List<ItemStack> withdrawFromSource(World world, FarLandsApiClient.PhantomTrade trade, Material material) {
-        Location src = new Location(world, trade.sourceX(), trade.sourceY(), trade.sourceZ());
+        return withdraw(plugin.getLogger(), new Location(world, trade.sourceX(), trade.sourceY(), trade.sourceZ()),
+                material, ShopListUpdater.variantSig(trade.enchantSlugs(), trade.colorHex()), trade.quantity(), trade.id());
+    }
+
+    /**
+     * Снимает с сундука у src реальные стаки купленного варианта (материал +
+     * зачарования + цвет, как в лоте сайта) в количестве заказа. Не хватает
+     * (или сундука нет) — недостающее создаётся простыми стаками: деньги
+     * покупателя уже списаны, застрявший заказ хуже. Пишется в лог.
+     */
+    static List<ItemStack> withdraw(java.util.logging.Logger log, Location src, Material material, String sig,
+                                    int quantity, String orderId) {
         // GH#36 (третий раунд) — тот же допуск по координатам, что у назначения.
         Container container = findContainerNear(src, DEST_CONTAINER_SEARCH_RADIUS);
-        String sig = ShopListUpdater.variantSig(trade.enchantSlugs(), trade.colorHex());
-        int need = Math.max(1, trade.quantity());
+        int need = Math.max(1, quantity);
 
         List<ItemStack> load = container == null ? new ArrayList<>()
                 : ShopListUpdater.takeVariant(container.getInventory(), material, sig, need, false);
         int got = load.stream().mapToInt(ItemStack::getAmount).sum();
         if (got < need) {
-            plugin.getLogger().warning("[PhantomDelivery] заказ " + trade.id() + ": "
+            log.warning("[PhantomDelivery] заказ " + orderId + ": "
                     + (container == null ? "в точке источника нет сундука" : "в сундуке-источнике не хватает товара")
                     + " (" + got + "/" + need + " " + material + (sig.isEmpty() ? "" : " [" + sig + "]")
                     + ") — недостающее создано без списания.");

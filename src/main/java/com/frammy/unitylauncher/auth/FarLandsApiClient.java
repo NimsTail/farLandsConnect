@@ -652,9 +652,14 @@ public class FarLandsApiClient {
         sendResult("/plugin/marketplace/" + encode(tradeId) + "/phantom-delivered", body);
     }
 
-    /** Груз подобрал кто-то другой (или деспавнился неподобранным) — настоящее ограбление. */
+    /**
+     * Груз подобрал кто-то другой (или деспавнился неподобранным) — настоящее
+     * ограбление. Одна попытка, без повторов: сайт возвращает деньги через
+     * очередь и может отвечать дольше таймаута клиента — повтор после
+     * таймаута мог бы вернуть деньги дважды.
+     */
     public void reportPhantomRobbed(String tradeId) {
-        sendResult("/plugin/marketplace/" + encode(tradeId) + "/phantom-robbed", new JsonObject());
+        send("POST", "/plugin/marketplace/" + encode(tradeId) + "/phantom-robbed", new JsonObject());
     }
 
     /** Курьер застрял: сайт сдвигает ETA по оставшейся прямой дистанции. */
