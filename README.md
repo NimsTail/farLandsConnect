@@ -366,7 +366,7 @@ activity_logs (id, chunk_x, chunk_z, event_type, amount, ...)
 - **Java:** 21+
 - **Maven:** 3.8+
 - **MySQL:** 8.0+
-- **Minecraft Server:** Paper 1.21.10+
+- **Minecraft Server:** Paper 26.3+
 
 ### Сборка проекта
 
@@ -873,7 +873,7 @@ Bukkit.getLogger().info("Redstone level: " + level);
 4. Откройте Pull Request
 
 ### Код стиль
-- Java 21+
+- Java 25+
 - Используйте конкатенацию через `String#format()` или `StringBuilder`
 - Комментируйте сложную логику
 - Следуйте существующему стилю кода
