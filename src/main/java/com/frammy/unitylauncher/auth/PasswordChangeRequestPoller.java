@@ -44,7 +44,7 @@ public class PasswordChangeRequestPoller {
         try {
             // PBKDF2 + UPDATE stay on this async thread: no Bukkit API involved.
             for (FarLandsApiClient.PendingPasswordRequest req : api.fetchPendingPasswordRequests()) {
-                process(req);
+                com.frammy.unitylauncher.UnityLauncher.trackDb(() -> process(req));
             }
         } finally {
             busy.set(false);

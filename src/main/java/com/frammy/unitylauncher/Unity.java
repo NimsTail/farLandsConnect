@@ -99,7 +99,7 @@ public class Unity implements CommandExecutor {
 
             // PBKDF2 + БД — в фоне; limiter и состояние игрока — только на главном потоке.
             String name = p.getName();
-            Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            UnityLauncher.runDbAsync(() -> {
                 boolean ok = auth.checkPassword(name, password.toCharArray());
                 if (ok) {
                     auth.markSession(name, ip);
@@ -146,7 +146,7 @@ public class Unity implements CommandExecutor {
             String err = com.frammy.unitylauncher.auth.PasswordPolicy.validate(password);
 
             // БД + PBKDF2 — в фоне; сообщения и состояние игрока — на главном потоке.
-            Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            UnityLauncher.runDbAsync(() -> {
                 String fail;
                 // если строка уже есть в Users/пароль уже задан — считаем, что имя занято
                 if (auth.isRegistered(name)) {

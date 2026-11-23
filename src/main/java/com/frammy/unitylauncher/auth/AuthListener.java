@@ -56,7 +56,7 @@ public class AuthListener implements Listener {
         Object token = new Object();
         pendingCheck.put(id, token);
 
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+        UnityLauncher.runDbAsync(() -> {
             boolean hasPass = auth.isRegistered(name);
             boolean sessionOk = hasPass && auth.isSessionValid(name, ip);
 

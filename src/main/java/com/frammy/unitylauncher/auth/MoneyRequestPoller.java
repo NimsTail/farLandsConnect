@@ -45,7 +45,7 @@ public class MoneyRequestPoller {
             // below touches the Bukkit API, and applyMoneyDelta/transferMoney lock
             // the rows FOR UPDATE, so they can't race in-game economy actions.
             for (FarLandsApiClient.PendingMoneyRequest req : api.fetchPendingMoneyRequests()) {
-                process(req);
+                com.frammy.unitylauncher.UnityLauncher.trackDb(() -> process(req));
             }
         } finally {
             busy.set(false);

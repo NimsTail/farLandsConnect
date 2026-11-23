@@ -49,12 +49,35 @@ import java.sql.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class UnityLauncher extends JavaPlugin implements Listener {
 
     // === singleton ===
     private static UnityLauncher instance;
     public static UnityLauncher getInstance() { return instance; }
+
+    /** Async DB work onDisable waits for (bounded) before closing the pool. */
+    private static final AtomicInteger dbInFlight = new AtomicInteger();
+
+    /** Runs body on the current thread, counted as in-flight DB work. */
+    public static void trackDb(Runnable body) {
+        dbInFlight.incrementAndGet();
+        try { body.run(); } finally { dbInFlight.decrementAndGet(); }
+    }
+
+    /** runTaskAsynchronously, counted as in-flight DB work from the moment it is scheduled. */
+    public static void runDbAsync(Runnable body) {
+        dbInFlight.incrementAndGet();
+        try {
+            Bukkit.getScheduler().runTaskAsynchronously(instance, () -> {
+                try { body.run(); } finally { dbInFlight.decrementAndGet(); }
+            });
+        } catch (RuntimeException e) {
+            dbInFlight.decrementAndGet();
+            throw e;
+        }
+    }
 
     // === managers / services ===
     private final Set<UUID> awaitingCorrectCommand = ConcurrentHashMap.newKeySet();
@@ -514,6 +537,13 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         safeShutdown("UpgradesManager", upgradesManager, UpgradesManager::stop);
         // Stop pollers/timers before the pool goes away (Bukkit would only cancel them after onDisable).
         Bukkit.getScheduler().cancelTasks(this);
+        // cancelTasks doesn't stop async work already running (money batches, daily-deal
+        // settlement, /login...): give it a bounded chance to finish on a live pool.
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (dbInFlight.get() > 0 && System.currentTimeMillis() < deadline) {
+            try { Thread.sleep(50); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+        }
+        if (dbInFlight.get() > 0) getLogger().warning("Closing DB pool with " + dbInFlight.get() + " async DB task(s) still running");
 
         // Last: everything above may still need the DB.
         if (hikari != null) {

@@ -517,7 +517,7 @@ public class UnityCommands {
         // Чтение (кэш или БД) — в фоне; рука/инвентарь — на главном потоке.
         UnityLauncher ul = UnityLauncher.getInstance();
         String name = p.getName();
-        Bukkit.getScheduler().runTaskAsynchronously(ul, () -> {
+        UnityLauncher.runDbAsync(() -> {
             String raw = getDayDealRawFromCacheOrDB(name);
             Bukkit.getScheduler().runTask(ul, () -> {
                 if (Bukkit.getPlayer(p.getUniqueId()) == p) dayDealCompleteMain(ul, p, parseDayDeal(raw)); // не вышел/не перезашёл
@@ -590,47 +590,56 @@ public class UnityCommands {
         // невыполненное задание. Раньше писали безусловно, а повторный вызов
         // в окне async-обновления кэша видел старое значение и платил второй раз.
         String newRaw = "0" + dd.raw.substring(dd.raw.indexOf(';'));
-        Bukkit.getScheduler().runTaskAsynchronously(ul, () -> {
+        UnityLauncher.runDbAsync(() -> {
             boolean flipped = flipDayDealIfUnchanged(name, dd.raw, newRaw);
             boolean paid = flipped && addMoneyToPlayer(name, total);
             // Откатываем: задание снова открыто, предметы возвращаются игроку.
             boolean reopened = flipped && !paid && flipDayDealIfUnchanged(name, newRaw, dd.raw);
             refreshPlayerCacheAsync(name);
 
-            Bukkit.getScheduler().runTask(ul, () -> {
-                if (paid) {
-                    p.sendMessage(ChatColor.GREEN + "Дейлик выполнен!");
-                    p.sendMessage(ChatColor.GRAY + "Получено: " + ChatColor.GOLD +
+            // Предметы уже забраны; возврат — на главном потоке, которого при выключении
+            // может уже не быть. Пишем след для компенсации заранее, здесь.
+            String refundNote = "[UnityCommands] dayDealComplete: " + name + " is owed back " + dd.amount + "x "
+                    + taken.getType() + " (flipped=" + flipped + ", reopened=" + reopened + ", total="
+                    + String.format(java.util.Locale.US, "%.2f", total) + ")";
+            if (!paid) Bukkit.getLogger().warning(refundNote + " — returning items; if no refund follows (server stop), compensate manually.");
+
+            try {
+                Bukkit.getScheduler().runTask(ul, () -> {
+                    if (paid) {
+                        p.sendMessage(ChatColor.GREEN + "Дейлик выполнен!");
+                        p.sendMessage(ChatColor.GRAY + "Получено: " + ChatColor.GOLD +
+                                String.format(java.util.Locale.US, "%.2f", total) + ChatColor.GRAY + " Ⓕ");
+                        return;
+                    }
+                    if (Bukkit.getPlayer(p.getUniqueId()) != p) {
+                        // addItem на вышедшего игрока потеряется — оставляем след для компенсации.
+                        Bukkit.getLogger().warning(refundNote + " — player left before refund, compensate manually.");
+                        return;
+                    }
+                    p.getInventory().addItem(taken).values()
+                            .forEach(rest -> p.getWorld().dropItemNaturally(p.getLocation(), rest));
+                    if (!flipped) {
+                        p.sendMessage(ChatColor.YELLOW + "Дейлик уже выполнен или изменился. Попробуй ещё раз через пару секунд.");
+                        return;
+                    }
+                    if (reopened) {
+                        p.sendMessage(ChatColor.RED + "Не удалось начислить деньги (БД недоступна). Предметы возвращены, задание не закрыто — попробуй позже.");
+                        return;
+                    }
+                    p.sendMessage(ChatColor.RED + "Не удалось начислить деньги (БД недоступна).");
+                    p.sendMessage(ChatColor.GRAY + "DayDeal (для компенсации):");
+                    p.sendMessage(ChatColor.GRAY + "Предмет: " + ChatColor.WHITE + dd.itemName);
+                    p.sendMessage(ChatColor.GRAY + "Количество: " + ChatColor.WHITE + dd.amount);
+                    p.sendMessage(ChatColor.GRAY + "Цена за штуку: " + ChatColor.WHITE +
+                            String.format(java.util.Locale.US, "%.2f", dd.pricePerOne));
+                    p.sendMessage(ChatColor.GRAY + "Итого: " + ChatColor.GOLD +
                             String.format(java.util.Locale.US, "%.2f", total) + ChatColor.GRAY + " Ⓕ");
-                    return;
-                }
-                if (Bukkit.getPlayer(p.getUniqueId()) != p) {
-                    // addItem на вышедшего игрока потеряется — оставляем след для компенсации.
-                    Bukkit.getLogger().warning("[UnityCommands] dayDealComplete: " + name + " left before refund of "
-                            + dd.amount + "x " + taken.getType() + " (flipped=" + flipped + ", reopened=" + reopened
-                            + ", total=" + String.format(java.util.Locale.US, "%.2f", total) + ") — compensate manually.");
-                    return;
-                }
-                p.getInventory().addItem(taken).values()
-                        .forEach(rest -> p.getWorld().dropItemNaturally(p.getLocation(), rest));
-                if (!flipped) {
-                    p.sendMessage(ChatColor.YELLOW + "Дейлик уже выполнен или изменился. Попробуй ещё раз через пару секунд.");
-                    return;
-                }
-                if (reopened) {
-                    p.sendMessage(ChatColor.RED + "Не удалось начислить деньги (БД недоступна). Предметы возвращены, задание не закрыто — попробуй позже.");
-                    return;
-                }
-                p.sendMessage(ChatColor.RED + "Не удалось начислить деньги (БД недоступна).");
-                p.sendMessage(ChatColor.GRAY + "DayDeal (для компенсации):");
-                p.sendMessage(ChatColor.GRAY + "Предмет: " + ChatColor.WHITE + dd.itemName);
-                p.sendMessage(ChatColor.GRAY + "Количество: " + ChatColor.WHITE + dd.amount);
-                p.sendMessage(ChatColor.GRAY + "Цена за штуку: " + ChatColor.WHITE +
-                        String.format(java.util.Locale.US, "%.2f", dd.pricePerOne));
-                p.sendMessage(ChatColor.GRAY + "Итого: " + ChatColor.GOLD +
-                        String.format(java.util.Locale.US, "%.2f", total) + ChatColor.GRAY + " Ⓕ");
-                p.sendMessage(ChatColor.DARK_GRAY + "Скриншотни это сообщение и отправь администратору.");
-            });
+                    p.sendMessage(ChatColor.DARK_GRAY + "Скриншотни это сообщение и отправь администратору.");
+                });
+            } catch (org.bukkit.plugin.IllegalPluginAccessException disabled) { // plugin is disabling
+                if (!paid) Bukkit.getLogger().severe(refundNote + " — plugin disabled before refund, compensate manually.");
+            }
         });
     }
 
