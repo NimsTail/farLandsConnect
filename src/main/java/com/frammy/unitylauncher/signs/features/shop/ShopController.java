@@ -1187,6 +1187,7 @@ public final class ShopController {
         for (ItemStack it : c.getInventory().getContents()) {
             if (it == null) continue;
             if (it.getType().isAir()) continue;
+            if (com.frammy.unitylauncher.marketplace.PickupReservationController.isReserved(it)) continue;
             return it.getType();
         }
         return null;

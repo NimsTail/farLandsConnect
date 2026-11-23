@@ -151,6 +151,7 @@ public record ShopListUpdater(UnityLauncher plugin, ZoneManager zoneManager, Sig
             Map<VariantKey, VariantAgg> totalsByVariant = new LinkedHashMap<>();
             for (var it : c.getInventory().getContents()) {
                 if (it == null || it.getType().isAir()) continue;
+                if (com.frammy.unitylauncher.marketplace.PickupReservationController.isReserved(it)) continue; // бронь самовывоза — уже продано
 
                 List<String> slugs = enchantSlugsOf(it);
                 String color = colorHexOf(it);
@@ -224,6 +225,7 @@ public record ShopListUpdater(UnityLauncher plugin, ZoneManager zoneManager, Sig
         for (int i = 0; i < inv.getSize() && have < qty; i++) {
             ItemStack it = inv.getItem(i);
             if (it == null || it.getType() != mat) continue;
+            if (com.frammy.unitylauncher.marketplace.PickupReservationController.isReserved(it)) continue; // бронь самовывоза — не продаём второй раз
             if (variantSig != null && !variantSig.equals(variantSig(it))) continue;
             slots.add(i);
             have += it.getAmount();

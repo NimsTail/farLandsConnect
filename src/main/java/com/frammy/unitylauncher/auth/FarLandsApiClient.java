@@ -669,6 +669,60 @@ public class FarLandsApiClient {
         send("POST", "/plugin/marketplace/" + encode(tradeId) + "/phantom-delay", body);
     }
 
+    // infra/pickup-reservation-design.md — бронь купленного с самовывозом
+    // товара прямо в сундуке авто-лота (см. PickupReservationController).
+    // material — имя из каталога ("Blue_Wool"), materialKey — Bukkit-ключ,
+    // если сайт его прислал (null — нет).
+    public record PickupReservation(
+            String id, String buyerUsername,
+            int chestX, int chestY, int chestZ,
+            String material, String materialKey,
+            int quantity, long expiresAtMs
+    ) {}
+
+    /** null — запрос не удался (не путать с "броней нет": иначе метки снялись бы). */
+    public List<PickupReservation> fetchPendingPickupReservations() {
+        if (!isEnabled()) return null;
+        List<PickupReservation> out = new ArrayList<>();
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/plugin/marketplace/pickup-reservations/pending"))
+                    .timeout(Duration.ofSeconds(10))
+                    .header("Authorization", "Bearer " + token)
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 300) {
+                log.warning("[FarLandsApi] GET /plugin/marketplace/pickup-reservations/pending -> HTTP " + response.statusCode());
+                return null;
+            }
+
+            JsonObject body = GSON.fromJson(response.body(), JsonObject.class);
+            for (JsonElement el : body.getAsJsonArray("reservations")) {
+                JsonObject o = el.getAsJsonObject();
+                out.add(new PickupReservation(
+                        o.get("id").getAsString(),
+                        o.get("buyerUsername").getAsString(),
+                        o.get("chestX").getAsInt(), o.get("chestY").getAsInt(), o.get("chestZ").getAsInt(),
+                        o.get("material").getAsString(),
+                        o.has("materialKey") && !o.get("materialKey").isJsonNull() ? o.get("materialKey").getAsString() : null,
+                        o.get("quantity").getAsInt(),
+                        o.get("expiresAtMs").getAsLong()
+                ));
+            }
+        } catch (Exception e) {
+            log.warning("[FarLandsApi] fetchPendingPickupReservations failed: " + e);
+            return null;
+        }
+        return out;
+    }
+
+    /** Покупатель забрал бронь. С повторами: повтор получает 409 (финал). */
+    public void reportPickupCollected(String reservationId) {
+        sendResult("/plugin/marketplace/pickup-reservations/" + encode(reservationId) + "/collected", new JsonObject());
+    }
+
     /**
      * GH#35 (мгновенный синк сундуков, 2026-08-28) — вызывается из
      * ShopController.onInventoryClose как только меняется содержимое
