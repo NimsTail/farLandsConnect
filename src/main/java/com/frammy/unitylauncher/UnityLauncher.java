@@ -747,12 +747,11 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         cfg.setIdleTimeout(15_000);
         cfg.setMaxLifetime(25 * 60_000);
         // БД сейчас удалённая (Hostinger), а сервер хостится локально — сеть/БД
-        // рвёт простаивающие соединения примерно через ~20с. Без keepalive
-        // единственное "запасное" (minimumIdle=1) соединение просто умирает в
-        // пуле и ловится только когда кто-то пытается им воспользоваться —
-        // отсюда "No operations allowed after connection closed". Пингуем
-        // каждые 10с, с запасом до дедлайна в ~20с.
-        cfg.setKeepaliveTime(10_000);
+        // рвёт простаивающие соединения примерно через ~20с. Hikari молча
+        // отключает keepalive < 30с (было 10_000 — не работало вовсе), поэтому
+        // 30с — минимум; должен быть < maxLifetime. Соединение, умершее между
+        // пингами, ловит проверка Hikari при выдаче из пула (isValid).
+        cfg.setKeepaliveTime(30_000);
         cfg.setPoolName("UnityLauncher-DBPool");
         cfg.setDriverClassName("com.mysql.cj.jdbc.Driver");
         return cfg;
