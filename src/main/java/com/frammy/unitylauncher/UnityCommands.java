@@ -574,6 +574,8 @@ public class UnityCommands {
         refreshPlayerCacheAsync(p.getName());
 
         // Списываем из ведущей руки ровно нужное количество (тот же тик, рука проверена выше)
+        org.bukkit.inventory.ItemStack taken = hand.clone();
+        taken.setAmount(dd.amount);
         if (have == dd.amount) {
             p.getInventory().setItemInMainHand(null);
         } else {
@@ -587,6 +589,15 @@ public class UnityCommands {
         boolean paid = addMoneyToPlayer(p.getName(), total);
 
         if (!paid) {
+            // Откатываем: задание снова открыто, предметы возвращаются игроку.
+            boolean reopened = flipDayDealIfUnchanged(p.getName(), newRaw, dd.raw);
+            refreshPlayerCacheAsync(p.getName());
+            p.getInventory().addItem(taken).values()
+                    .forEach(rest -> p.getWorld().dropItemNaturally(p.getLocation(), rest));
+            if (reopened) {
+                p.sendMessage(ChatColor.RED + "Не удалось начислить деньги (БД недоступна). Предметы возвращены, задание не закрыто — попробуй позже.");
+                return;
+            }
             p.sendMessage(ChatColor.RED + "Не удалось начислить деньги (БД недоступна).");
             p.sendMessage(ChatColor.GRAY + "DayDeal (для компенсации):");
             p.sendMessage(ChatColor.GRAY + "Предмет: " + ChatColor.WHITE + dd.itemName);

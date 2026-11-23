@@ -999,7 +999,7 @@ public final class ShopController {
                 Bukkit.getScheduler().runTask(plugin, () ->
                         dispenseThenPaySeller(p, chestLoc, mat, variantSig, qty, price, ownerName, saleNote,
                                 () -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () ->
-                                        UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: товара не хватило")),
+                                        refundBuyerLogged(p.getName(), price)),
                                 ChatColor.RED + "Покупка не удалась: товара в сундуке не хватает. Деньги возвращены.",
                                 ChatColor.GREEN + "Куплено: " + ChatColor.YELLOW + qty + "x " + ChatColor.RESET
                                         + pretty(mat) + ChatColor.GREEN + " за " + ChatColor.YELLOW + price + " Ⓕ"));
@@ -1126,7 +1126,7 @@ public final class ShopController {
                 Bukkit.getScheduler().runTask(plugin, () ->
                         dispenseThenPaySeller(p, chestLoc, mat, null, qty, price, ownerName, saleNote,
                                 () -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () ->
-                                        UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: товара не хватило")),
+                                        refundBuyerLogged(p.getName(), price)),
                                 ChatColor.RED + "Товара не хватает. Деньги возвращены.",
                                 ChatColor.GREEN + "Куплено: " + ChatColor.YELLOW + qty + "x " + ChatColor.RESET
                                         + pretty(mat) + ChatColor.GREEN + " за " + ChatColor.YELLOW + price + " Ⓕ"));
@@ -1565,4 +1565,11 @@ public final class ShopController {
         return na.equalsIgnoreCase(nb);
     }
 
+
+    /** Buyer refund after a failed dispense; a failure here is money lost, so it must be visible. */
+    private static void refundBuyerLogged(String buyer, double price) {
+        if (!UnityCommands.getInstance().applyMoneyDelta(buyer, price, "Возврат: товара не хватило")) {
+            Bukkit.getLogger().severe("[Shop] REFUND FAILED: " + buyer + " must be compensated " + price + " Ⓕ manually");
+        }
+    }
 }

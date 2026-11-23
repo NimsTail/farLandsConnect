@@ -823,6 +823,13 @@ public final class AtmController {
                             }
 
                             new BukkitRunnable(){ @Override public void run(){
+                                if (!p.isOnline()) { // вышел, пока списывали: вернуть казне, иначе деньги пропадут
+                                    Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
+                                        if (!UnityLauncher.getInstance().countryRegistryJdbc.addCountryMoneySync(myCountry, gross))
+                                            Bukkit.getLogger().severe("[ATM] treasury refund FAILED: " + myCountry + " +" + gross);
+                                    });
+                                    return;
+                                }
                                 // Казна платит gross, игрок получает запрошенную сумму целиком.
                                 announceFee(p, amount, rate);
                                 plugin.moneyManager.giveCash(p, amount);
