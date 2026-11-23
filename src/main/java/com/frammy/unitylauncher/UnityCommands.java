@@ -536,21 +536,19 @@ public class UnityCommands {
             return;
         }
 
-        // Не пытаемся угадывать Material по "Brown Banner" — это ненадёжно.
-        // Но можем сделать минимальную проверку по displayName, если он задан:
-        // Если displayName совпадает — хорошо; если не задан — не мешаем.
-        boolean nameOk = true;
-        try {
-            var meta = hand.getItemMeta();
-            if (meta != null && meta.hasDisplayName()) {
-                String dn = org.bukkit.ChatColor.stripColor(meta.getDisplayName());
-                if (!dn.isBlank()) {
-                    nameOk = dn.equalsIgnoreCase(dd.itemName);
-                }
-            }
-        } catch (Exception ignored) {}
-
-        if (!nameOk) {
+        // Проверяем тип предмета. Сайт кладёт в itemName каталожное имя
+        // ("Brown Banner"), matchMaterial сам приводит его к BROWN_BANNER.
+        // Если в 6-м поле есть Bukkit-ключ материала — берём его. Не смогли
+        // распознать — не засчитываем (раньше подходил любой предмет).
+        String[] ddParts = dd.raw.split(";", -1);
+        String matKey = (ddParts.length >= 6 && !ddParts[5].isBlank()) ? ddParts[5].trim() : dd.itemName;
+        org.bukkit.Material need = org.bukkit.Material.matchMaterial(matKey);
+        if (need == null) {
+            p.sendMessage(ChatColor.RED + "Не удалось определить предмет задания (" + ChatColor.WHITE + dd.itemName
+                    + ChatColor.RED + "). Сообщи администрации.");
+            return;
+        }
+        if (hand.getType() != need) {
             p.sendMessage(ChatColor.RED + "В руке должен быть предмет: " + ChatColor.WHITE + dd.itemName);
             return;
         }
@@ -570,13 +568,9 @@ public class UnityCommands {
             p.getInventory().setItemInMainHand(hand);
         }
 
-        // Помечаем как выполненный: "0;item;amount;price;rerolls"
-        // Рероллы не трогаем — просто сохраняем хвост, если он есть
-        String[] parts = dd.raw.split(";", -1);
-        String rerollsPart = (parts.length >= 5) ? parts[4] : ""; // не показываем, но сохраняем
-        String newRaw = "0;" + dd.itemName + ";" + dd.amount + ";" +
-                // сохраняем price как было, но нормально: с запятой можно оставить
-                parts[3] + (parts.length >= 5 ? (";" + rerollsPart) : "");
+        // Помечаем как выполненный: "0;item;amount;price;rerolls[;materialKey]" —
+        // меняем только код, хвост (рероллы, ключ материала) сохраняем как был
+        String newRaw = "0" + dd.raw.substring(dd.raw.indexOf(';'));
 
         // Запись в GeneralData.dayDealCode + обновление кэша через mergeAndUpdatePlayerData
         mergeAndUpdatePlayerData(p.getName(), "GeneralData", java.util.Map.of("dayDealCode", newRaw));
