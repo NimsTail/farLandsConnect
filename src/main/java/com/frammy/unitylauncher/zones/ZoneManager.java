@@ -1225,9 +1225,9 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
             if (countryName == null || countryName.isBlank()) countryName = zi.getName();
             if (!ul.countryRegistryJdbc.countryExistsCached(countryName)) orphans.add(zi);
         }
-        if (orphans.size() > countryZones.size() * 0.2) {
+        if (orphans.size() > Math.max(1, countryZones.size() * 0.2)) { // one real orphan may go even on a small server
             Bukkit.getLogger().warning("[Zones] cleanupOrphanCountryZones: " + orphans.size() + " of "
-                    + countryZones.size() + " COUNTRY zones have no country in the DB (>20%) — NOT disbanding. "
+                    + countryZones.size() + " COUNTRY zones have no country in the DB (>20% and more than one) — NOT disbanding. "
                     + "Check the DB; remove legitimately dead countries with /ul zone remove.");
             return;
         }
