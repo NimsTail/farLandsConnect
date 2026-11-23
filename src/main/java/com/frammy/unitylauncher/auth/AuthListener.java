@@ -214,6 +214,9 @@ public class AuthListener implements Listener {
 
     private void promptIfDue(Player p) {
         UUID id = p.getUniqueId();
+        // Пока идёт проверка при входе подсказывать нечего — и не жжём кулдаун,
+        // иначе первая подсказка после проверки может проглотиться.
+        if (!needLogin.contains(id) && !needRegister.contains(id)) return;
         long now = System.currentTimeMillis();
         long last = lastPrompt.getOrDefault(id, 0L);
         if (now - last < PROMPT_COOLDOWN_MS) return; // ещё рано — не спамим
