@@ -674,22 +674,8 @@ public class UnityCommands {
                 writeUserMoney(con, playerName, next);
                 con.commit();
 
-                // sync cache
-                CachedPlayerRow cached = getOrLoadCachedPlayer(playerName);
-                if (cached != null && cached.general != null) {
-                    JsonObject newGen = cached.general.deepCopy();
-                    newGen.addProperty("money", next);
-                    upsertCacheAfterUpdate(playerName, "GeneralData", newGen);
-                }
-
-                // mirror to the site's /bank transaction history (best-effort, see FarLandsApiClient)
-                if (mirror) {
-                    UnityLauncher ul = UnityLauncher.getInstance();
-                    if (ul != null && ul.getFarLandsApi() != null) {
-                        ul.getFarLandsApi().transaction(playerName, Math.abs(delta), delta > 0, note);
-                    }
-                }
-
+                syncCachedMoney(playerName, next);
+                if (mirror) mirrorTransaction(playerName, delta, note);
                 return true;
 
             } catch (Exception e) {
@@ -702,6 +688,78 @@ public class UnityCommands {
         } catch (Exception e) {
             Bukkit.getLogger().warning("[UnityCommands] applyMoneyDelta outer failed: " + e);
             return false;
+        }
+    }
+
+    private void syncCachedMoney(String playerName, double money) {
+        CachedPlayerRow cached = getOrLoadCachedPlayer(playerName);
+        if (cached != null && cached.general != null) {
+            JsonObject newGen = cached.general.deepCopy();
+            newGen.addProperty("money", money);
+            upsertCacheAfterUpdate(playerName, "GeneralData", newGen);
+        }
+    }
+
+    /** Mirror to the site's /bank transaction history (best-effort, see FarLandsApiClient). */
+    private static void mirrorTransaction(String playerName, double delta, String note) {
+        UnityLauncher ul = UnityLauncher.getInstance();
+        if (ul != null && ul.getFarLandsApi() != null) {
+            ul.getFarLandsApi().transaction(playerName, Math.abs(delta), delta > 0, note);
+        }
+    }
+
+    /**
+     * Player-to-player move in ONE transaction: debits {@code debit} from
+     * {@code from} and credits {@code credit} to {@code to}, both rows locked
+     * FOR UPDATE in a fixed (lower-cased name) order so two opposite transfers
+     * can't deadlock. Either both legs land or neither does — no best-effort
+     * refund. Returns null on success, otherwise an error code:
+     * bad_params, insufficient_funds, sender_not_found, recipient_not_found,
+     * db_error.
+     */
+    public String transferMoney(@NotNull String from, @NotNull String to, double debit, double credit,
+                                String fromNote, String toNote, boolean mirror) {
+        if (from.isBlank() || to.isBlank() || from.equalsIgnoreCase(to)) return "bad_params";
+        if (!(debit > 0) || !(credit > 0) || credit > debit + 1e-9) return "bad_params";
+
+        try (Connection con = DBConnect()) {
+            if (con == null) return "db_error";
+            con.setAutoCommit(false);
+            try {
+                boolean fromFirst = from.toLowerCase(java.util.Locale.ROOT).compareTo(to.toLowerCase(java.util.Locale.ROOT)) <= 0;
+                UserJsonRow a = lockAndReadUserMoney(con, fromFirst ? from : to);
+                UserJsonRow b = lockAndReadUserMoney(con, fromFirst ? to : from);
+                UserJsonRow fromRow = fromFirst ? a : b;
+                UserJsonRow toRow = fromFirst ? b : a;
+                if (fromRow == null) { con.rollback(); return "sender_not_found"; }
+                if (toRow == null) { con.rollback(); return "recipient_not_found"; }
+
+                double fromNext = (fromRow.money != null ? fromRow.money : 0.0) - debit;
+                if (fromNext < -1e-9) { con.rollback(); return "insufficient_funds"; }
+                if (fromNext < 0) fromNext = 0;
+                double toNext = (toRow.money != null ? toRow.money : 0.0) + credit;
+
+                writeUserMoney(con, from, fromNext);
+                writeUserMoney(con, to, toNext);
+                con.commit();
+
+                syncCachedMoney(from, fromNext);
+                syncCachedMoney(to, toNext);
+                if (mirror) {
+                    mirrorTransaction(from, -debit, fromNote);
+                    mirrorTransaction(to, credit, toNote);
+                }
+                return null;
+            } catch (Exception e) {
+                try { con.rollback(); } catch (Exception ignored) {}
+                Bukkit.getLogger().warning("[UnityCommands] transferMoney failed: " + e);
+                return "db_error";
+            } finally {
+                try { con.setAutoCommit(true); } catch (Exception ignored) {}
+            }
+        } catch (Exception e) {
+            Bukkit.getLogger().warning("[UnityCommands] transferMoney outer failed: " + e);
+            return "db_error";
         }
     }
 
