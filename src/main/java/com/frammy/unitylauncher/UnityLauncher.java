@@ -479,6 +479,11 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         getServer().getPluginManager().registerEvents(phantomDelivery, this);
         phantomDelivery.start(20L); // ~1s
 
+        // infra/pickup-reservation-design.md — бронь самовывоза в сундуке авто-лота.
+        var pickupReservations = new com.frammy.unitylauncher.marketplace.PickupReservationController(this, farLandsApi);
+        getServer().getPluginManager().registerEvents(pickupReservations, this);
+        pickupReservations.start(40L); // ~2s
+
         // --- server messages (join/quit/advancement phrases) ---
         this.serverMessagesListener = ServerMessagesListener.init(this);
 
