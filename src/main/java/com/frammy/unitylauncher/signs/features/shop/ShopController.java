@@ -920,6 +920,8 @@ public final class ShopController {
         final double price = item.dealPrice();
         final int qty = item.dealQuantity();
         final Location chestLoc = SignStore.keyLoc(item.chestLocation());
+        // вариант лота (как в ShopListUpdater): выдаём только его, а не первый стак сундука
+        final String variantSig = item.enchantments() == null ? "" : String.join(",", item.enchantments());
 
         final boolean payWithCash = isCashInHand(p);
         final String saleNote = shopSaleNote(loc, qty, mat, p.getName());
@@ -950,7 +952,7 @@ public final class ShopController {
                                 + ChatColor.RED + " (у тебя: " + ChatColor.YELLOW + haveCash + " Ⓕ" + ChatColor.RED + ")");
                         return;
                     }
-                    dispenseThenPaySeller(p, chestLoc, mat, qty, price, ownerName, saleNote,
+                    dispenseThenPaySeller(p, chestLoc, mat, variantSig, qty, price, ownerName, saleNote,
                             () -> mm.giveCash(p, price),
                             ChatColor.RED + "Покупка не удалась: товара в сундуке не хватает. Деньги возвращены наличными.",
                             ChatColor.GREEN + "Куплено (наличными): " + ChatColor.YELLOW + qty + "x " + ChatColor.RESET
@@ -995,7 +997,7 @@ public final class ShopController {
 
                 // выдача товара — ТОЛЬКО main thread
                 Bukkit.getScheduler().runTask(plugin, () ->
-                        dispenseThenPaySeller(p, chestLoc, mat, qty, price, ownerName, saleNote,
+                        dispenseThenPaySeller(p, chestLoc, mat, variantSig, qty, price, ownerName, saleNote,
                                 () -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () ->
                                         UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: товара не хватило")),
                                 ChatColor.RED + "Покупка не удалась: товара в сундуке не хватает. Деньги возвращены.",
@@ -1077,7 +1079,7 @@ public final class ShopController {
                                 + ChatColor.RED + " (у тебя: " + ChatColor.YELLOW + haveCash + " Ⓕ" + ChatColor.RED + ")");
                         return;
                     }
-                    dispenseThenPaySeller(p, chestLoc, mat, qty, price, ownerName, saleNote,
+                    dispenseThenPaySeller(p, chestLoc, mat, null, qty, price, ownerName, saleNote,
                             () -> mm.giveCash(p, price),
                             ChatColor.RED + "Товара не хватает. Деньги возвращены наличными.",
                             ChatColor.GREEN + "Куплено (наличными): " + ChatColor.YELLOW + qty + "x " + ChatColor.RESET
@@ -1122,7 +1124,7 @@ public final class ShopController {
 
                 // выдача товара — ТОЛЬКО main thread
                 Bukkit.getScheduler().runTask(plugin, () ->
-                        dispenseThenPaySeller(p, chestLoc, mat, qty, price, ownerName, saleNote,
+                        dispenseThenPaySeller(p, chestLoc, mat, null, qty, price, ownerName, saleNote,
                                 () -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () ->
                                         UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: товара не хватило")),
                                 ChatColor.RED + "Товара не хватает. Деньги возвращены.",
@@ -1136,10 +1138,10 @@ public final class ShopController {
      * Main thread; деньги покупателя уже сняты. Выдаём товар, и только после
      * успешной выдачи зачисляем продавцу (async). Не вышло выдать — refundBuyer.
      */
-    private void dispenseThenPaySeller(Player p, Location chestLoc, Material mat, int qty, double price,
+    private void dispenseThenPaySeller(Player p, Location chestLoc, Material mat, String enchantSig, int qty, double price,
                                        String ownerName, String saleNote,
                                        Runnable refundBuyer, String failMsg, String okMsg) {
-        boolean ok = p.isOnline() && dispenseFromChestAtomic(chestLoc, mat, qty, p);
+        boolean ok = p.isOnline() && dispenseFromChestAtomic(chestLoc, mat, enchantSig, qty, p);
         if (!ok) {
             refundBuyer.run();
             p.sendMessage(failMsg);
@@ -1190,8 +1192,15 @@ public final class ShopController {
         return null;
     }
 
-    private boolean dispenseFromChestAtomic(Location chestLoc, Material ignoredMat, int qty, Player buyer) {
-        if (chestLoc == null || buyer == null || chestLoc.getWorld() == null) return false;
+    /**
+     * Забирает из сундука qty штук ровно того варианта, который купили:
+     * тот же Material и (если enchantSig != null) та же сигнатура зачарований,
+     * что и в ShopListUpdater (прочность в ключ не входит — берём любые стаки
+     * варианта). Раньше выдавался первый стак сундука, какой бы товар ни был
+     * выбран. Не хватает — ничего не трогаем и возвращаем false (возврат денег).
+     */
+    private boolean dispenseFromChestAtomic(Location chestLoc, Material mat, String enchantSig, int qty, Player buyer) {
+        if (chestLoc == null || buyer == null || mat == null || qty <= 0 || chestLoc.getWorld() == null) return false;
 
         if (!Bukkit.isPrimaryThread()) {
             plugin.getLogger().warning("[Shop] dispenseFromChestAtomic called off-main-thread! chestLoc=" + chestLoc);
@@ -1213,48 +1222,34 @@ public final class ShopController {
 
             Inventory inv = container.getInventory();
 
-            ItemStack template = findFirstNonAir(inv);
-            if (template == null) return false;
-
-            int before = countSimilar(inv, template);
-            if (before < qty) return false;
-
-            ItemStack[] snapshot = Arrays.stream(inv.getContents())
-                    .map(it -> it == null ? null : it.clone())
-                    .toArray(ItemStack[]::new);
-
-            ItemStack request = template.clone();
-            request.setAmount(qty);
-
-            Map<Integer, ItemStack> notRemoved = inv.removeItem(request);
-
-            if (!notRemoved.isEmpty()) {
-                inv.setContents(snapshot);
-                safeUpdate(container);
-                return false;
+            // сначала считаем, хватит ли; только потом меняем инвентарь
+            List<Integer> slots = new ArrayList<>();
+            int have = 0;
+            for (int i = 0; i < inv.getSize() && have < qty; i++) {
+                ItemStack it = inv.getItem(i);
+                if (it == null || it.getType() != mat) continue;
+                if (enchantSig != null && !enchantSig.equals(String.join(",", ShopListUpdater.enchantSlugsOf(it)))) continue;
+                slots.add(i);
+                have += it.getAmount();
             }
+            if (have < qty) return false;
 
+            List<ItemStack> out = new ArrayList<>();
+            int left = qty;
+            for (int i : slots) {
+                ItemStack it = inv.getItem(i);
+                int take = Math.min(left, it.getAmount());
+                ItemStack part = it.clone();
+                part.setAmount(take);
+                out.add(part);
+                if (take == it.getAmount()) inv.setItem(i, null);
+                else { it.setAmount(it.getAmount() - take); inv.setItem(i, it); }
+                left -= take;
+            }
             safeUpdate(container);
 
-            int after = countSimilar(inv, template);
-            if (after != before - qty) {
-                plugin.getLogger().warning("[Shop] Container did NOT decrease properly! before=" + before
-                        + " after=" + after + " qty=" + qty + " chestLoc=" + chestLoc
-                        + " type=" + block.getType() + " template=" + template.getType());
-
-                inv.setContents(snapshot);
-                safeUpdate(container);
-                return false;
-            }
-
-            ItemStack out = template.clone();
-            out.setAmount(qty);
-
-            Map<Integer, ItemStack> leftovers = buyer.getInventory().addItem(out);
-            if (!leftovers.isEmpty()) {
-                leftovers.values().forEach(it -> buyer.getWorld().dropItemNaturally(buyer.getLocation(), it));
-            }
-
+            Map<Integer, ItemStack> leftovers = buyer.getInventory().addItem(out.toArray(new ItemStack[0]));
+            leftovers.values().forEach(it -> buyer.getWorld().dropItemNaturally(buyer.getLocation(), it));
             return true;
         } finally {
             entry.lastUsedMs = System.currentTimeMillis(); // отметим использование в конце
@@ -1264,26 +1259,6 @@ public final class ShopController {
 
     private static void safeUpdate(Container c) {
         try { c.update(true, false); } catch (Throwable ignored) {}
-    }
-
-    private static int countSimilar(Inventory inv, ItemStack template) {
-        int n = 0;
-        for (ItemStack it : inv.getContents()) {
-            if (it == null || it.getType().isAir()) continue;
-            if (!it.isSimilar(template)) continue;
-            n += it.getAmount();
-        }
-        return n;
-    }
-
-    /** Первая не-air вещь (с meta), которая будет "товаром" этого сундука. */
-    private static ItemStack findFirstNonAir(Inventory inv) {
-        for (int i = 0; i < inv.getSize(); i++) {
-            ItemStack it = inv.getItem(i);
-            if (it == null || it.getType().isAir()) continue;
-            return it;
-        }
-        return null;
     }
 
     private String pretty(Material mat) {
