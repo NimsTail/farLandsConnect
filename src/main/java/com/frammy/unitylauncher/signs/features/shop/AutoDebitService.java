@@ -703,18 +703,19 @@ public final class AutoDebitService {
     private boolean charge(Player p, double amount, String priority, Location chestLoc, Material material, int qty) {
         if (amount <= 0) return true;
         boolean cashFirst = !"BANK".equalsIgnoreCase(priority);
+        String note = "Покупка в магазине: " + qty + "x " + material.name();
         boolean ok = cashFirst
-                ? (plugin.moneyManager.spendCash(p, amount) || chargeBank(p, amount))
-                : (chargeBank(p, amount) || plugin.moneyManager.spendCash(p, amount));
+                ? (plugin.moneyManager.spendCash(p, amount) || chargeBank(p, amount, note))
+                : (chargeBank(p, amount, note) || plugin.moneyManager.spendCash(p, amount));
         if (ok) creditSeller(chestLoc, amount, p.getName(), material, qty);
         return ok;
     }
 
-    private boolean chargeBank(Player p, double amount) {
-        Double bal = UnityCommands.getInstance().getBalance(p.getName());
-        if (bal == null || bal < amount - 1e-9) return false;
-        plugin.moneyManager.withdraw(p.getName(), amount); // async запись — баланс уже проверен синхронно выше, note внутри withdraw() общий
-        return true;
+    private boolean chargeBank(Player p, double amount, String note) {
+        // Атомарное списание (FOR UPDATE) вместо «проверили баланс + async withdraw»:
+        // тот молча не списывал при гонке, а предмет и деньги продавцу уже были выданы.
+        // Синхронный вызов БД на main был и раньше (getBalance) — один заменён другим.
+        return UnityCommands.getInstance().applyMoneyDelta(p.getName(), -amount, note);
     }
 
     /**

@@ -922,7 +922,11 @@ public final class ShopController {
         final Location chestLoc = SignStore.keyLoc(item.chestLocation());
 
         final boolean payWithCash = isCashInHand(p);
+        final String saleNote = shopSaleNote(loc, qty, mat, p.getName());
 
+        // Порядок (review S7): деньги покупателя → выдача товара (main) → зачисление
+        // продавцу. Продавцу никогда не платим до выдачи, поэтому при нехватке
+        // товара откатывать с него нечего.
         if (payWithCash) {
             MoneyManager mm = UnityLauncher.getInstance().getMoneyManager();
             if (mm == null) {
@@ -930,69 +934,34 @@ public final class ShopController {
                 return;
             }
 
-            // Списываем наличку сразу (main thread) — spendCash сам даст сдачу.
-            boolean okCash = mm.spendCash(p, price);
-            if (!okCash) {
-                double haveCash = mm.getInventoryCash(p); // <-- ТА САМАЯ СТРОЧКА
-                p.sendMessage(ChatColor.RED + "Недостаточно наличных. Нужно: "
-                        + ChatColor.YELLOW + price + " Ⓕ"
-                        + ChatColor.RED + " (у тебя: " + ChatColor.YELLOW + haveCash + " Ⓕ" + ChatColor.RED + ")");
-                return;
-            }
-
-            // Зачисляем в казну async, а выдачу товара делаем main thread
             Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                boolean deposited = true;
-                try {
-                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price, shopSaleNote(loc, qty, mat, p.getName()));
-                    if (!credited) {
-                        Bukkit.getScheduler().runTask(plugin, () -> {
-                            mm.giveCash(p, price);
-                            p.sendMessage(ChatColor.RED + "Оплата не прошла (владелец недоступен). Деньги возвращены наличными.");
-                        });
-                        return;
-                    }
-
-                } catch (Exception ex) {
-                    deposited = false;
-                    plugin.getLogger().warning("[Shop] addCountryMoney failed for " + ownerName + ": " + ex);
-                }
-
-                if (!deposited) {
-                    // вернуть наличку (best-effort)
-                    Bukkit.getScheduler().runTask(plugin, () -> {
-                        mm.giveCash(p, price);
-                        p.sendMessage(ChatColor.RED + "Оплата не прошла (казна). Деньги возвращены наличными.");
-                    });
-                    return;
-                }
-
+                boolean sellerOk = UnityCommands.getInstance().getBalance(ownerName) != null;
                 Bukkit.getScheduler().runTask(plugin, () -> {
-                    boolean ok = dispenseFromChestAtomic(chestLoc, mat, qty, p);
-                    if (!ok) {
-                        // товара нет → вернуть наличку + откатить казну best-effort
-                        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                            try { UnityCommands.getInstance().applyMoneyDelta(ownerName, -price, "Возврат: покупка отменена (товара не хватило)"); }
-                            catch (Throwable ignored) {}
-                        });
-                        mm.giveCash(p, price);
-
-                        p.sendMessage(ChatColor.RED + "Покупка не удалась: товара в сундуке не хватает. Деньги возвращены наличными.");
-                        try { shopLists.updateAllRelatedShopListSigns(chestLoc); } catch (Throwable ignored) {}
+                    if (!p.isOnline()) return;
+                    if (!sellerOk) {
+                        p.sendMessage(ChatColor.RED + "Оплата не прошла (владелец недоступен).");
                         return;
                     }
-
-                    p.sendMessage(ChatColor.GREEN + "Куплено (наличными): " + ChatColor.YELLOW + qty + "x " + ChatColor.RESET
-                            + pretty(mat) + ChatColor.GREEN + " за " + ChatColor.YELLOW + price + " Ⓕ");
-
-                    try { shopLists.updateAllRelatedShopListSigns(chestLoc); } catch (Throwable ignored) {}
+                    // наличка и товар — в одном тике main thread; spendCash сам даст сдачу
+                    if (!mm.spendCash(p, price)) {
+                        double haveCash = mm.getInventoryCash(p);
+                        p.sendMessage(ChatColor.RED + "Недостаточно наличных. Нужно: "
+                                + ChatColor.YELLOW + price + " Ⓕ"
+                                + ChatColor.RED + " (у тебя: " + ChatColor.YELLOW + haveCash + " Ⓕ" + ChatColor.RED + ")");
+                        return;
+                    }
+                    dispenseThenPaySeller(p, chestLoc, mat, qty, price, ownerName, saleNote,
+                            () -> mm.giveCash(p, price),
+                            ChatColor.RED + "Покупка не удалась: товара в сундуке не хватает. Деньги возвращены наличными.",
+                            ChatColor.GREEN + "Куплено (наличными): " + ChatColor.YELLOW + qty + "x " + ChatColor.RESET
+                                    + pretty(mat) + ChatColor.GREEN + " за " + ChatColor.YELLOW + price + " Ⓕ");
                 });
             });
 
             return; // важно: не идти в банковскую ветку
         }
 
-        // 1) сначала проверим баланс игрока и спишем деньги (async)
+        // банковская ветка: проверим баланс и спишем деньги (async)
         UnityCommands.getInstance().getPlayerInfo(p.getName(), data -> {
             if (data == null) {
                 Bukkit.getScheduler().runTask(plugin, () ->
@@ -1001,73 +970,37 @@ public final class ShopController {
             }
 
             if (data.money + 1e-9 < price) {
-
-                // FIX: кэш мог быть протухшим — инвалидируем и прогреваем заново
+                // кэш мог быть протухшим — инвалидируем и прогреваем заново
                 UnityCommands.getInstance().refreshPlayerCacheAsync(p.getName());
-
                 Bukkit.getScheduler().runTask(plugin, () ->
                         p.sendMessage(ChatColor.RED + "Недостаточно денег на счёте. Нужно: " + ChatColor.YELLOW + price + " Ⓕ"));
                 return;
             }
 
             Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+                if (UnityCommands.getInstance().getBalance(ownerName) == null) {
+                    Bukkit.getScheduler().runTask(plugin, () ->
+                            p.sendMessage(ChatColor.RED + "Оплата не прошла (владелец недоступен)."));
+                    return;
+                }
+
                 boolean withdrew = UnityCommands.getInstance().applyMoneyDelta(p.getName(), -price, "Покупка в магазине: " + qty + "x " + mat.name());
                 if (!withdrew) {
-
                     // На случай гонки/минуса/протухшего кэша — обновим
                     UnityCommands.getInstance().refreshPlayerCacheAsync(p.getName());
-
                     Bukkit.getScheduler().runTask(plugin, () ->
                             p.sendMessage(ChatColor.RED + "Не удалось списать деньги (БД)."));
                     return;
                 }
 
-                // 2) зачисляем в казну страны (async). если не удалось — вернём деньги и выйдем
-                boolean deposited = true;
-                try {
-                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price, shopSaleNote(loc, qty, mat, p.getName()));
-                    if (!credited) {
-                        UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: продавец недоступен"); // вернуть покупателю
-                        Bukkit.getScheduler().runTask(plugin, () ->
-                                p.sendMessage(ChatColor.RED + "Оплата не прошла (владелец недоступен). Деньги возвращены."));
-                        return;
-                    }
-                } catch (Exception ex) {
-                    deposited = false;
-                    plugin.getLogger().warning("[Shop] addCountryMoney failed for " + ownerName + ": " + ex);
-                }
-
-                if (!deposited) {
-                    UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: ошибка казны"); // best-effort refund
-                    Bukkit.getScheduler().runTask(plugin, () ->
-                            p.sendMessage(ChatColor.RED + "Оплата не прошла (казна). Деньги возвращены."));
-                    return;
-                }
-
-                // 3) выдача товара — ТОЛЬКО main thread
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    boolean ok = dispenseFromChestAtomic(chestLoc, mat, qty, p);
-                    if (!ok) {
-                        // товара нет → возврат денег (async) + сообщение (main)
-                        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                            UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: товара не хватило");
-                            try {
-                                UnityCommands.getInstance().applyMoneyDelta(ownerName, -price, "Возврат: покупка отменена (товара не хватило)");
-                            } catch (Exception ignored) {}
-                        });
-
-                        p.sendMessage(ChatColor.RED + "Покупка не удалась: товара в сундуке не хватает. Деньги возвращены.");
-                        // пересоберём листы, чтобы обновилось “доступное количество”
-                        try { shopLists.updateAllRelatedShopListSigns(chestLoc); } catch (Throwable ignored) {}
-                        return;
-                    }
-
-                    p.sendMessage(ChatColor.GREEN + "Куплено: " + ChatColor.YELLOW + qty + "x " + ChatColor.RESET
-                            + pretty(mat) + ChatColor.GREEN + " за " + ChatColor.YELLOW + price + " Ⓕ");
-
-                    // после покупки обновим листы
-                    try { shopLists.updateAllRelatedShopListSigns(chestLoc); } catch (Throwable ignored) {}
-                });
+                // выдача товара — ТОЛЬКО main thread
+                Bukkit.getScheduler().runTask(plugin, () ->
+                        dispenseThenPaySeller(p, chestLoc, mat, qty, price, ownerName, saleNote,
+                                () -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () ->
+                                        UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: товара не хватило")),
+                                ChatColor.RED + "Покупка не удалась: товара в сундуке не хватает. Деньги возвращены.",
+                                ChatColor.GREEN + "Куплено: " + ChatColor.YELLOW + qty + "x " + ChatColor.RESET
+                                        + pretty(mat) + ChatColor.GREEN + " за " + ChatColor.YELLOW + price + " Ⓕ"));
             });
         });
     }
@@ -1115,9 +1048,12 @@ public final class ShopController {
             return;
         }
 
-        // наличка?
         final boolean payWithCash = isCashInHand(p);
+        final String saleNote = shopSaleNote(signLoc, qty, mat, p.getName());
 
+        // Порядок (review S7): деньги покупателя → выдача товара (main) → зачисление
+        // продавцу. Продавцу никогда не платим до выдачи, поэтому при нехватке
+        // товара откатывать с него нечего.
         if (payWithCash) {
             MoneyManager mm = UnityLauncher.getInstance().getMoneyManager();
             if (mm == null) {
@@ -1125,63 +1061,34 @@ public final class ShopController {
                 return;
             }
 
-            boolean okCash = mm.spendCash(p, price);
-            if (!okCash) {
-                double haveCash = mm.getInventoryCash(p);
-                p.sendMessage(ChatColor.RED + "Недостаточно наличных. Нужно: "
-                        + ChatColor.YELLOW + price + " Ⓕ"
-                        + ChatColor.RED + " (у тебя: " + ChatColor.YELLOW + haveCash + " Ⓕ" + ChatColor.RED + ")");
-                return;
-            }
-
             Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                boolean deposited = true;
-                try {
-                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price, shopSaleNote(signLoc, qty, mat, p.getName()));
-                    if (!credited) {
-                        Bukkit.getScheduler().runTask(plugin, () -> {
-                            mm.giveCash(p, price);
-                            p.sendMessage(ChatColor.RED + "Оплата не прошла (владелец недоступен). Деньги возвращены наличными.");
-                        });
-                        return;
-                    }
-                } catch (Exception ex) {
-                    deposited = false;
-                    plugin.getLogger().warning("[Shop] addCountryMoney failed for " + ownerName + ": " + ex);
-                }
-
-                if (!deposited) {
-                    Bukkit.getScheduler().runTask(plugin, () -> {
-                        mm.giveCash(p, price);
-                        p.sendMessage(ChatColor.RED + "Оплата не прошла (казна). Деньги возвращены наличными.");
-                    });
-                    return;
-                }
-
+                boolean sellerOk = UnityCommands.getInstance().getBalance(ownerName) != null;
                 Bukkit.getScheduler().runTask(plugin, () -> {
-                    boolean ok = dispenseFromChestAtomic(chestLoc, mat, qty, p);
-                    if (!ok) {
-                        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                            try { UnityCommands.getInstance().applyMoneyDelta(ownerName, -price, "Возврат: покупка отменена (товара не хватило)"); }
-                            catch (Throwable ignored) {}
-                        });
-                        mm.giveCash(p, price);
-                        p.sendMessage(ChatColor.RED + "Товара не хватает. Деньги возвращены наличными.");
-                        try { shopLists.updateAllRelatedShopListSigns(chestLoc); } catch (Throwable ignored) {}
+                    if (!p.isOnline()) return;
+                    if (!sellerOk) {
+                        p.sendMessage(ChatColor.RED + "Оплата не прошла (владелец недоступен).");
                         return;
                     }
-
-                    p.sendMessage(ChatColor.GREEN + "Куплено (наличными): " + ChatColor.YELLOW + qty + "x "
-                            + ChatColor.RESET + pretty(mat) + ChatColor.GREEN + " за " + ChatColor.YELLOW + price + " Ⓕ");
-
-                    try { shopLists.updateAllRelatedShopListSigns(chestLoc); } catch (Throwable ignored) {}
+                    // наличка и товар — в одном тике main thread; spendCash сам даст сдачу
+                    if (!mm.spendCash(p, price)) {
+                        double haveCash = mm.getInventoryCash(p);
+                        p.sendMessage(ChatColor.RED + "Недостаточно наличных. Нужно: "
+                                + ChatColor.YELLOW + price + " Ⓕ"
+                                + ChatColor.RED + " (у тебя: " + ChatColor.YELLOW + haveCash + " Ⓕ" + ChatColor.RED + ")");
+                        return;
+                    }
+                    dispenseThenPaySeller(p, chestLoc, mat, qty, price, ownerName, saleNote,
+                            () -> mm.giveCash(p, price),
+                            ChatColor.RED + "Товара не хватает. Деньги возвращены наличными.",
+                            ChatColor.GREEN + "Куплено (наличными): " + ChatColor.YELLOW + qty + "x " + ChatColor.RESET
+                                    + pretty(mat) + ChatColor.GREEN + " за " + ChatColor.YELLOW + price + " Ⓕ");
                 });
             });
 
-            return;
+            return; // важно: не идти в банковскую ветку
         }
 
-        // без налички: банковская ветка (как в list)
+        // банковская ветка: проверим баланс и спишем деньги (async)
         UnityCommands.getInstance().getPlayerInfo(p.getName(), data -> {
             if (data == null) {
                 Bukkit.getScheduler().runTask(plugin, () ->
@@ -1190,62 +1097,63 @@ public final class ShopController {
             }
 
             if (data.money + 1e-9 < price) {
+                // кэш мог быть протухшим — инвалидируем и прогреваем заново
+                UnityCommands.getInstance().refreshPlayerCacheAsync(p.getName());
                 Bukkit.getScheduler().runTask(plugin, () ->
                         p.sendMessage(ChatColor.RED + "Недостаточно денег на счёте. Нужно: " + ChatColor.YELLOW + price + " Ⓕ"));
                 return;
             }
 
             Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+                if (UnityCommands.getInstance().getBalance(ownerName) == null) {
+                    Bukkit.getScheduler().runTask(plugin, () ->
+                            p.sendMessage(ChatColor.RED + "Оплата не прошла (владелец недоступен)."));
+                    return;
+                }
+
                 boolean withdrew = UnityCommands.getInstance().applyMoneyDelta(p.getName(), -price, "Покупка в магазине: " + qty + "x " + mat.name());
                 if (!withdrew) {
+                    // На случай гонки/минуса/протухшего кэша — обновим
+                    UnityCommands.getInstance().refreshPlayerCacheAsync(p.getName());
                     Bukkit.getScheduler().runTask(plugin, () ->
                             p.sendMessage(ChatColor.RED + "Не удалось списать деньги (БД)."));
                     return;
                 }
 
-                boolean deposited = true;
-                try {
-                    boolean credited = UnityCommands.getInstance().applyMoneyDelta(ownerName, price, shopSaleNote(signLoc, qty, mat, p.getName()));
-                    if (!credited) {
-                        // вернуть на счёт игрока, потому что платили со счёта
-                        UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: продавец недоступен");
-                        Bukkit.getScheduler().runTask(plugin, () ->
-                                p.sendMessage(ChatColor.RED + "Оплата не прошла (владелец недоступен). Деньги возвращены на счёт."));
-                        return;
-                    }
-                } catch (Exception ex) {
-                    deposited = false;
-                    plugin.getLogger().warning("[Shop] addCountryMoney failed for " + ownerName + ": " + ex);
-                }
-
-                if (!deposited) {
-                    UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: ошибка казны");
-                    Bukkit.getScheduler().runTask(plugin, () ->
-                            p.sendMessage(ChatColor.RED + "Оплата не прошла (казна). Деньги возвращены на счёт."));
-                    return;
-                }
-
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    boolean ok = dispenseFromChestAtomic(chestLoc, mat, qty, p);
-                    if (!ok) {
-                        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                            UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: товара не хватило");
-                            try { UnityCommands.getInstance().applyMoneyDelta(ownerName, -price, "Возврат: покупка отменена (товара не хватило)"); }
-                            catch (Throwable ignored) {}
-                        });
-
-                        p.sendMessage(ChatColor.RED + "Товара не хватает. Деньги возвращены.");
-                        try { shopLists.updateAllRelatedShopListSigns(chestLoc); } catch (Throwable ignored) {}
-                        return;
-                    }
-
-                    p.sendMessage(ChatColor.GREEN + "Куплено: " + ChatColor.YELLOW + qty + "x "
-                            + ChatColor.RESET + pretty(mat) + ChatColor.GREEN + " за " + ChatColor.YELLOW + price + " Ⓕ");
-
-                    try { shopLists.updateAllRelatedShopListSigns(chestLoc); } catch (Throwable ignored) {}
-                });
+                // выдача товара — ТОЛЬКО main thread
+                Bukkit.getScheduler().runTask(plugin, () ->
+                        dispenseThenPaySeller(p, chestLoc, mat, qty, price, ownerName, saleNote,
+                                () -> Bukkit.getScheduler().runTaskAsynchronously(plugin, () ->
+                                        UnityCommands.getInstance().applyMoneyDelta(p.getName(), price, "Возврат: товара не хватило")),
+                                ChatColor.RED + "Товара не хватает. Деньги возвращены.",
+                                ChatColor.GREEN + "Куплено: " + ChatColor.YELLOW + qty + "x " + ChatColor.RESET
+                                        + pretty(mat) + ChatColor.GREEN + " за " + ChatColor.YELLOW + price + " Ⓕ"));
             });
         });
+    }
+
+    /**
+     * Main thread; деньги покупателя уже сняты. Выдаём товар, и только после
+     * успешной выдачи зачисляем продавцу (async). Не вышло выдать — refundBuyer.
+     */
+    private void dispenseThenPaySeller(Player p, Location chestLoc, Material mat, int qty, double price,
+                                       String ownerName, String saleNote,
+                                       Runnable refundBuyer, String failMsg, String okMsg) {
+        boolean ok = p.isOnline() && dispenseFromChestAtomic(chestLoc, mat, qty, p);
+        if (!ok) {
+            refundBuyer.run();
+            p.sendMessage(failMsg);
+        } else {
+            p.sendMessage(okMsg);
+            Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+                if (!UnityCommands.getInstance().applyMoneyDelta(ownerName, price, saleNote)) {
+                    plugin.getLogger().severe("[Shop] товар выдан " + p.getName() + ", но продавцу " + ownerName
+                            + " не зачислено " + price + " Ⓕ (" + saleNote + ") — компенсировать вручную");
+                }
+            });
+        }
+        // пересоберём листы, чтобы обновилось “доступное количество”
+        try { shopLists.updateAllRelatedShopListSigns(chestLoc); } catch (Throwable ignored) {}
     }
 
     private Location resolveChestLocationFromSource(Location signLoc, SignVariables sv) {
