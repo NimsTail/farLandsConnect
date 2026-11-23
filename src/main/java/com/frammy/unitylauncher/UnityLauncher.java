@@ -511,7 +511,11 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             b.saveBlueMapMarkers("shops");
         });
         safeShutdown("DailyEconomyTask", dailyEconomyTask, DailyEconomyTask::stop);
+        safeShutdown("UpgradesManager", upgradesManager, UpgradesManager::stop);
+        // Stop pollers/timers before the pool goes away (Bukkit would only cancel them after onDisable).
+        Bukkit.getScheduler().cancelTasks(this);
 
+        // Last: everything above may still need the DB.
         if (hikari != null) {
             try {
                 hikari.close();
@@ -520,7 +524,6 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             hikari = null;
         }
 
-        safeShutdown("UpgradesManager", upgradesManager, UpgradesManager::stop);
         instance = null;
         logInfo("Plugin disabled successfully");
     }
