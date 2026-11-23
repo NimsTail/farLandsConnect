@@ -711,6 +711,87 @@ public class FarLandsApiClient {
         return o;
     }
 
+    // ===== фантом-курьер v2 (infra/phantom-courier-design.md) =====
+
+    public record CourierLine(String tradeId, String itemMaterial, String materialKey,
+                              List<String> enchantSlugs, String colorHex, int quantity,
+                              double srcX, double srcY, double srcZ) {}
+    public record CourierJob(String id, String buyerUsername, double destX, double destY, double destZ,
+                             long createdAtMs, List<CourierLine> lines) {}
+    public record CourierSeller(String sellerUsername, int capacitySlots, int fleetSize, List<CourierJob> jobs) {}
+
+    /** Blocking GET. null — запрос не удался (не путать с пустой очередью). */
+    public List<CourierSeller> fetchCourierJobs() {
+        if (!isEnabled()) return null;
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/plugin/marketplace/phantom-courier/jobs"))
+                    .timeout(Duration.ofSeconds(10))
+                    .header("Authorization", "Bearer " + token)
+                    .GET()
+                    .build();
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 300) {
+                log.warning("[FarLandsApi] GET /plugin/marketplace/phantom-courier/jobs -> HTTP " + response.statusCode());
+                return null;
+            }
+            List<CourierSeller> out = new ArrayList<>();
+            JsonObject body = GSON.fromJson(response.body(), JsonObject.class);
+            for (JsonElement se : body.getAsJsonArray("sellers")) {
+                JsonObject so = se.getAsJsonObject();
+                List<CourierJob> jobs = new ArrayList<>();
+                for (JsonElement je : so.getAsJsonArray("jobs")) {
+                    JsonObject jo = je.getAsJsonObject();
+                    JsonObject dst = jo.has("destination") && jo.get("destination").isJsonObject() ? jo.getAsJsonObject("destination") : null;
+                    if (dst == null) continue;
+                    List<CourierLine> lines = new ArrayList<>();
+                    for (JsonElement le : jo.getAsJsonArray("lines")) {
+                        JsonObject lo = le.getAsJsonObject();
+                        JsonObject src = lo.has("source") && lo.get("source").isJsonObject() ? lo.getAsJsonObject("source") : null;
+                        if (src == null) continue;
+                        List<String> enchantSlugs = new ArrayList<>();
+                        String colorHex = null;
+                        JsonObject variant = lo.has("variant") && lo.get("variant").isJsonObject() ? lo.getAsJsonObject("variant") : null;
+                        if (variant != null) {
+                            if (variant.has("enchantSlugs") && variant.get("enchantSlugs").isJsonArray()) {
+                                for (JsonElement e : variant.getAsJsonArray("enchantSlugs")) enchantSlugs.add(e.getAsString());
+                            }
+                            if (variant.has("colorHex") && !variant.get("colorHex").isJsonNull()) {
+                                colorHex = variant.get("colorHex").getAsString().toUpperCase(java.util.Locale.ROOT);
+                            }
+                        }
+                        java.util.Collections.sort(enchantSlugs);
+                        lines.add(new CourierLine(
+                                lo.get("tradeId").getAsString(),
+                                lo.has("itemMaterial") && !lo.get("itemMaterial").isJsonNull() ? lo.get("itemMaterial").getAsString() : null,
+                                lo.has("materialKey") && !lo.get("materialKey").isJsonNull() ? lo.get("materialKey").getAsString() : null,
+                                enchantSlugs, colorHex, lo.get("quantity").getAsInt(),
+                                src.get("x").getAsDouble(), src.get("y").getAsDouble(), src.get("z").getAsDouble()));
+                    }
+                    jobs.add(new CourierJob(jo.get("id").getAsString(), jo.get("buyerUsername").getAsString(),
+                            dst.get("x").getAsDouble(), dst.get("y").getAsDouble(), dst.get("z").getAsDouble(),
+                            jo.get("createdAtMs").getAsLong(), lines));
+                }
+                out.add(new CourierSeller(so.get("sellerUsername").getAsString(),
+                        so.get("capacitySlots").getAsInt(), so.get("fleetSize").getAsInt(), jobs));
+            }
+            return out;
+        } catch (Exception e) {
+            log.warning("[FarLandsApi] fetchCourierJobs failed: " + e);
+            return null;
+        }
+    }
+
+    /** Информационный счётчик tripsDone. Не идемпотентно — одна попытка, 409 игнорируем. */
+    public void reportCourierTripCompleted(String jobId) {
+        send("POST", "/plugin/marketplace/phantom-courier/jobs/" + encode(jobId) + "/trip-completed", new JsonObject());
+    }
+
+    /** Курьер застрял в текущем заходе (флаг "задерживается" на сайте). Идемпотентно. */
+    public void reportCourierDelayed(String jobId) {
+        send("POST", "/plugin/marketplace/phantom-courier/jobs/" + encode(jobId) + "/delayed", new JsonObject());
+    }
+
     // ===== чат на карте (routes/plugin/mapChat.ts) =====
 
     public record MapChatMessage(String id, String authorName, String text) {}

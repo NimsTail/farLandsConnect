@@ -478,6 +478,8 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         var phantomDelivery = new com.frammy.unitylauncher.marketplace.PhantomDeliveryController(this, farLandsApi);
         getServer().getPluginManager().registerEvents(phantomDelivery, this);
         phantomDelivery.start(20L); // ~1s
+        // Фантом-курьеры v2 продавцов (infra/phantom-courier-design.md).
+        new com.frammy.unitylauncher.marketplace.PhantomCourierController(this, farLandsApi).start(20L); // ~1s
 
         // Чат на карте BlueMap: игра <-> сайт.
         new com.frammy.unitylauncher.marketplace.MapChatBridge(this, farLandsApi).start(40L); // ~2s
