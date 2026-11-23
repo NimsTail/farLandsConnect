@@ -1,523 +1,579 @@
 package com.frammy.unitylauncher;
 
-import org.bukkit.Location;
-import org.bukkit.Material;
-import org.bukkit.NamespacedKey;
-import org.bukkit.block.Block;
-import org.bukkit.block.Chest;
-import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.*;
+import org.bukkit.entity.HumanEntity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.inventory.*;
-import org.bukkit.event.player.PlayerDropItemEvent;
-import org.bukkit.event.player.PlayerPickupItemEvent;
+import org.bukkit.inventory.AnvilInventory;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
-import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
+import org.bukkit.scheduler.BukkitRunnable;
 
-import java.io.File;
-import java.io.IOException;
 import java.util.*;
 
 public class MoneyManager implements Listener {
-    private final File issuedMoneyFile;
-    private final YamlConfiguration issuedMoneyConfig;
+
     private final List<Integer> dollarDenominations = Arrays.asList(1000, 500, 200, 100, 50, 20, 10, 5, 2, 1);
-    private final List<Integer> centDenominations = Arrays.asList(50, 20, 10, 5, 2, 1); // В центах
-    private final NamespacedKey idKey;
-    private final HashMap<String, List<String>> chestMoneyMap = new HashMap<>();
+    private final List<Integer> centDenominations   = Arrays.asList(50, 20, 10, 5, 2, 1); // в центах
 
-    public MoneyManager(File pluginDataFolder, String pluginName) {
-        issuedMoneyFile = new File(pluginDataFolder, "issued_money.yml");
-        if (!issuedMoneyFile.exists()) {
-            try {
-                issuedMoneyFile.createNewFile();
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
+    private static final Set<Material> MONEY_MATERIALS = Set.of(
+            Material.PRISMARINE_SHARD,      // купюры (доллары)
+            Material.PRISMARINE_CRYSTALS    // монеты (центы)
+    );
+
+    // PDC-ключи
+    private final NamespacedKey KEY_VALUE;
+    private final NamespacedKey KEY_SIG;
+    private final NamespacedKey KEY_VER;
+
+    // Секрет для подписи
+    private final String moneySecret;
+
+    public MoneyManager(UnityLauncher pl) {
+        this.KEY_VALUE = new NamespacedKey(pl, "money.value");
+        this.KEY_SIG   = new NamespacedKey(pl, "money.sig");
+        this.KEY_VER   = new NamespacedKey(pl, "money.ver");
+        var cfg = pl.getConfig();
+        String path = "economy.money.secret";
+        String s = cfg.getString(path);
+        if (s == null || s.isBlank()) {
+            s = java.util.UUID.randomUUID().toString().replace("-", "")
+                    + java.util.UUID.randomUUID().toString().replace("-", "");
+            cfg.set(path, s);
+            pl.saveConfig();
         }
-        issuedMoneyConfig = YamlConfiguration.loadConfiguration(issuedMoneyFile);
-        idKey = new NamespacedKey(pluginName, "money_id");
+        this.moneySecret = s;
     }
 
-    public void giveMoney(Player player, double amount) {
-        int totalCents = (int) Math.round(amount * 100);
-        int dollars = totalCents / 100;
-        int cents = totalCents % 100;
+    /* ===================== ПУБЛИЧНЫЕ ОПЕРАЦИИ ===================== */
 
-        List<ItemStack> itemsToGive = new ArrayList<>();
+    /**
+     * Списывает деньги со счёта игрока (банковский баланс, НЕ наличка).
+     * Используется в авто-биллинге зон.
+     */
+    public void withdraw(String playerName, double amount) {
+        if (playerName == null || playerName.isBlank()) {
+            Bukkit.getLogger().warning("[MoneyManager] withdraw: пустое имя игрока");
+            return;
+        }
 
-        for (int denomination : dollarDenominations) {
-            while (dollars >= denomination) {
-                ItemStack moneyItem = createMoneyItem(Material.PRISMARINE_SHARD, denomination, "Dollar");
-                itemsToGive.add(moneyItem);
-                registerMoney(player, moneyItem, denomination, "Dollar");
-                dollars -= denomination;
+        long amountCents = toCents(amount);
+        if (amountCents <= 0) return;
+
+        UnityCommands.getInstance().getPlayerInfo(playerName, data -> {
+            if (data == null) {
+                Bukkit.getLogger().warning("[MoneyManager] withdraw: данные игрока '" + playerName + "' не найдены");
+                return;
             }
-        }
 
-        for (int denomination : centDenominations) {
-            while (cents >= denomination) {
-                ItemStack moneyItem = createMoneyItem(Material.PRISMARINE_CRYSTALS, denomination / 100.0, "Cent");
-                itemsToGive.add(moneyItem);
-                registerMoney(player, moneyItem, denomination / 100.0, "Cent");
-                cents -= denomination;
+            long curCents = toCents(data.money);
+            if (curCents < amountCents) {
+                Bukkit.getLogger().info("[MoneyManager] withdraw: у '" + playerName + "' мало денег: "
+                        + centsToDouble(curCents) + " Ⓕ, нужно " + centsToDouble(amountCents) + " Ⓕ");
+                return;
             }
-        }
 
-        for (ItemStack item : itemsToGive) {
-            player.getInventory().addItem(item);
-        }
-
-       // player.sendMessage("Вы получили " + totalCents / 100 + " долларов и " + totalCents % 100 + " центов.");
-    }
-
-    public boolean takeMoney(Player player, double amount) {
-        int totalCents = (int) Math.round(amount * 100); // Сумма в центах
-        int remainingCents = totalCents;
-
-        Map<Integer, List<ItemStack>> moneyMap = new TreeMap<>(Collections.reverseOrder());
-        int totalInventoryCents = 0;
-
-        // Сканируем инвентарь игрока
-        for (ItemStack item : player.getInventory().getContents()) {
-            if (item == null || item.getType() == Material.AIR) continue;
-
-            if (isMoney(item)) {
-                double itemValue = extractMoneyValue(item);
-                int itemCents = (int) Math.round(itemValue * 100);
-                totalInventoryCents += itemCents * item.getAmount();
-
-                moneyMap.putIfAbsent(itemCents, new ArrayList<>());
-                moneyMap.get(itemCents).add(item);
-            }
-        }
-
-        // Проверяем, достаточно ли средств
-        if (totalInventoryCents < totalCents) {
-            player.sendMessage("Недостаточно средств для выполнения операции.");
-            return false;
-        }
-
-        List<ItemStack> itemsToRemove = new ArrayList<>();
-        List<ItemStack> changeToGive = new ArrayList<>();
-
-        // Забираем деньги из инвентаря
-        for (Map.Entry<Integer, List<ItemStack>> entry : moneyMap.entrySet()) {
-            int denominationCents = entry.getKey();
-            List<ItemStack> stacks = entry.getValue();
-
-            for (ItemStack stack : stacks) {
-                while (remainingCents > 0 && stack.getAmount() > 0) {
-                    if (remainingCents >= denominationCents) {
-                        // Забираем купюру и уменьшаем оставшуюся сумму
-                        remainingCents -= denominationCents;
-                        removeMoney(player, stack); // Удаляем купюру из сохранений
-                        stack.setAmount(stack.getAmount() - 1);
-                        if (stack.getAmount() == 0) itemsToRemove.add(stack);
-                    } else {
-                        // Если купюра больше, чем нужно, используем её для сдачи
-                        int changeCents = denominationCents - remainingCents;
-                        remainingCents = 0;
-                        removeMoney(player, stack); // Удаляем купюру из сохранений
-                        stack.setAmount(stack.getAmount() - 1);
-                        if (stack.getAmount() == 0) itemsToRemove.add(stack);
-
-                        // Рассчитываем сдачу
-                        for (int denom : dollarDenominations) {
-                            while (changeCents >= denom * 100) {
-                                changeCents -= denom * 100;
-                                ItemStack changeItem = createMoneyItem(Material.PRISMARINE_SHARD, denom, "Dollar");
-                                changeToGive.add(changeItem);
-                            }
-                        }
-                        for (int denom : centDenominations) {
-                            while (changeCents >= denom) {
-                                changeCents -= denom;
-                                ItemStack changeItem = createMoneyItem(Material.PRISMARINE_CRYSTALS, denom / 100.0, "Cent");
-                                changeToGive.add(changeItem);
-                            }
-                        }
-
-                        // Если сдачу невозможно выдать, отменяем операцию
-                        if (changeCents > 0) {
-                            player.sendMessage("Ошибка: сдачу невозможно выдать. Обратитесь к администратору.");
-                            return false;
-                        }
+            new BukkitRunnable() {
+                @Override public void run() {
+                    boolean ok = UnityCommands.getInstance().applyMoneyDelta(playerName, dbAmount(-centsToDouble(amountCents)), "Автосписание за зону");
+                    if (!ok) {
+                        Bukkit.getLogger().warning("[MoneyManager] withdraw failed for '" + playerName + "'");
                     }
                 }
+            }.runTaskAsynchronously(UnityLauncher.getInstance());
 
-                if (remainingCents <= 0) break;
+        });
+    }
+
+    /**
+     * Выдать игроку наличку БЕЗ списания его банковского баланса.
+     * Используется, например, когда деньги приходят из казны страны.
+     */
+    public void giveCash(Player player, double amount) {
+        long totalCents = toCents(amount);
+        if (player == null || totalCents <= 0) return;
+
+        List<ItemStack> cashItems = buildCashItemsFromCents(totalCents);
+
+        new BukkitRunnable() {
+            @Override public void run() {
+                addItemsOrDrop(player, cashItems);
             }
+        }.runTask(UnityLauncher.getInstance());
+    }
 
-            if (remainingCents <= 0) break;
-        }
+    /**
+     * Подсчитывает сумму наличных в инвентаре игрока.
+     */
+    public double getInventoryCash(Player player) {
+        if (player == null) return 0.0;
+        long cents = getInventoryCashCents(player.getInventory());
+        return centsToDouble(cents);
+    }
 
-        // Удаляем купюры из инвентаря
-        for (ItemStack item : itemsToRemove) {
-            player.getInventory().remove(item);
-        }
+    /**
+     * Пытается списать указанную сумму наличными из инвентаря игрока.
+     * Если денег недостаточно — вообще ничего не трогает и возвращает false.
+     * Если удалось — забирает РОВНО amount и возвращает сдачу купюрами.
+     */
+    public boolean spendCash(Player player, double amount) {
+        if (player == null || amount <= 0) return false;
 
-        // Регистрируем и выдаём сдачу
-        for (ItemStack item : changeToGive) {
-            player.getInventory().addItem(item);
-            double value = extractMoneyValue(item);
-            String type = item.getType() == Material.PRISMARINE_SHARD ? "Dollar" : "Cent";
-            registerMoney(player, item, value, type); // Регистрируем сдачу
-        }
+        long amountCents = toCents(amount);
+        if (amountCents <= 0) return false;
 
-        // Проверяем, остались ли неоплаченные средства
-        if (remainingCents > 0) {
-            player.sendMessage("Ошибка: не удалось снять полную сумму. Обратитесь к администратору.");
+        Inventory inv = player.getInventory();
+        long totalCents = getInventoryCashCents(inv);
+        if (totalCents < amountCents) {
             return false;
         }
 
-       // player.sendMessage("С вашего счета снято " + amount + " долларов.");
+        long collected = collectAndClearCash(inv);
+        long remaining = collected - amountCents;
+        if (remaining < 0) remaining = 0;
+
+        List<ItemStack> change = buildCashItemsFromCents(remaining);
+        addItemsOrDrop(player, change);
+
         return true;
     }
 
+    /* ===================== ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ДЛЯ ЦЕНТОВ ===================== */
 
-    private void removeMoney(Player player, ItemStack item) {
-        String playerId = player.getUniqueId().toString();
-        String displayName = item.getItemMeta().getDisplayName();
-        String path = playerId + "." + displayName;
+    private long toCents(double value) {
+        return Math.round(value * 100.0);
+    }
 
-        if (issuedMoneyConfig.contains(path)) {
-            List<String> moneyIds = issuedMoneyConfig.getStringList(path);
-            if (!moneyIds.isEmpty()) {
-                moneyIds.remove(0); // Удаляем первый ID из списка
-                if (moneyIds.isEmpty()) {
-                    issuedMoneyConfig.set(path, null); // Удаляем путь, если список пуст
-                } else {
-                    issuedMoneyConfig.set(path, moneyIds);
-                }
-                saveIssuedMoney();
+    private double centsToDouble(long cents) {
+        return ((double) cents) / 100.0;
+    }
+
+    private long getMoneyCentsVerified(ItemStack item) {
+        if (item == null || item.getType().isAir()) return 0;
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null) return 0;
+        var pdc = meta.getPersistentDataContainer();
+        Double v = pdc.get(KEY_VALUE, PersistentDataType.DOUBLE);
+        if (v == null || v <= 0.0) return 0;
+        return toCents(round2(v));
+    }
+
+    private long getInventoryCashCents(Inventory inv) {
+        long sum = 0L;
+        for (ItemStack stack : inv.getStorageContents()) {
+            if (!verifyMoney(stack)) continue;
+            long unit = getMoneyCentsVerified(stack);
+            if (unit <= 0) continue;
+            sum += unit * stack.getAmount();
+        }
+        return sum;
+    }
+
+    /**
+     * Забирает все валидные деньги из инвентаря, возвращает суммарную сумму в центах.
+     */
+    private long collectAndClearCash(Inventory inv) {
+        long total = 0L;
+        ItemStack[] contents = inv.getStorageContents();
+        for (int i = 0; i < contents.length; i++) {
+            ItemStack stack = contents[i];
+            if (!verifyMoney(stack)) continue;
+            long unit = getMoneyCentsVerified(stack);
+            if (unit <= 0) continue;
+            total += unit * stack.getAmount();
+            inv.setItem(i, null);
+        }
+        return total;
+    }
+
+    /**
+     * Разбивает сумму в центах на купюры/монеты по заранее заданным номиналам.
+     */
+    private List<ItemStack> buildCashItemsFromCents(long totalCents) {
+        List<ItemStack> list = new ArrayList<>();
+        if (totalCents <= 0) return list;
+
+        long dollars = totalCents / 100;
+        int cents     = (int) (totalCents % 100);
+
+        for (int d : dollarDenominations) {
+            long count = dollars / d;
+            while (count > 0) {
+                int stack = (int) Math.min(64, count);
+                list.add(createMoneyItem(Material.PRISMARINE_SHARD, d, "Ⓕ", stack));
+                count -= stack;
             }
+            dollars %= d;
+        }
+
+        for (int c : centDenominations) {
+            int count = cents / c;
+            while (count > 0) {
+                int stack = Math.min(64, count);
+                list.add(createMoneyItem(Material.PRISMARINE_CRYSTALS, c / 100.0, "ⓒ", stack));
+                count -= stack;
+            }
+            cents %= c;
+        }
+
+        return list;
+    }
+
+    /**
+     * Кладёт предметы в инвентарь, остатки дропает у ног.
+     */
+    private void addItemsOrDrop(Player player, List<ItemStack> items) {
+        Map<Integer, ItemStack> leftoversAll = new HashMap<>();
+        for (ItemStack it : items) {
+            Map<Integer, ItemStack> leftovers = player.getInventory().addItem(it);
+            if (!leftovers.isEmpty()) leftoversAll.putAll(leftovers);
+        }
+        if (!leftoversAll.isEmpty()) {
+            leftoversAll.values().forEach(l ->
+                    player.getWorld().dropItemNaturally(player.getLocation(), l)
+            );
         }
     }
 
-    private ItemStack createMoneyItem(Material material, double value, String type) {
+    /* ===================== СОЗДАНИЕ / ПРОВЕРКА КУПЮР ===================== */
+
+    private ItemStack createMoneyItem(Material material, double value, String symbol, int amount) {
         ItemStack item = new ItemStack(material);
+        item.setAmount(Math.clamp(amount, 1, 64));
+
         ItemMeta meta = item.getItemMeta();
         if (meta != null) {
-            String displayValue;
-            if (type.equals("Dollar")) {
-                displayValue = String.valueOf((int) value); // Отображаем целое число для долларов
-            } else {
-                displayValue = String.valueOf((int) (value * 100)); // Для центов отображаем в сотых
-            }
-            meta.setDisplayName(type + " " + displayValue);
+            String displayValue = symbol.equals("Ⓕ")
+                    ? String.valueOf((int) value)
+                    : String.valueOf((int) Math.round(value * 100.0));
+
+            meta.setDisplayName(ChatColor.GREEN + symbol + "   " + ChatColor.RESET + displayValue);
+
+            if (material == Material.PRISMARINE_SHARD)    meta.setCustomModelData(10010);
+            if (material == Material.PRISMARINE_CRYSTALS) meta.setCustomModelData(10011);
+
+            var pdc = meta.getPersistentDataContainer();
+            double v2 = round2(value);
+            pdc.set(KEY_VER,   PersistentDataType.INTEGER, 1);
+            pdc.set(KEY_VALUE, PersistentDataType.DOUBLE,  v2);
+            String sig = hmac(signPayload(v2, 1, material));
+            if (sig != null) pdc.set(KEY_SIG, PersistentDataType.STRING, sig);
+
+            meta.addItemFlags(org.bukkit.inventory.ItemFlag.HIDE_ATTRIBUTES,
+                    org.bukkit.inventory.ItemFlag.HIDE_ENCHANTS);
             item.setItemMeta(meta);
         }
         return item;
     }
 
-    private void registerMoney(Player player, ItemStack item, double value, String type) {
-        String uniqueID = UUID.randomUUID().toString();
-        String playerId = player.getUniqueId().toString();
-        issuedMoneyConfig.set(playerId + ".Nickname", player.getName());
-
-        String path = playerId + "." + type + " " + (int) value; // Преобразуем value в целое число для соответствия.
-        List<String> moneyIds = issuedMoneyConfig.getStringList(path); // Загружаем список или создаём новый.
-        moneyIds.add(uniqueID); // Добавляем новый ID.
-        issuedMoneyConfig.set(path, moneyIds); // Обновляем путь с новым списком.
-        saveIssuedMoney();
-    }
-
-    private boolean isMoney(ItemStack item) {
-        if (item == null || item.getType() == Material.AIR) return false;
-
-            ItemMeta meta = item.getItemMeta();
-            if (meta == null || !meta.hasDisplayName()) return false;
-
-            String displayName = meta.getDisplayName();
-            return displayName.toLowerCase().contains("dollar") || displayName.toLowerCase().contains("cent");
-
-
-    }
-
-    private double extractMoneyValue(ItemStack item) {
-        if (item == null || !isMoney(item)) return 0.0;
+    public double getMoneyValue(ItemStack item) {
+        if (item == null || item.getType().isAir()) return 0.0;
+        if (!verifyMoney(item)) return 0.0;
 
         ItemMeta meta = item.getItemMeta();
-        if (meta == null || meta.getDisplayName() == null) return 0.0;
+        if (meta == null) return 0.0;
+        var pdc = meta.getPersistentDataContainer();
 
-        String displayName = meta.getDisplayName();
+        Double v = pdc.get(KEY_VALUE, PersistentDataType.DOUBLE);
+        if (v != null && v > 0.0) return round2(v);
+        return 0.0;
+    }
+
+    private boolean verifyMoney(ItemStack item) {
+        if (item == null || item.getType().isAir()) return false;
+        Material mat = item.getType();
+        if (!MONEY_MATERIALS.contains(mat)) return false;
+
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null) return false;
+        var pdc = meta.getPersistentDataContainer();
+
+        Integer ver = pdc.get(KEY_VER, PersistentDataType.INTEGER);
+        Double  val = pdc.get(KEY_VALUE, PersistentDataType.DOUBLE);
+        String  sig = pdc.get(KEY_SIG, PersistentDataType.STRING);
+
+        if (ver != null && ver == 1 && val != null && val > 0 && sig != null && !sig.isBlank()) {
+            String expect = hmac(signPayload(val, ver, mat));
+            return expect != null && expect.equals(sig);
+        }
+        return false;
+    }
+
+    public boolean isMoneyItem(ItemStack item) {
+        return verifyMoney(item);
+    }
+
+    /* ===================== ПРОЧЕЕ ===================== */
+
+    private double round2(double v) {
+        return Math.round(v * 100.0) / 100.0;
+    }
+
+    @EventHandler
+    public void onAnvilRename(PrepareAnvilEvent event) {
+        AnvilInventory inv = event.getInventory();
+        ItemStack base = inv.getItem(0);
+        if (base == null) return;
+        if (verifyMoney(base)) {
+            event.setResult(null);
+            HumanEntity he = event.getView().getPlayer();
+            if (he instanceof Player p) {
+                p.sendMessage(ChatColor.RED + "Купюры нельзя переименовывать или модифицировать.");
+            }
+        }
+    }
+
+    private String hmac(String data) {
         try {
-            String[] parts = displayName.split(" ");
-            double value = Double.parseDouble(parts[1]);
-            return parts[0].equals("Dollar") ? value : value / 100; // Доллары целые, центы делятся на 100
+            javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+            javax.crypto.spec.SecretKeySpec key = new javax.crypto.spec.SecretKeySpec(
+                    moneySecret.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                    "HmacSHA256"
+            );
+            mac.init(key);
+            byte[] raw = mac.doFinal(data.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            return java.util.Base64.getEncoder().encodeToString(raw);
         } catch (Exception e) {
-            return 0.0;
+            return null;
         }
     }
 
-    private void saveIssuedMoney() {
-        try {
-            issuedMoneyConfig.save(issuedMoneyFile);
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
+    private String signPayload(double value, int ver, Material mat) {
+        String v = String.format(java.util.Locale.ROOT, "%.2f", value);
+        return v + "|" + ver + "|" + mat.name();
     }
 
-    @EventHandler
-    public void onItemDrop(PlayerDropItemEvent event) {
-        ItemStack item = event.getItemDrop().getItemStack();
-        Player player = event.getPlayer();
+    public void tryWithdraw(String playerName, double amount, java.util.function.Consumer<Boolean> cb) {
+        if (playerName == null || playerName.isBlank() || amount <= 0) {
+            if (cb != null) cb.accept(false);
+            return;
+        }
 
-        if (isMoney(item)) {
-            ItemMeta meta = item.getItemMeta();
-            if (meta != null) {
-                PersistentDataContainer container = meta.getPersistentDataContainer();
-                String uniqueID = UUID.randomUUID().toString();
-                container.set(idKey, PersistentDataType.STRING, uniqueID);
-                item.setItemMeta(meta);
+        long amountCents = toCents(amount);
+        if (amountCents <= 0) { if (cb != null) cb.accept(false); return; }
 
-                // Удаляем купюру из сохранения игрока
-                String playerId = player.getUniqueId().toString();
-                String displayName = item.getItemMeta().getDisplayName();
-                String path = playerId + "." + displayName;
+        UnityCommands.getInstance().getPlayerInfo(playerName, data -> {
+            if (data == null) { if (cb != null) cb.accept(false); return; }
 
-                if (issuedMoneyConfig.contains(path)) {
-                    List<String> moneyIds = issuedMoneyConfig.getStringList(path);
-                    if (!moneyIds.isEmpty()) {
-                        moneyIds.remove(0); // Удаляем первый ID из списка
-                        if (moneyIds.isEmpty()) {
-                            issuedMoneyConfig.set(path, null); // Удаляем путь, если список пуст
-                        } else {
-                            issuedMoneyConfig.set(path, moneyIds);
-                        }
-                        saveIssuedMoney();
-                    }
-                }
+            long curCents = toCents(data.money);
+            if (curCents < amountCents) {
+                if (cb != null) cb.accept(false);
+                return;
             }
-        }
-    }
 
-    @EventHandler
-    public void onItemPickup(PlayerPickupItemEvent event) {
-        ItemStack item = event.getItem().getItemStack();
-        Player player = event.getPlayer();
-
-        if (isMoney(item)) {
-            ItemMeta meta = item.getItemMeta();
-            if (meta != null) {
-                PersistentDataContainer container = meta.getPersistentDataContainer();
-
-                if (container.has(idKey, PersistentDataType.STRING)) {
-                    String uniqueID = container.get(idKey, PersistentDataType.STRING);
-                    container.remove(idKey);
-                    item.setItemMeta(meta);
-
-                    // Добавляем купюру в сохранение игрока
-                    String playerId = player.getUniqueId().toString();
-                    String displayName = item.getItemMeta().getDisplayName();
-                    String path = playerId + "." + displayName;
-
-                    List<String> moneyIds = issuedMoneyConfig.getStringList(path);
-                    moneyIds.add(uniqueID);
-                    issuedMoneyConfig.set(path, moneyIds);
-                    saveIssuedMoney();
+            new BukkitRunnable() {
+                @Override public void run() {
+                    boolean ok = UnityCommands.getInstance().applyMoneyDelta(playerName, dbAmount(-centsToDouble(amountCents)), "Списание со счёта");
+                    if (cb != null) cb.accept(ok);
                 }
-            }
-        }
+            }.runTaskAsynchronously(UnityLauncher.getInstance());
+        });
     }
-    @EventHandler
-    public void onInventoryClick(InventoryClickEvent event) {
-        if (event.getClickedInventory() == null || event.getWhoClicked() == null) return;
 
-        Inventory clickedInventory = event.getClickedInventory();
-        InventoryAction action = event.getAction();
+    /**
+     * Снять со счёта игрока grossAmount и выдать наличными netCashAmount.
+     * Разница (gross - net) "сгорает".
+     *
+     * Важно: здесь MoneyManager НЕ считает комиссию — ему передают уже рассчитанные суммы.
+     */
+    public void withdrawToCashBurnFee(Player player, double grossAmount, double netCashAmount) {
+        withdrawToCashBurnFee(player, grossAmount, netCashAmount, null);
+    }
 
-        ItemStack currentItem = event.getCurrentItem();
-        ItemStack cursorItem = event.getCursor();
+    /** Same as above, plus the ATM sign's location — threaded into the transaction note
+     * (site parses "(x, y, z, world)" out of it to link straight to that spot on BlueMap,
+     * see GH #8) so a withdrawal in the bank ledger says WHICH machine it came from. */
+    public void withdrawToCashBurnFee(Player player, double grossAmount, double netCashAmount, Location atmLoc) {
+        if (player == null) return;
+        if (grossAmount <= 0) { player.sendMessage(ChatColor.RED + "Сумма должна быть > 0."); return; }
+        if (netCashAmount < 0 || netCashAmount > grossAmount + 1e-9) {
+            player.sendMessage(ChatColor.RED + "Некорректная сумма.");
+            return;
+        }
 
-        Player player = (Player) event.getWhoClicked();
-        System.out.println("CURSOR " + cursorItem);
-        System.out.println("CURRENT " + currentItem);
+        long grossCents = toCents(grossAmount);
+        long netCents   = toCents(netCashAmount);
+        if (grossCents <= 0) { player.sendMessage(ChatColor.RED + "Сумма слишком мала."); return; }
+        if (netCents < 0) netCents = 0;
+        if (netCents > grossCents) netCents = grossCents;
 
-        Inventory topInventory = event.getView().getTopInventory();
-        Inventory bottomInventory = event.getView().getBottomInventory();
+        final long finalNetCents = netCents;
+        final double finalGross = round2(grossAmount);
+        final double finalNet   = round2(netCashAmount);
 
-        if (topInventory.getType() == InventoryType.CHEST) {
-            Block block = topInventory.getLocation().getBlock();
-            if (block.getState() instanceof Chest) {
-                Chest chest = (Chest) block.getState();
+        Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
+            boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), dbAmount(-centsToDouble(grossCents)), "Снятие наличных в банкомате" + atmNoteSuffix(atmLoc));
+            Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
+                if (!ok) {
+                    player.sendMessage(ChatColor.RED + "Не удалось снять деньги со счёта (БД/баланс).");
+                    return;
+                }
 
-                if (event.isShiftClick()) {
-                    // Проверка, откуда предмет перемещается
-                    if (clickedInventory == bottomInventory) {
-                        // Перемещение из инвентаря игрока в сундук
-                        handleMoneyTransferToChest(currentItem, chest, player);
-                    } else if (clickedInventory == topInventory) {
-                        // Перемещение из сундука в инвентарь игрока
-                        handleMoneyTransferFromChest(currentItem, chest, player);
-                    }
+                if (finalNetCents > 0) {
+                    addItemsOrDrop(player, buildCashItemsFromCents(finalNetCents));
+                }
+
+                long feeCents = grossCents - finalNetCents;
+                if (feeCents > 0) {
+                    player.sendMessage(ChatColor.GRAY + "Снято со счёта: " + ChatColor.YELLOW + finalGross
+                            + ChatColor.GRAY + " Ⓕ, выдано наличными: " + ChatColor.YELLOW + finalNet
+                            + ChatColor.GRAY + " Ⓕ.");
                 } else {
-                    player.sendMessage("Взаимодействие с сундуком. Действие: " + action.name());
+                    player.sendMessage(ChatColor.GRAY + "С твоего счёта снято " + ChatColor.YELLOW + finalGross
+                            + ChatColor.GRAY + " Ⓕ наличными.");
+                }
+            });
+        });
+    }
 
-                    switch (action) {
-                        case PLACE_ONE:
-                        case PLACE_ALL:
-                        case PLACE_SOME:
-                            handleMoneyTransferToChest(getEffectiveItem(currentItem, cursorItem), chest, player);
-                            break;
-                        case PICKUP_ONE:
-                        case PICKUP_ALL:
-                        case PICKUP_SOME:
-                        case PICKUP_HALF:
-                            handleMoneyTransferFromChest(getEffectiveItem(currentItem, cursorItem), chest, player);
-                            break;
-                        default:
-                            player.sendMessage("Необработанное действие: " + action.name());
-                            break;
+    /**
+     * Внести наличку: из инвентаря списываем grossAmount, на счёт зачисляем netDepositAmount.
+     * Разница (gross - net) "сгорает". Сдача возвращается ТОЛЬКО от переплаты купюрами (как и раньше).
+     */
+    public boolean depositCashToPlayerBurnFee(Player player, double grossAmount, double netDepositAmount) {
+        return depositCashToPlayerBurnFee(player, grossAmount, netDepositAmount, null);
+    }
+
+    /** Same as above, plus the ATM sign's location — see withdrawToCashBurnFee's overload. */
+    public boolean depositCashToPlayerBurnFee(Player player, double grossAmount, double netDepositAmount, Location atmLoc) {
+        if (player == null) return false;
+        if (grossAmount <= 0) return false;
+        if (netDepositAmount < 0 || netDepositAmount > grossAmount + 1e-9) {
+            player.sendMessage(ChatColor.RED + "Некорректная сумма.");
+            return false;
+        }
+
+        // inventory operations — main thread
+        boolean okCash = spendCash(player, grossAmount);
+        if (!okCash) {
+            player.sendMessage(ChatColor.RED + "Недостаточно наличных в инвентаре.");
+            return false;
+        }
+
+        long grossCents = toCents(grossAmount);
+        long netCents   = toCents(netDepositAmount);
+        if (netCents < 0) netCents = 0;
+        if (netCents > grossCents) netCents = grossCents;
+
+        final long finalNetCents = netCents;
+        final double gross2 = round2(grossAmount);
+        final double net2   = round2(centsToDouble(finalNetCents));
+        final long feeCents = grossCents - finalNetCents;
+
+        Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
+            boolean ok = UnityCommands.getInstance().applyMoneyDelta(player.getName(), dbAmount(centsToDouble(finalNetCents)), "Внесение наличных в банкомате" + atmNoteSuffix(atmLoc));
+            Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
+                if (!ok) {
+                    // возврат gross наличкой
+                    giveCash(player, gross2);
+                    player.sendMessage(ChatColor.RED + "Не удалось зачислить деньги (БД). Сумма возвращена наличными.");
+                    return;
+                }
+
+                if (feeCents > 0) {
+                    player.sendMessage(ChatColor.GRAY + "Внесено наличными: " + ChatColor.YELLOW + gross2
+                            + ChatColor.GRAY + " Ⓕ, зачислено: " + ChatColor.YELLOW + net2
+                            + ChatColor.GRAY + " Ⓕ.");
+                } else {
+                    player.sendMessage(ChatColor.GRAY + "На твой счёт зачислено " + ChatColor.YELLOW + net2
+                            + ChatColor.GRAY + " Ⓕ.");
+                }
+            });
+        });
+
+        return true;
+    }
+
+    /**
+     * Внести наличку в казну: из инвентаря списываем grossAmount, в казну зачисляем netDepositAmount.
+     * Разница (gross - net) "сгорает".
+     */
+    public boolean depositCashToCountryBurnFee(Player player, double grossAmount, double netDepositAmount) {
+        if (player == null) return false;
+        if (grossAmount <= 0) return false;
+        if (netDepositAmount < 0 || netDepositAmount > grossAmount + 1e-9) {
+            player.sendMessage(ChatColor.RED + "Некорректная сумма.");
+            return false;
+        }
+
+        boolean okCash = spendCash(player, grossAmount);
+        if (!okCash) {
+            player.sendMessage(ChatColor.RED + "Недостаточно наличных в инвентаре.");
+            return false;
+        }
+
+        long grossCents = toCents(grossAmount);
+        long netCents   = toCents(netDepositAmount);
+        if (netCents < 0) netCents = 0;
+        if (netCents > grossCents) netCents = grossCents;
+
+        final long finalNetCents = netCents;
+        final double gross2 = round2(grossAmount);
+        final double net2   = round2(centsToDouble(finalNetCents));
+        final long feeCents = grossCents - finalNetCents;
+
+        UnityCommands.getInstance().getPlayerInfo(player.getName(), data -> {
+            if (data == null || data.countryName == null || data.countryName.isBlank()) {
+                Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
+                    giveCash(player, gross2);
+                    player.sendMessage(ChatColor.RED + "Ты не состоишь в стране — взнос невозможен. Сумма возвращена.");
+                });
+                return;
+            }
+
+            final String country = data.countryName;
+
+            Bukkit.getScheduler().runTaskAsynchronously(UnityLauncher.getInstance(), () -> {
+                boolean ok = true;
+                try {
+                    UnityLauncher.getInstance().getCountryRegistryJdbc().addCountryMoney(country, dbAmount(centsToDouble(finalNetCents)));
+                } catch (Exception e) {
+                    ok = false;
+                    Bukkit.getLogger().warning("[MoneyManager] addCountryMoney failed: " + e);
+                }
+
+                boolean finalOk = ok;
+                Bukkit.getScheduler().runTask(UnityLauncher.getInstance(), () -> {
+                    if (!finalOk) {
+                        giveCash(player, gross2);
+                        player.sendMessage(ChatColor.RED + "Не удалось внести в казну (БД). Сумма возвращена наличными.");
+                        return;
                     }
-                }
-            }
-        }
-    }
 
-    private ItemStack getEffectiveItem(ItemStack currentItem, ItemStack cursorItem) {
-        return (currentItem == null || currentItem.getType() == Material.AIR) ? cursorItem : currentItem;
-    }
-
-    /* @EventHandler
-    public void onInventoryClose(InventoryCloseEvent event) {
-        if (event.getInventory().getType() == InventoryType.CHEST) {
-            Block block = event.getInventory().getLocation().getBlock();
-            if (block.getState() instanceof Chest) {
-                Chest chest = (Chest) block.getState();
-
-                // Обновляем данные сундука, перебирая содержимое
-                String chestKey = getChestKey(chest.getLocation());
-                issuedMoneyConfig.set("chests." + chestKey, null); // Удаляем старую запись
-
-                for (ItemStack item : chest.getBlockInventory().getContents()) {
-                    if (item != null && isMoney(item)) {
-                        String itemDisplayName = item.getItemMeta().getDisplayName();
-                        List<String> chestMoneyIds = issuedMoneyConfig.getStringList("chests." + chestKey + "." + itemDisplayName);
-
-                        ItemMeta meta = item.getItemMeta();
-                        if (meta != null) {
-                            PersistentDataContainer container = meta.getPersistentDataContainer();
-                            if (container.has(idKey, PersistentDataType.STRING)) {
-                                String moneyId = container.get(idKey, PersistentDataType.STRING);
-                                chestMoneyIds.add(moneyId);
-                                issuedMoneyConfig.set("chests." + chestKey + "." + itemDisplayName, chestMoneyIds);
-                            }
-                        }
+                    if (feeCents > 0) {
+                        player.sendMessage(ChatColor.GRAY + "В казну [" + ChatColor.YELLOW + country + ChatColor.GRAY + "] внесено: "
+                                + ChatColor.YELLOW + gross2 + ChatColor.GRAY + " Ⓕ, зачислено: "
+                                + ChatColor.YELLOW + net2 + ChatColor.GRAY + " Ⓕ.");
+                    } else {
+                        player.sendMessage(ChatColor.GRAY + "В казну страны [" + ChatColor.YELLOW + country + ChatColor.GRAY
+                                + "] внесено " + ChatColor.YELLOW + net2 + ChatColor.GRAY + " Ⓕ.");
                     }
-                }
+                });
+            });
+        });
 
-                saveIssuedMoney();
-            }
-        }
-    }*/
-    // Метод обработки переноса денег в сундук
-    private void handleMoneyTransferToChest(ItemStack item, Chest chest, Player player) {
-        if (isMoney(item)) {
-            player.sendMessage("Переносим деньги в сундук...");
-            String playerPath = player.getUniqueId().toString() + "." + item.getItemMeta().getDisplayName();
-            List<String> playerMoneyIds = issuedMoneyConfig.getStringList(playerPath);
-
-            if (!playerMoneyIds.isEmpty()) {
-                String moneyId = playerMoneyIds.remove(0);
-                issuedMoneyConfig.set(playerPath, playerMoneyIds.isEmpty() ? null : playerMoneyIds);
-
-                String chestKey = getChestKey(chest.getLocation());
-                String itemDisplayName = item.getItemMeta().getDisplayName();
-                List<String> chestMoneyIds = issuedMoneyConfig.getStringList("chests." + chestKey + "." + itemDisplayName);
-                chestMoneyIds.add(moneyId);
-
-                issuedMoneyConfig.set("chests." + chestKey + "." + itemDisplayName, chestMoneyIds);
-                saveIssuedMoney();
-
-                player.sendMessage("Деньги перенесены. ID: " + moneyId);
-            } else {
-                player.sendMessage("Ошибка: У вас нет таких денег.");
-            }
-        } else {
-            player.sendMessage("Ошибка: Это не деньги.");
-        }
-    }
-    // Метод обработки переноса денег из сундука
-    private void handleMoneyTransferFromChest(ItemStack item, Chest chest, Player player) {
-        if (isMoney(item)) {
-            player.sendMessage("Забираем деньги из сундука...");
-            String chestKey = getChestKey(chest.getLocation());
-            String itemDisplayName = item.getItemMeta().getDisplayName();
-            List<String> chestMoneyIds = issuedMoneyConfig.getStringList("chests." + chestKey + "." + itemDisplayName);
-
-            if (chestMoneyIds != null && !chestMoneyIds.isEmpty()) {
-                String moneyId = chestMoneyIds.remove(0);
-                issuedMoneyConfig.set("chests." + chestKey + "." + itemDisplayName,
-                        chestMoneyIds.isEmpty() ? null : chestMoneyIds);
-
-                String playerPath = player.getUniqueId().toString() + "." + itemDisplayName;
-                List<String> playerMoneyIds = issuedMoneyConfig.getStringList(playerPath);
-                playerMoneyIds.add(moneyId);
-                issuedMoneyConfig.set(playerPath, playerMoneyIds);
-                saveIssuedMoney();
-
-                player.sendMessage("Деньги возвращены. ID: " + moneyId);
-            } else {
-                player.sendMessage("Ошибка: В сундуке нет таких денег.");
-            }
-        } else {
-            player.sendMessage("Ошибка: Это не деньги.");
-        }
-    }
-    // Обработка добавления денег в сундук через воронку
-    @EventHandler
-    public void onHopperTransfer(InventoryMoveItemEvent event) {
-        if (event.getDestination().getType() == InventoryType.CHEST) {
-            Chest chest = (Chest) event.getDestination().getLocation().getBlock().getState();
-            ItemStack item = event.getItem();
-
-            if (isMoney(item)) {
-                // Извлекаем ID из NBT-тега предмета
-                ItemMeta meta = item.getItemMeta();
-                if (meta != null) {
-                    PersistentDataContainer container = meta.getPersistentDataContainer();
-                    if (container.has(idKey, PersistentDataType.STRING)) {
-                        String moneyId = container.get(idKey, PersistentDataType.STRING);
-
-                        // Добавляем ID в структуру сундука
-                        String chestKey = getChestKey(chest.getLocation());
-                        chestMoneyMap.computeIfAbsent(chestKey, k -> new ArrayList<>()).add(moneyId);
-
-                        // Сохраняем изменения
-                        saveIssuedMoney();
-                    }
-                }
-            }
-        }
+        return true;
     }
 
-    private void saveChestMoney(Chest chest) {
-        String chestKey = getChestKey(chest.getLocation());
-        issuedMoneyConfig.set("chests." + chestKey, null); // Удаляем старую запись
-
-        if (chestMoneyMap.containsKey(chestKey)) {
-            for (Map.Entry<String, List<String>> entry : chestMoneyMap.entrySet()) {
-                String moneyType = entry.getKey();
-                List<String> moneyIds = entry.getValue();
-
-                if (!moneyIds.isEmpty()) {
-                    issuedMoneyConfig.set("chests." + chestKey + "." + moneyType, moneyIds);
-                }
-            }
-        }
-
-        saveIssuedMoney();
+    /** Всегда приводим деньги к 2 знакам (через центы), перед записью в БД */
+    private double dbAmount(double value) {
+        return centsToDouble(toCents(value));
     }
 
-    private String getChestKey(Location location) {
-        return location.getWorld().getName() + "_" + location.getBlockX() + "_" + location.getBlockY() + "_" + location.getBlockZ();
+    /**
+     * " (x, y, z, world)" appended to ATM transaction notes so the site can
+     * parse it back out and link straight to that spot on BlueMap (GH #8).
+     * Empty string if the location isn't known (e.g. the no-Location
+     * overloads used by non-ATM callers) — keeps the note text unchanged
+     * for those, no dangling trailing space.
+     */
+    private String atmNoteSuffix(Location loc) {
+        if (loc == null || loc.getWorld() == null) return "";
+        return " (" + loc.getBlockX() + ", " + loc.getBlockY() + ", " + loc.getBlockZ() + ", " + loc.getWorld().getName() + ")";
     }
+
 }
-
-

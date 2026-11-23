@@ -1,0 +1,154 @@
+package com.frammy.unitylauncher;
+
+import com.frammy.unitylauncher.zones.ZoneInfo;
+import de.bluecolored.bluemap.api.BlueMapAPI;
+import org.bukkit.Bukkit;
+import org.bukkit.scheduler.BukkitRunnable;
+import org.jetbrains.annotations.NotNull;
+
+import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+
+/**
+ * Плавная подгрузка BlueMap-маркеров без блокировки старта.
+ * ВАЖНО: все вызовы Bukkit/BlueMap выполняются ТОЛЬКО на главном потоке.
+ * Тяжёлая часть — применение маркеров — делается порциями по N задач за тик.
+ */
+public record LazyBlueMapLoader(UnityLauncher plugin) {
+
+    // Параметры (вынесите в config.yml при желании)
+    private static final long STARTUP_DELAY_TICKS = 40L;     // ~2 секунды после старта
+    private static final int MARKERS_PER_TICK = 250;     // сколько задач выполнять за тик
+
+    /**
+     * Планирует мягкую загрузку: ждём BlueMap и чуть откладываем, чтобы сервер «встал».
+     */
+    public void scheduleLazyLoad() {
+        if (!Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
+            plugin.getLogger().warning("[LazyLoad] BlueMap не включён. Пропускаем загрузку маркеров.");
+            return;
+        }
+
+        BlueMapAPI.onEnable(api ->
+                Bukkit.getScheduler().runTaskLater(plugin, this::loadAndApplyOnMainThread, STARTUP_DELAY_TICKS)
+        );
+    }
+
+    /**
+     * Вся логика на главном потоке: безопасно для Bukkit/BlueMap, но порционно.
+     */
+    private void loadAndApplyOnMainThread() {
+
+        // 1) Грузим/обновляем данные (Bukkit API внутри этих методов, поэтому — MAIN thread)
+        try {
+            plugin.getSignManager().loadSignData();
+            plugin.getZoneManager().loadZonesFromConfig();
+            plugin.getLogger().info("[UL] Zones loaded (lazy): " + plugin.getZoneManager().getZones().size());
+        } catch (Throwable t) {
+            plugin.getLogger().severe("[LazyLoad] Ошибка загрузки данных: " + t.getMessage());
+            t.printStackTrace();
+            return;
+        }
+
+        // Зоны ТОЧНО загружены прямо здесь — это настоящий сигнал готовности,
+        // в отличие от 20с-опроса в SignManager (который стартует ещё до этого
+        // метода, и раньше насовсем сдавался, если не успевал застать этот
+        // момент — SHOP-таблички оставались сломанными до /ul reload). Опрос
+        // остаётся как фоллбэк на случай, если BlueMap выключен и этот метод
+        // вообще не вызовется.
+        try {
+            plugin.getSignManager().rebuildShopIndexAndListsNow();
+        } catch (Throwable t) {
+            plugin.getLogger().severe("[LazyLoad] Ошибка rebuildShopIndexAndListsNow: " + t.getMessage());
+            t.printStackTrace();
+        }
+
+        // 2) Снимок зон, чтобы не шарить «живую» карту в раннер. Раньше тут
+        // же снимался и snapshot табличек для applySignMarker — тот путь
+        // убран целиком (GH #21 п.3, см. clearMarkerSet ниже), сами
+        // маркеры табличек (ATM) восстанавливает SignManager.
+        // loadSignData()/restoreRuntimeStateAfterLoad, вызванный чуть выше.
+        List<ZoneInfo> zonesSnapshot = plugin.getZoneManager().getAllZonesSnapshot();
+
+        // 3) Инициализируем MarkerSet'ы один раз
+        try {
+            plugin.getBlueMapIntegration().initializeBlueMapMarkerStorage("zones_shop");
+        } catch (Throwable t) {
+            t.printStackTrace();
+        }
+
+        // GH #21 п.3 — "zones_signs" (generic icon-less POI per sign,
+        // restored unconditionally for every sign category) is retired —
+        // superseded by SHOP's own zone extrude marker and ATM's proper
+        // "services"/point_atm marker (see SignManager.restoreRuntimeState
+        // AfterLoad). It kept resurrecting a redundant second pin at ATM's
+        // exact location on every boot. One-time sweep of whatever it
+        // already left behind; nothing repopulates this set going forward.
+        try {
+            plugin.getBlueMapIntegration().clearMarkerSet("zones_signs");
+        } catch (Throwable t) {
+            t.printStackTrace();
+        }
+
+        // 4) Собираем список коротких задач применения (никаких тяжёлых расчётов внутри!)
+        final List<Runnable> tasks = getRunnables(zonesSnapshot);
+
+        // 5) Бежим порциями по MARKERS_PER_TICK задач за тик — мягко для TPS
+        final int total = tasks.size();
+        final long tApplyStart = System.currentTimeMillis();
+        AtomicInteger idx = new AtomicInteger(0);
+
+        new BukkitRunnable() {
+            @Override
+            public void run() {
+                int start = idx.get();
+                int end = Math.min(start + MARKERS_PER_TICK, total);
+
+                for (int i = start; i < end; i++) {
+                    tasks.get(i).run();
+                }
+                idx.set(end);
+
+                if (end >= total) {
+                    cancel();
+                    long dt = System.currentTimeMillis() - tApplyStart;
+                    plugin.getLogger().info("[LazyLoad] Применение BlueMap-маркеров завершено. Всего задач: " + total + ", заняло ~" + dt + " мс.");
+
+                    // 6) Отложенно обновим SHOP_LIST таблички, чтобы не было лавины перерисовок
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        try {
+                            // 1) Плавный пересчёт владельцев табличек
+                            plugin.getZoneManager().scheduleSignOwnershipRecalc(plugin.getSignManager(), /*signsPerTick*/ 400);
+
+                            // 2) Обновление SHOP_LIST ещё позже — когда владельцы уже проставятся
+                            Bukkit.getScheduler().runTaskLater(plugin, () -> {
+                                try {
+                                    plugin.getSignManager().rebuildAllShopListsLater();
+                                } catch (Throwable t) {
+                                    plugin.getLogger().severe("[LazyLoad] Ошибка обновления SHOP_LIST: " + t.getMessage());
+                                }
+                            }, 20L * 10); // дольше чем раньше (например, 10с), чтобы пересчёт владельцев точно закончился
+                        } catch (Throwable t) {
+                            plugin.getLogger().severe("[LazyLoad] Ошибка scheduleSignOwnershipRecalc: " + t.getMessage());
+                        }
+                    });
+                }
+            }
+        }.runTaskTimer(plugin, 1L, 1L);
+    }
+
+    private @NotNull List<Runnable> getRunnables(List<ZoneInfo> zonesSnapshot) {
+        final List<Runnable> tasks = new ArrayList<>(zonesSnapshot.size());
+
+        for (ZoneInfo z : zonesSnapshot) {
+            tasks.add(() -> {
+                try {
+                    plugin.getBlueMapIntegration().applyZoneMarker(z);
+                } catch (Throwable t) {
+                    plugin.getLogger().warning("[LazyLoad] applyZoneMarker fail: " + (z != null ? z.getID() : "null") + " -> " + t.getMessage());
+                }
+            });
+        }
+        return tasks;
+    }
+}

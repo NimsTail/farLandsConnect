@@ -1,0 +1,45 @@
+package com.frammy.unitylauncher.advs.achievements;
+import com.frammy.unitylauncher.advs.FrameRewardAdvancement;
+
+import com.fren_gor.ultimateAdvancementAPI.util.AdvancementKey;
+import com.fren_gor.ultimateAdvancementAPI.advancement.display.FancyAdvancementDisplay;
+import com.fren_gor.ultimateAdvancementAPI.advancement.BaseAdvancement;
+import org.bukkit.Material;
+import com.fren_gor.ultimateAdvancementAPI.advancement.display.AdvancementFrameType;
+import com.fren_gor.ultimateAdvancementAPI.advancement.Advancement;
+import com.frammy.unitylauncher.advs.AdvancementTabNamespaces;
+
+public class Shield66 extends FrameRewardAdvancement  {
+
+    public static AdvancementKey KEY = new AdvancementKey(
+            AdvancementTabNamespaces.achievements_NAMESPACE,
+            "shield66"
+    );
+
+    
+private static final int FRAME_ID = 59;
+
+@Override
+protected int getFrameId() {
+    return FRAME_ID;
+}public Shield66(Advancement parent) {
+        super(
+                KEY.getKey(),
+                new FancyAdvancementDisplay(
+                        Material.LODESTONE,
+                        "Потерянная Душа",
+                        AdvancementFrameType.TASK,
+                        true,
+                        true,
+                        6f,
+                        15f,
+                        "",
+                        "Умереть на одном и том же месте 3",
+                        "раза подряд",
+                        "Награда: Рамка §bМагнетит"
+                ),
+                parent,
+                1
+        );
+    }
+}

@@ -1,1548 +1,944 @@
 package com.frammy.unitylauncher;
 
-import com.flowpowered.math.vector.Vector2d;
-import com.flowpowered.math.vector.Vector3d;
-import de.bluecolored.bluemap.api.BlueMapMap;
-import de.bluecolored.bluemap.api.gson.MarkerGson;
-import de.bluecolored.bluemap.api.markers.ExtrudeMarker;
-import de.bluecolored.bluemap.api.markers.POIMarker;
-import de.bluecolored.bluemap.api.math.Shape;
+import com.frammy.unitylauncher.auth.AuthBossbarManager;
+import com.frammy.unitylauncher.auth.AuthListener;
+import com.frammy.unitylauncher.auth.AuthService;
+import com.frammy.unitylauncher.auth.LoginRateLimiter;
+import com.frammy.unitylauncher.bank.BankInvoicesDao;
+import com.frammy.unitylauncher.bluemapheat.BlueMapHeatService;
+import com.frammy.unitylauncher.chunkactivity.*;
+import com.frammy.unitylauncher.signs.SignManager;
+import com.frammy.unitylauncher.signs.features.trash.TrashSellConfig;
+import com.frammy.unitylauncher.tab.LuckPermsPrefixService;
+import com.frammy.unitylauncher.tab.TabPrefixService;
+import com.frammy.unitylauncher.upgrades.UpgradeCondition;
+import com.frammy.unitylauncher.upgrades.core.Upgrade;
+import com.frammy.unitylauncher.upgrades.core.UpgradesManager;
+import com.frammy.unitylauncher.upgrades.impl.*;
+import com.frammy.unitylauncher.zones.WeeklyCountryInvoiceService;
+import com.frammy.unitylauncher.zones.ZoneActivityCalculations;
+import com.frammy.unitylauncher.zones.ZoneManager;
+import com.frammy.unitylauncher.zones.countryrelations.CountryRegistryJdbc;
+import com.frammy.unitylauncher.zones.countryrelations.CountryRelationshipDao;
+import com.frammy.unitylauncher.zones.countryrelations.DiplomacyService;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
+import net.luckperms.api.LuckPerms;
+import net.luckperms.api.LuckPermsProvider;
 import net.md_5.bungee.api.chat.ClickEvent;
 import net.md_5.bungee.api.chat.HoverEvent;
 import net.md_5.bungee.api.chat.TextComponent;
 import net.md_5.bungee.api.chat.hover.content.Text;
-import org.apache.commons.lang3.StringUtils;
-import org.bukkit.*;
-import org.bukkit.block.Block;
-import org.bukkit.block.Container;
-import org.bukkit.block.Sign;
-import org.bukkit.command.CommandSender;
-import org.bukkit.configuration.ConfigurationSection;
-import org.bukkit.configuration.file.FileConfiguration;
-import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.Bukkit;
+import org.bukkit.ChatColor;
+import org.bukkit.Location;
+import org.bukkit.OfflinePlayer;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
-import org.bukkit.event.block.Action;
-import org.bukkit.event.block.BlockBreakEvent;
-import org.bukkit.event.block.SignChangeEvent;
-import org.bukkit.event.inventory.InventoryOpenEvent;
-import org.bukkit.event.player.*;
-import org.bukkit.inventory.InventoryHolder;
-import org.bukkit.permissions.PermissionAttachmentInfo;
+import org.bukkit.event.player.AsyncPlayerChatEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
+import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.scheduler.BukkitRunnable;
-import org.bukkit.scheduler.BukkitTask;
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
-import de.bluecolored.bluemap.api.BlueMapAPI;
-import de.bluecolored.bluemap.api.markers.Marker;
-import de.bluecolored.bluemap.api.markers.MarkerSet;
-import org.locationtech.jts.geom.Coordinate;
-import org.locationtech.jts.geom.GeometryFactory;
-import org.locationtech.jts.geom.Polygon;
 
-import java.lang.reflect.Array;
+import javax.sql.DataSource;
+import java.io.*;
 import java.sql.*;
-import java.util.Date;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
-
-import java.io.File;
-import java.io.FileReader;
-import java.io.FileWriter;
-import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public final class UnityLauncher extends JavaPlugin implements Listener {
-    HashMap<String, Date> sessions = new HashMap<>();
-    HashMap<String, Long> playTime = new HashMap<>();
-    public Map<Player, List<Location>> markerPoints = new HashMap<>();
+
+    // === singleton ===
     private static UnityLauncher instance;
-    public final Set<Player> awaitingCorrectCommand = new HashSet<>();
-    private int currentID = 0;
-    private FileConfiguration shopConfig;
-    public ArrayList<String> commandCategories= new ArrayList<String>();
-    private MoneyManager moneyManager;
+    public static UnityLauncher getInstance() { return instance; }
+
+    // === managers / services ===
+    private final Set<UUID> awaitingCorrectCommand = ConcurrentHashMap.newKeySet();
+    public final List<String> commandCategories = new ArrayList<>();
+    public LuckPermsPrefixService luckPermsPrefixService;
+    public MoneyManager moneyManager;
     private ZoneManager zoneManager;
+    public ZoneActivityCalculations zoneActivityCalculations;
+    private SignManager signManager;
+    private ActivityTracker activityTracker;
     private WebSocketManager webSocketManager;
+    private BlueMapIntegration blueMapIntegration;
+    private LoginRateLimiter loginLimiter;
+    public BlueMapHeatService blueMapHeatService;
 
-   // private Map<Location, String> configuringSigns = new HashMap<>();
-    private final Map<Location, BukkitTask> scrollingTasks = new HashMap<>();
-   // private final Set<Location> pausedSigns = new HashSet<>();
-    private final Map<UUID, Integer> playerScrollIndex = new HashMap<>();
-    private final Map<Location, List<String>> signPages = new HashMap<>();
-    private final Map<String, Runnable> actions = new HashMap<>();
-    private final ChatColor highlightColor = ChatColor.GREEN;
-    private final Map<Location, Runnable> signClickActions = new HashMap<>();
-    private final Map<Player, Block> signSelectionMap = new HashMap<>();
+    public DiplomacyService diplomacy;
+    public CountryRegistryJdbc countryRegistryJdbc;
+    // military-diplomacy-design.md §13 Фаза 4.
+    public com.frammy.unitylauncher.auth.WarStatusCache warStatusCache;
+    // GH#32 (раунд 10, фидбек 2026-08-18) — захваченные секторы линии фронта
+    // снижают эффективность военного объекта, сразу и в игре.
+    public com.frammy.unitylauncher.auth.MilitaryEffectivenessCache militaryEffectivenessCache;
+    public CountryRelationshipDao countryRelationshipDao;
+    // military-diplomacy-design.md §4.1, GH#24 — per-zone "тип сооружения" +
+    // физический анкер. Конструируется сразу после zoneManager (onEnable).
+    public com.frammy.unitylauncher.military.MilitarySpecializationService militarySpecializationService;
+    // GH#24 (фидбек 2026-08-14 п.1/4) — "тип сооружения" под DEFENSE, тот же
+    // паттерн одним уровнем ниже. Конструируется сразу после militarySpecializationService.
+    public com.frammy.unitylauncher.military.MilitaryDefenseSubtypeService militaryDefenseSubtypeService;
+    // military-diplomacy-design.md §4.1 п.3, GH#24 п.1 — Колокол-timing
+    // мини-игра разведки (см. ZoneRequestPoller.processStartReconMinigame).
+    public com.frammy.unitylauncher.military.MilitaryReconMinigame militaryReconMinigame;
 
-    // UUID + Location → последний момент взаимодействия
-    private final Map<Location, BukkitTask> resetTasks = new HashMap<>();
+    public AuthService authService;
+    public AuthListener authListener;
+    public AuthBossbarManager authBossbars;
+    private DailyEconomyTask dailyEconomyTask;
+    private UpgradesManager upgradesManager;
+    private BankInvoicesDao bankInvoicesDao;
 
-    // Загрузка стартовых текстов табличек из signs.yml (если ещё не хранится)
-    private final Map<Location, String[]> originalSignTexts = new HashMap<>();
-   // private final Map<Location, SignState> signStates = new HashMap<>();
-    public Map<Location, SignVariables> genericSignList = new HashMap<>();
-    enum SignState {
-        ATM_MENU,         // скроллим список
-        ATM_ACTION_READY,
-        SHOP_UNDEFINED,
-        SHOP_DEFINED// ждём клик для выполнения действия
-    }
-    enum SignCategory {
-        ATM,
-        SHOP_SOURCE,
-        SHOP_SELLER,
-        SHOP_INFO,
-        SHOP_LIST,
-        SHOP_HELP
-    }
-    public class SignVariables {
-        private boolean isConfigurable;
-        private boolean isPaused;
-        private List<Integer> scrollLines;
-        private List<String> signText;
-        private String ownerName;
-        private SignState state;
-        private SignCategory category;
-        private String markerID;
+    // server messages (join/quit/advancement)
+    private ServerMessagesListener serverMessagesListener;
 
-        public SignVariables(String ownerName, List<String> signText, List<Integer> scrollLines, boolean isConfigurable, boolean isPaused, SignCategory category, SignState state, String markerID) {
-            this.isConfigurable = isConfigurable;
-            this.isPaused = isPaused;
-            this.signText = signText;
-            this.ownerName = ownerName;
-            this.scrollLines = scrollLines;
-            this.category = category;
-            this.state = state;
-            this.markerID = markerID;
-        }
-
-        public boolean getConfigurtable() {
-            return isConfigurable;
-        }
-        public boolean getPaused() {
-            return isPaused;
-        }
-
-        public List<String> getSignText() {
-            return signText;
-        }
-
-        public List<Integer> getScrollLines() {
-            return scrollLines;
-        }
-        public SignCategory getSignCategory() {
-            return category;
-        }
-        public SignState getSignState() {
-            return state;
-        }
-        public String getOwnerName() {
-            return ownerName;
-        }
-        public String getMarkerID() {
-            return markerID;
-        }
-
-
-        public void setConfigurtable(boolean isConfigurable) {
-            this.isConfigurable = isConfigurable;
-        }
-        public void setPaused(boolean isPaused) {
-            this.isPaused = isPaused;
-        }
-
-        public void setSignText(List<String> signText) {
-            this.signText = signText;
-        }
-
-        public void setScrollLines(List<Integer> scrollLines) {
-            this.scrollLines = scrollLines;
-        }
-        public void setSignCategory(SignCategory category) {
-            this.category = category;
-        }
-        public void setSignState(SignState state) {
-            this.state = state;
-        }
-        public void setOwnerName(String ownerName) {
-            this.ownerName = ownerName;
-        }
-        public void setMarkerID(String markerID) {
-            this.markerID = markerID;
-        }
-
+    public ServerMessagesListener getServerMessagesListener() {
+        return serverMessagesListener;
     }
 
+    // DB pool
+    private HikariDataSource hikari;
+
+    // expose some stuff
+    public BlueMapIntegration getBlueMapIntegration() { return blueMapIntegration; }
+    public SignManager getSignManager() { return signManager; }
+    public ZoneManager getZoneManager() { return zoneManager; }
+    public ZoneActivityCalculations getZoneActivityCalculations() { return zoneActivityCalculations; }
+    public DataSource getDataSource() { return hikari; }
+    public Set<UUID> getAwaitingCorrectCommand() { return awaitingCorrectCommand; }
+    public CountryRegistryJdbc getCountryRegistryJdbc() { return countryRegistryJdbc; }
+    public AuthListener getAuthListener() { return authListener; }
+    public AuthService getAuthService() { return authService; }
+    public LoginRateLimiter getLoginLimiter() { return loginLimiter; }
+    public UpgradesManager getUpgradesManager() { return upgradesManager; }
+    public ActivityTracker getActivityTracker() { return activityTracker; }
+    public MoneyManager getMoneyManager() { return moneyManager; }
+    public BankInvoicesDao getBankInvoicesDao() { return bankInvoicesDao; }
+
+    // cached db.properties + driver status
+    private static volatile Properties DB_PROPS;
+    private static final AtomicBoolean DRIVER_LOADED = new AtomicBoolean(false);
+
+    // --- AUTH config defaults (можно переопределить из secrets.properties) ---
+    private static long AUTH_TTL_MS = 24L * 60 * 60 * 1000; // 24h
+    private static int AUTH_ITER = 120_000;
+    private static int AUTH_KEY_LEN = 256;
+    private static byte[] AUTH_PEPPER = new byte[0];
+
+    // --- bridge to the new farlandsconnect backend (auth mirror only, see FarLandsApiClient) ---
+    private com.frammy.unitylauncher.auth.FarLandsApiClient farLandsApi;
+    public com.frammy.unitylauncher.auth.FarLandsApiClient getFarLandsApi() { return farLandsApi; }
 
     @Override
     public void onEnable() {
-        //Инициализируем всякую туфту
+        instance = this;
+
+        TrashSellConfig.load(this);
+
+        loadAuthSecrets();
+
+        // --- init DB pool как можно раньше ---
+        initDataSource();
+
+        // --- базовые листенеры (сам плагин) ---
         Bukkit.getPluginManager().registerEvents(this, this);
-        moneyManager = new MoneyManager(getDataFolder(), "unity_launcher");
+
+        // --- money / balance accounting ---
+        moneyManager = new MoneyManager(this);
         getServer().getPluginManager().registerEvents(moneyManager, this);
+
+        activityTracker = new ActivityTracker(this);
+        safeRegisterListener(activityTracker); // если ActivityTracker оставляешь Listener
+        Bukkit.getPluginManager().registerEvents(new ChunkTimeListener(activityTracker), this);
+        safeRegisterListener(new ChunkActivityEventsListener(activityTracker));
+
+        // military-diplomacy-design.md §2.2.1/§13 Фаза 4 — always-on, not
+        // gated by any upgrade (the incident log itself is a base mechanic).
+        Bukkit.getPluginManager().registerEvents(new com.frammy.unitylauncher.military.MilitaryIncidentListener(), this);
+
+        bankInvoicesDao = new BankInvoicesDao(this);
+
+        // --- websocket manager for the external launcher bridge ---
         webSocketManager = new WebSocketManager(getLogger());
-        // webSocketManager.connect();
+
+        // --- BlueMap integration ---
+        blueMapIntegration = new BlueMapIntegration(this, getLogger(), getDataFolder());
+
+        // --- zone manager (claims / stores / regions / country borders) ---
+        zoneManager = new ZoneManager(this, null, blueMapIntegration, activityTracker);
+        // обратная ссылка — нужна ActivityTracker'у, чтобы приглушать вес визита
+        // владельца/согражданина зоны в её же собственный трафик (см. computeVisitorWeight)
+        activityTracker.setZoneManager(zoneManager);
+
+        // military-diplomacy-design.md §4.1/§14.2, GH#24 — per-zone военная
+        // специализация + физический анкер (Колокол и т.п.). Anchor-листенер
+        // always-on (не апгрейд сам по себе — как MilitaryIncidentListener выше).
+        militarySpecializationService = new com.frammy.unitylauncher.military.MilitarySpecializationService(zoneManager);
+        militaryDefenseSubtypeService = new com.frammy.unitylauncher.military.MilitaryDefenseSubtypeService(zoneManager);
+        Bukkit.getPluginManager().registerEvents(
+                new com.frammy.unitylauncher.military.MilitaryAnchorService(militarySpecializationService, militaryDefenseSubtypeService), this);
+        militaryReconMinigame = new com.frammy.unitylauncher.military.MilitaryReconMinigame(militarySpecializationService);
+        Bukkit.getPluginManager().registerEvents(militaryReconMinigame, this);
+
+        // --- веб-заявки на создание/редактирование зон с сайта ---
+        com.frammy.unitylauncher.zones.web.ZoneWebRequestService zoneWebRequestService =
+                new com.frammy.unitylauncher.zones.web.ZoneWebRequestService(this, zoneManager);
+        zoneWebRequestService.start(100L); // 40 тиков ≈ 2 секунды
+
+        // чистка "осиротевших" территорий Государств — страна могла быть удалена на
+        // сайте (напр. выход последнего лидера, countryOperations.php) без уведомления
+        // плагина; раз в 2 минуты сверяем COUNTRY-зоны со списком существующих стран
+        zoneManager.startOrphanCountryZoneCleanup(2400L); // 2400 тиков ≈ 2 минуты
+
+        // --- sign manager (shops, scroll text etc.) ---
+        signManager = new SignManager(
+                this,
+                getDataFolder(),
+                zoneManager,
+                blueMapIntegration
+        );
+        zoneManager.setSignManager(signManager);
+        getServer().getPluginManager().registerEvents(signManager, this);
+        signManager.enable();
+
+        // --- activity-based billing & overlap multipliers for zones ---
+        zoneActivityCalculations = new ZoneActivityCalculations(zoneManager, this, bankInvoicesDao);
+
+        // --- command registration & /ul help wiring ---
         HelpCommandManager helpManager = new HelpCommandManager();
-        zoneManager = new ZoneManager(this, getDataFolder());
-        Objects.requireNonNull(getCommand("unityLauncher")).setExecutor(new Unity(helpManager, webSocketManager));
-        this.getCommand("unityLauncher").setTabCompleter(new CommandCompleter());
-        if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
-            BlueMapAPI.onEnable(api -> {
-                System.out.println("Загружаем маркеры для BlueMap.");
-                loadBlueMapMarkers();
-            });
+        Unity unityCmd = new Unity(helpManager, webSocketManager, activityTracker, zoneManager);
+
+        Objects.requireNonNull(getCommand("unityLauncher"))
+                .setExecutor(unityCmd);
+        Objects.requireNonNull(getCommand("unityLauncher"))
+                .setTabCompleter(new CommandCompleter());
+        Objects.requireNonNull(getCommand("login"))
+                .setExecutor(unityCmd);
+        Objects.requireNonNull(getCommand("register"))
+                .setExecutor(unityCmd);
+
+        // категории и помощь
+        commandCategories.clear();
+
+        /* ======================================================
+         *  Авторизация
+         * ====================================================== */
+        commandCategories.add("Авторизация");
+        helpManager.addCommand("/ul change", "Подсказка по смене пароля", "Авторизация");
+        helpManager.addCommand("/ul change <старый> <новый>", "Сменить пароль аккаунта", "Авторизация");
+
+        /* ======================================================
+         *  Финансы
+         * ====================================================== */
+        commandCategories.add("Финансы");
+        helpManager.addCommand("/ul balance", "Показать твой личный баланс", "Финансы");
+        helpManager.addCommand("/ul zone price", "Посчитать дневную стоимость текущей зоны", "Финансы");
+
+
+        /* ======================================================
+         *  Уведомления
+         * ====================================================== */
+        commandCategories.add("Уведомления");
+        helpManager.addCommand("/ul notifications", "Список уведомлений", "Уведомления");
+        helpManager.addCommand("/ul notifications ON", "Включить уведомления", "Уведомления");
+        helpManager.addCommand("/ul notifications OFF", "Выключить уведомления", "Уведомления");
+
+        /* ======================================================
+         *  Страна
+         * ====================================================== */
+        commandCategories.add("Страна");
+        helpManager.addCommand("/ul country", "Информация о твоей стране", "Страна");
+        helpManager.addCommand("/ul relations", "Международные отношения (скоро)", "Страна");
+
+        /* ======================================================
+         *  Зоны
+         * ====================================================== */
+        commandCategories.add("Зоны");
+        helpManager.addCommand("/ul zone addcorner <тип>", "Добавить точку новой зоны", "Зоны");
+        helpManager.addCommand("/ul zone removecorner", "Удалить последнюю точку контура", "Зоны");
+        helpManager.addCommand("/ul zone build <тип> [название]", "Построить зону", "Зоны");
+        helpManager.addCommand("/ul zone update corners +/-", "Расширить/сузить границы", "Зоны");
+        helpManager.addCommand("/ul zone update name <новое>", "Переименовать зону", "Зоны");
+        helpManager.addCommand("/ul zone update color R,G,B", "Изменить цвет зоны", "Зоны");
+        helpManager.addCommand("/ul zone remove", "Запросить удаление зоны", "Зоны");
+        helpManager.addCommand("/ul zone confirmremove", "Подтвердить удаление зоны", "Зоны");
+        helpManager.addCommand("/ul zone cancelremove", "Отменить удаление зоны", "Зоны");
+
+
+        /* ======================================================
+         *  Админ
+         * ====================================================== */
+        commandCategories.add("Админ");
+        helpManager.addCommand("/ul reload", "Перезагрузить конфиг, апгрейды, зоны", "Админ");
+        helpManager.addCommand("/ul expo", "Экспортировать тепловую карту активностей", "Админ");
+        helpManager.addCommand("/ul fsnap", "Принудительный подсчёт зоны и биллинг", "Админ");
+        helpManager.addCommand("/ul blist", "Показать очередь биллинга зон", "Админ");
+        helpManager.addCommand("/ul fpslink <url>", "Отправить ссылку в лаунчер", "Админ");
+
+        // --- diplomacy / international relations (COUNTRIES table) ---
+        countryRelationshipDao = new CountryRelationshipDao();
+        diplomacy = new DiplomacyService(countryRelationshipDao);
+        Bukkit.getScheduler().runTaskAsynchronously(this, diplomacy::loadAll);
+
+        // --- countries registry / who leads which country / what country owns a player ---
+        countryRegistryJdbc = new CountryRegistryJdbc(this);
+
+        // --- lazy BlueMap load (restore saved markers etc. after world is ready) ---
+        new LazyBlueMapLoader(this).scheduleLazyLoad();
+        // --- BlueMap viewport heat overlay (regions json + client-side markers) ---
+        this.blueMapHeatService = new com.frammy.unitylauncher.bluemapheat.BlueMapHeatService(this);
+        this.blueMapHeatService.start();
+
+        // --- tab prefix sync for LuckPerms/scoreboard ---
+        TabPrefixService tabPrefixService = getTabPrefixService();
+        Bukkit.getScheduler().runTaskLater(this, tabPrefixService::applyForAllOnlinePlayers, 40L);
+
+        // --- PlaceholderAPI expansion for %unity_prefix% ---
+        if (getServer().getPluginManager().getPlugin("PlaceholderAPI") != null) {
+            new com.frammy.unitylauncher.tab.UnityPrefixExpansion(this, countryRegistryJdbc).register();
         }
 
-        //Загружаем данные yml
-        loadSignData();
-        //loadShopData();
-        loadZoneData();
-        zoneManager.loadZonesFromConfig();
+        // --- LuckPerms presence probe (diagnostic only) ---
+        boolean lpOk;
+        try {
+            net.luckperms.api.LuckPerms ignored = net.luckperms.api.LuckPermsProvider.get();
+            lpOk = true;
+        } catch (Throwable t) {
+            lpOk = false;
+        }
+        logInfo("LuckPerms present = " + lpOk);
 
-        //Для help комманды
-        commandCategories.add("Авторизация");
-        commandCategories.add("Финансы");
-        commandCategories.add("Уведомления");
-        commandCategories.add("Страна");
+        if (countryRegistryJdbc == null) {
+            logWarn("countryRegistryJdbc == null (апгрейды не узнают страну)");
+        } else {
+            logInfo("countryRegistryJdbc OK");
+        }
+        if (zoneManager == null) {
+            logWarn("ZoneManager == null (getZoneAt не сработает)");
+        } else {
+            logInfo("ZoneManager OK");
+        }
 
-        helpManager.addCommand("/ul rcode", "Получение кода регистрации", "Авторизация");
-        helpManager.addCommand("/ul balance", "Показывает твой баланс", "Финансы");
-        helpManager.addCommand("/ul top", "Показывает ТОП игроков по заданной категории", "Финансы");
-        helpManager.addCommand("/ul change", "Смена пароля", "Авторизация");
-        helpManager.addCommand("/ul notifications", "Просмотр полученных уведомлений", "Уведомления");
-        helpManager.addCommand("/ul notifications ON/OFF", "Включение/выключение уведомлений", "Уведомления");
-        helpManager.addCommand("/ul country", "Информация о твоей стране", "Страна");
-        helpManager.addCommand("/ul pay ИГРОК СУММА", "Отправление средств игроку", "Финансы");
-        helpManager.addCommand("/ul cb ADD/WITHDRAW СУММА", "Управление балансом страны. Снять деньги может только глава государства", "Страна");
-        helpManager.addCommand("/ul daydeal КОД", "Завершить ежедневный квест", "Финансы");
-        helpManager.addCommand("/ul group LIST/SET/PREFIX", "Настраивает группы прав для государства", "Страна");
-        helpManager.addCommand("/ul shop create НАЗВАНИЕ", "Создание торговой точки", "Финансы");
+        var weekly = new WeeklyCountryInvoiceService(
+                this,
+                countryRegistryJdbc,
+                bankInvoicesDao,
+                java.time.ZoneId.of("Europe/Riga"),
+                0 // или твой serverUserId
+        );
+        weekly.start();
 
-        FileConfiguration config = YamlConfiguration.loadConfiguration(new File(getDataFolder(), "signData.yml"));
-        restoreScrollingSignsFromFile(config);
-        instance = this;
+        // === upgrades (single entrypoint) ===
+        upgradesManager = new UpgradesManager(this);
+
+        try {
+            LuckPerms lp = LuckPermsProvider.get();
+            lp.getEventBus().subscribe(this, net.luckperms.api.event.group.GroupDataRecalculateEvent.class, e -> {
+                String name = e.getGroup().getName();
+
+                if (name.equalsIgnoreCase("default")) {
+                    UpgradeCondition.invalidateDefaultNodeCache();
+                } else {
+                    // группа страны называется "country_<Countries.Id>", а кэш в UpgradeCondition
+                    // ключуется по голому Id — снимаем префикс перед инвалидацией
+                    String canonId = name.regionMatches(true, 0, "country_", 0, "country_".length())
+                            ? name.substring("country_".length())
+                            : name;
+                    UpgradeCondition.invalidateCountryNodeCache(canonId);
+                }
+            });
+        } catch (Throwable t) {
+            getLogger().severe("[UL] LuckPerms not available, upgrade cache invalidation disabled: " + t.getMessage());
+        }
+
+        // --- zone billing scheduler (daily cost calc + auto-billing async logic) ---
+        zoneActivityCalculations.startZoneBillingScheduler();
+
+        // --- async ping DB for health logging ---
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            try (Connection c = DBConnect()) {
+                if (c == null) {
+                    logError("DB ping: no connection (DBConnect() returned null)");
+                } else {
+                    try (Statement st = c.createStatement(); ResultSet rs = st.executeQuery("SELECT 1")) {
+                        if (rs.next()) logInfo("DB ping: OK");
+                        else logWarn("DB ping: no result from SELECT 1");
+                    }
+                }
+            } catch (Throwable t) {
+                logError("DB ping failed", t);
+            }
+        });
+        this.luckPermsPrefixService = new LuckPermsPrefixService(this);
+
+        ZonesEconomyConfig zonesEconomyConfig = ZonesEconomyConfig.load(this);
+
+        UserActivityJdbc userActivityJdbc = new UserActivityJdbc(this);
+        this.dailyEconomyTask = new DailyEconomyTask(this, countryRegistryJdbc, userActivityJdbc, zonesEconomyConfig, bankInvoicesDao);
+        this.dailyEconomyTask.start();
+
+        // --- AUTH ---
+        this.authService  = new AuthService(farLandsApi);
+        this.authBossbars = new AuthBossbarManager(this);
+        this.authListener = new AuthListener(this, this.authService, this.authBossbars);
+        this.loginLimiter = new LoginRateLimiter();
+        getServer().getPluginManager().registerEvents(this.authListener, this);
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> authService.preloadAllAuth());
+
+        // --- site-initiated money requests (transfers/invoice-pay/salary-claim from
+        // farlands.in) — see infra/game-integration-architecture.md in the farlandsconnect repo
+        new com.frammy.unitylauncher.auth.MoneyRequestPoller(this, farLandsApi, getLogger()).start(40L); // ~2s
+
+        // --- site-initiated zone/country requests (create/edit/delete zones from
+        // farlands.in) — HTTP counterpart of the MySQL-direct ZoneWebRequestService
+        // below, both feed the same ZoneManager.handle(...)
+        new com.frammy.unitylauncher.auth.ZoneRequestPoller(this, farLandsApi, zoneManager, getLogger()).start(40L); // ~2s
+
+        // --- site-initiated password changes (farlands.in account settings) ---
+        new com.frammy.unitylauncher.auth.PasswordChangeRequestPoller(this, farLandsApi, authService, getLogger()).start(40L); // ~2s
+
+        // --- site-initiated upgrade purchases/toggles/choices (farlands.in
+        // /upgrades) — carries the resulting LuckPerms state to the country's
+        // group (or the player's own user) so UpgradeCondition actually sees
+        // it. See infra/game-integration-architecture.md "апгрейды".
+        new com.frammy.unitylauncher.auth.UpgradeGrantPoller(this, farLandsApi, getLogger()).start(40L); // ~2s
+
+        // --- site-initiated country creation (farlands.in "Создать страну")
+        // — mirrors the new country into this plugin's own Countries table +
+        // LuckPerms group, without which it's invisible to ZoneManager/
+        // UpgradeCondition entirely. See infra/game-integration-architecture.md.
+        new com.frammy.unitylauncher.auth.CountryCreateRequestPoller(this, farLandsApi, getLogger()).start(40L); // ~2s
+
+        // --- site-initiated country disband/settings edits (GH #10) — the
+        // create poller above only ever covered creation; delete/rename/
+        // prefix-change on the site never reached this plugin's own
+        // Countries table at all until these two. ---
+        new com.frammy.unitylauncher.auth.CountryDeleteRequestPoller(this, farLandsApi, getLogger()).start(40L); // ~2s
+        new com.frammy.unitylauncher.auth.CountrySyncRequestPoller(this, farLandsApi, getLogger()).start(40L); // ~2s
+        // GH #10 round 3: kick/leave never told the plugin either — a
+        // departed player kept their LuckPerms country group/prefix forever.
+        new com.frammy.unitylauncher.auth.CountryMemberLeaveRequestPoller(this, farLandsApi, getLogger()).start(40L); // ~2s
+
+        // --- chunk activity heatmap reporting (feeds the site's /stats) ---
+        new com.frammy.unitylauncher.chunkactivity.HeatmapReporter(this, farLandsApi, activityTracker).start(6000L); // 5min
+
+        // --- Plan plugin stats mirror (playtime/mob kills/deaths, feeds the
+        // site's /stats "Мой перформанс"/"Игроки" tabs) — no-ops quietly
+        // until the Plan plugin is actually installed on the server.
+        new com.frammy.unitylauncher.auth.PlanStatsReporter(this, farLandsApi, getLogger()).start(12000L); // 10min
+
+        // --- military-diplomacy-design.md §13 Фаза 4: which country pairs
+        // are currently at war (consumed by AttackSupportUpgrade etc.) ---
+        warStatusCache = new com.frammy.unitylauncher.auth.WarStatusCache(this, farLandsApi);
+        warStatusCache.start(200L); // ~10s — war status doesn't need second-level freshness
+
+        militaryEffectivenessCache = new com.frammy.unitylauncher.auth.MilitaryEffectivenessCache(this, farLandsApi);
+        militaryEffectivenessCache.start(600L); // ~30s — same order of magnitude as the frontier presence report period
+
+        // GH #27 "Географические объекты" — infra/geographic-landmarks-
+        // design.md §8 п.4. Website-authoritative, this is the plugin
+        // mirroring the current list onto BlueMap on a slow timer (changes
+        // rarely — no second-level freshness needed, unlike war status).
+        new com.frammy.unitylauncher.military.LandmarkSyncService(this, farLandsApi, blueMapIntegration, getLogger()).start(1200L); // ~60s
+
+        // military-diplomacy-design.md §16/§13 Фаза 5 — must match the
+        // backend's FRONTIER_REPORT_PERIOD_MS (lib/frontierPressure.ts).
+        new com.frammy.unitylauncher.military.FrontierPresenceReporter(this, zoneManager, farLandsApi).start(1200L); // ~60s
+
+        // --- server messages (join/quit/advancement phrases) ---
+        this.serverMessagesListener = ServerMessagesListener.init(this);
+
+        // --- Я тут втиснусь со своими ачивками, ок? ---
+        AdvancementsManager advancementsManager = new AdvancementsManager(this);
+        advancementsManager.init();
+
+        // --- daily deal reset on day change ---
+        DailyDealService dailyDealService = new DailyDealService(this);
+        dailyDealService.runOnStartup();
+
+        // регистрируем ВСЕ апгрейды ТОЛЬКО здесь, подряд:
+        var brandCmd = new com.frammy.unitylauncher.upgrades.impl.BrandCommand(this);
+
+        var b = getCommand("brand");
+        if (b != null) {
+            b.setExecutor(brandCmd);
+            b.setTabCompleter(brandCmd);
+        } else {
+            getLogger().severe("Command 'brand' is missing in plugin.yml");
+        }
+
+        // Автоматическая регистрация всех апгрейдов
+        registerAllUpgrades();
+        upgradesManager.start();
+        logInfo("UnityLauncher enabled!");
     }
-    public ZoneManager getZoneManager() {
-        return zoneManager;
+
+    private @NotNull TabPrefixService getTabPrefixService() {
+        TabPrefixService tabPrefixService =
+                new TabPrefixService(this, this::computeTabPrefixFromCache);
+        LuckPermsPrefixService lpPrefixService =
+                new LuckPermsPrefixService(this);
+        tabPrefixService.setLuckPermsPrefixService(lpPrefixService);
+        return tabPrefixService;
     }
+
 
     @Override
     public void onDisable() {
-        saveSignData();
-        zoneManager.saveZonesToConfig();
-        if (webSocketManager != null) {
-            webSocketManager.disconnectAll();
-        }
-        Connection con = DBConnect();
-        if (con != null) {
-            try {
-                String query = "UPDATE Users SET DayDealCode=0 WHERE 1;";
-                Statement st = con.createStatement();
-                st.executeUpdate(query);
+        safeShutdown("BlueMapHeatService", blueMapHeatService, BlueMapHeatService::stop);
+        safeShutdown("SignManager", signManager, m -> {
+            m.saveSignData();
+            logInfo("signData.yml saved (" + m.store().signs().size() + " signs)");
+        });
+        safeShutdown("ZoneManager", zoneManager, ZoneManager::saveZonesToConfig);
+        safeShutdown("ActivityTracker", activityTracker, a -> {
+            a.forceSampleNow();
+            a.saveAllToDisk();
+            a.stop();
+        });
+        safeShutdown("WebSocketManager", webSocketManager, WebSocketManager::disconnectAll);
+        safeShutdown("DiplomacyService", diplomacy, d -> d.snapshot().keySet().forEach(d::save));
+        safeShutdown("BlueMapIntegration", blueMapIntegration, b -> {
+            b.saveAllBlueMapMarkersByPrefix("zones_");
+            b.saveBlueMapMarkers("zones_signs");
+            b.saveBlueMapMarkers("services");
+            b.saveBlueMapMarkers("shops");
+        });
+        safeShutdown("DailyEconomyTask", dailyEconomyTask, DailyEconomyTask::stop);
 
-                playTime.forEach((key, value) -> {
-                    try {
-                        String query2 = "SELECT Playtime FROM Users WHERE Name='" + key + "';";
-                        Statement st2 = con.createStatement();
-                        ResultSet rs2 = st2.executeQuery(query2);
-                        long sqlTime = 0;
-                        if (rs2.next())
-                            sqlTime = rs2.getInt("Playtime");
-                        else
-                            Bukkit.getConsoleSender().sendMessage("No player " + key + " in database");
-                        sqlTime += value;
-                        String query3 = "UPDATE Users SET Playtime=" + sqlTime + " WHERE Name='" + key + "';";
-                        Statement st3 = con.createStatement();
-                        st3.executeUpdate(query3);
-                    } catch (Exception e) {
-                        onError("", e, null);
+        if (hikari != null) {
+            try {
+                hikari.close();
+                logInfo("HikariCP pool closed");
+            } catch (Throwable ignore) {}
+            hikari = null;
+        }
+
+        safeShutdown("UpgradesManager", upgradesManager, UpgradesManager::stop);
+        instance = null;
+        logInfo("Plugin disabled successfully");
+    }
+
+    /* ===================== Player-related events ===================== */
+
+    @EventHandler(ignoreCancelled = true)
+    public void onChatGateAndFps(AsyncPlayerChatEvent event) {
+        Player p = event.getPlayer();
+        String message = event.getMessage();
+
+        // 1) Жёсткий гейт: если игрок в awaiting — блокируем чат
+        if (awaitingCorrectCommand.contains(p.getUniqueId())) {
+            // НО: разрешим fps://, чтобы не ломать твою фичу (или запрети тоже — на выбор)
+            if (!message.startsWith("fps://")) {
+                event.setCancelled(true);
+                Bukkit.getScheduler().runTask(this, () -> {
+                    if (p.isOnline()) {
+                        p.sendMessage(ChatColor.RED +
+                                "Ты не можешь отправлять сообщения, пока не укажешь границы магазина. Используй: /ul shop addcorner");
                     }
                 });
-            } catch (Exception ex) {
-                onError("NotInBase", ex, null);
+                return;
             }
         }
-        saveBlueMapMarkers("services");
-        saveBlueMapMarkers("shops");
-        instance = null;
-    }
-    public static UnityLauncher getInstance() {
-        return instance;
-    }
 
-    @EventHandler
-    public void onChat(AsyncPlayerChatEvent event) {
-        String message = event.getMessage();
+        // 2) fps:// → кликабельное сообщение
         if (message.startsWith("fps://")) {
             event.setCancelled(true);
 
             TextComponent clickableMessage = new TextComponent("§a" + message);
-            clickableMessage.setHoverEvent(new HoverEvent(HoverEvent.Action.SHOW_TEXT, new Text("§aОткрыть ссылку §7" + message)));
-            clickableMessage.setClickEvent(new ClickEvent(ClickEvent.Action.RUN_COMMAND, "/ul fpslink " + message));
+            clickableMessage.setHoverEvent(new HoverEvent(
+                    HoverEvent.Action.SHOW_TEXT,
+                    new Text("§aОткрыть ссылку §7" + message)
+            ));
+            clickableMessage.setClickEvent(new ClickEvent(
+                    ClickEvent.Action.RUN_COMMAND,
+                    "/ul fpslink " + message
+            ));
 
-            event.getPlayer().spigot().sendMessage(clickableMessage);
+            Bukkit.getScheduler().runTask(this, () -> {
+                if (p.isOnline()) p.spigot().sendMessage(clickableMessage);
+            });
         }
     }
 
+    // update action bar zone name only when player crosses block boundary
     @EventHandler
     public void onPlayerMove(PlayerMoveEvent event) {
-        zoneManager.checkPlayerZone(event.getPlayer());
-    }
-
-    public void saveSignData() {
-        File shopFile = new File(getDataFolder(), "signData.yml");
-        YamlConfiguration shopConfig = new YamlConfiguration();
-
-        for (Map.Entry<Location, SignVariables> entry : genericSignList.entrySet()) {
-            Location loc = entry.getKey();
-            SignVariables vars = entry.getValue();
-
-            String path = "signs." + encodeLocation(loc); // Уникальный путь по координатам
-
-            shopConfig.set(path + ".text", vars.getSignText());
-            shopConfig.set(path + ".scrollLines", vars.getScrollLines());
-            shopConfig.set(path + ".isConfigurable", vars.getConfigurtable());
-            shopConfig.set(path + ".isPaused", vars.getPaused());
-            shopConfig.set(path + ".owner", vars.getOwnerName());
-            shopConfig.set(path + ".category", vars.getSignCategory().toString());
-            shopConfig.set(path + ".state", vars.getSignState().toString());
-            shopConfig.set(path + ".markerID", vars.getMarkerID());
-
-            shopConfig.set(path + ".location.world", loc.getWorld().getName());
-            shopConfig.set(path + ".location.x", loc.getBlockX());
-            shopConfig.set(path + ".location.y", loc.getBlockY());
-            shopConfig.set(path + ".location.z", loc.getBlockZ());
+        if (event.getFrom().getBlockX() == event.getTo().getBlockX()
+                && event.getFrom().getBlockY() == event.getTo().getBlockY()
+                && event.getFrom().getBlockZ() == event.getTo().getBlockZ()) {
+            return;
         }
 
+        if (zoneManager != null) {
+            zoneManager.checkPlayerZone(event.getPlayer());
+        }
+
+        // heat overlay: обновляем только при смене чанка
+        if (blueMapHeatService != null) {
+            int fromCx = event.getFrom().getBlockX() >> 4;
+            int fromCz = event.getFrom().getBlockZ() >> 4;
+            int toCx   = event.getTo().getBlockX() >> 4;
+            int toCz   = event.getTo().getBlockZ() >> 4;
+
+            if (fromCx != toCx || fromCz != toCz) {
+                blueMapHeatService.onPlayerEnteredChunk(event.getPlayer(), toCx, toCz);
+            }
+        }
+    }
+
+    // register websocket session on join
+    @EventHandler
+    public void onJoin(PlayerJoinEvent e){
+        if (webSocketManager != null) {
+            webSocketManager.connectPlayer(e.getPlayer().getName());
+        }
+
+        // прогреваем кэш LuckPerms сразу при заходе — чтобы веб-заявки не спотыкались на первой попытке
         try {
-            shopConfig.save(shopFile);
-            Bukkit.getLogger().info("Все таблички успешно сохранены в signData.yml");
-        } catch (IOException e) {
-            Bukkit.getLogger().severe("Ошибка при сохранении табличек: " + e.getMessage());
-            e.printStackTrace();
+            net.luckperms.api.LuckPerms lp = net.luckperms.api.LuckPermsProvider.get();
+            lp.getUserManager().loadUser(e.getPlayer().getUniqueId());
+        } catch (Throwable ignored) {}
+    }
+
+    /* ===================== Small helpers ===================== */
+
+    // Логирование с единым префиксом
+    private void logInfo(String msg) {
+        getLogger().info("[UL] " + msg);
+    }
+
+    private void logWarn(String msg) {
+        getLogger().warning("[UL] " + msg);
+    }
+
+    private void logError(String msg) {
+        getLogger().severe("[UL] " + msg);
+    }
+
+    private void logError(String msg, Throwable t) {
+        getLogger().severe("[UL] " + msg);
+        if (t != null) t.printStackTrace();
+    }
+
+    // Безопасное выключение компонента
+    private <T> void safeShutdown(String name, T component, CheckedConsumer<T> action) {
+        if (component == null) return;
+        try {
+            action.accept(component);
+            logInfo(name + " shutdown OK");
+        } catch (Throwable t) {
+            logError(name + " shutdown failed: " + t.getMessage());
+            t.printStackTrace();
         }
     }
-    private String encodeLocation(Location loc) {
+
+    @FunctionalInterface
+    private interface CheckedConsumer<T> {
+        void accept(T t) throws Throwable;
+    }
+
+    public String encodeLocation(Location loc) {
         return loc.getWorld().getName() + "_" + loc.getBlockX() + "_" + loc.getBlockY() + "_" + loc.getBlockZ();
     }
 
-    public void addPlayerToWaitList(Player player) {
-        awaitingCorrectCommand.add(player);
-    }
-
-    // Обработчик событий для перехвата сообщений в чате
-    @EventHandler
-    public void onPlayerChat(AsyncPlayerChatEvent event) {
-        Player player = event.getPlayer();
-
-        // Если игрок в списке ожидания, блокируем его сообщение
-        if (awaitingCorrectCommand.contains(player)) {
-            player.sendMessage(ChatColor.RED + "Ты не можешь отправлять сообщения, пока не укажешь границы магазина. Используй: /ul shop addcorner");
-            event.setCancelled(true); // Блокируем сообщение
-        }
-    }
-    public static double calculateSurfaceArea(List<Location> points) {
-        if (points.size() < 3) {
-            // Если точек меньше трех, многоугольник не существует
-            return 0;
-        }
-
-        double area = 0;
-        int n = points.size();
-
-        // Применяем формулу площади многоугольника (формула "Шу")
-        for (int i = 0; i < n; i++) {
-            Location current = points.get(i);
-            Location next = points.get((i + 1) % n); // Следующая точка, для замыкания контура
-
-            area += current.getX() * next.getZ() - current.getZ() * next.getX();
-        }
-
-        return Math.round(Math.abs(area / 2.0) * 100.0) / 100.0; // Площадь должна быть положительной
-    }
-
-    public void scheduleSignReset(Location loc) {
-        // Отменим предыдущую задачу, если была
-        if (resetTasks.containsKey(loc)) {
-            resetTasks.get(loc).cancel();
-        }
-
-        BukkitTask task = Bukkit.getScheduler().runTaskLater(this, () -> {
-            // Если сброс сейчас в паузе — повторно планируем задачу
-            if (genericSignList.get(loc).isPaused) {
-                scheduleSignReset(loc); // запускаем таймер заново
-                return;
-            }
-
-            Block block = loc.getBlock();
-            if (!(block.getState() instanceof Sign)) return;
-
-            Sign sign = (Sign) block.getState();
-            String[] lines = originalSignTexts.get(loc);
-            if (lines == null) return;
-
-            for (int i = 0; i < Math.min(4, lines.length); i++) {
-                sign.setLine(i, lines[i]);
-            }
-            sign.update();
-
-            resetTasks.remove(loc); // удаляем завершённую задачу
-        }, 20 * 10L); // 10 секунд
-
-        resetTasks.put(loc, task);
-    }
-    @EventHandler
-    public void onInventoryOpen(InventoryOpenEvent e) {
-        Player p = (Player) e.getPlayer();
-
-        if (signSelectionMap.containsKey(p)) {
-            Block signBlock = signSelectionMap.get(p);
-            Location containerLoc = ((InventoryHolder) e.getInventory().getHolder()).getInventory().getLocation();
-
-            if (containerLoc == null) {
-                p.sendMessage(ChatColor.RED + "Ошибка: не удалось получить координаты хранилища.");
-                return;
-            }
-
-            Sign sign = (Sign) signBlock.getState();
-            sign.setLine(1, containerLoc.getBlockX() + " " + containerLoc.getBlockY() + " " + containerLoc.getBlockZ());
-            sign.update();
-
-            p.sendMessage(ChatColor.GREEN + "Новое хранилище выбрано: " +
-                    containerLoc.getBlockX() + " " + containerLoc.getBlockY() + " " + containerLoc.getBlockZ());
-            signSelectionMap.remove(p);
-        }
-    }
-    @EventHandler
-    public void onPlayerInteract(PlayerInteractEvent e) {
-        Action action = e.getAction();
-        Block b = e.getClickedBlock();
-        Player p = e.getPlayer();
-
-        if (b == null || !(b.getState() instanceof Sign)) return;
-
-        Sign sign = (Sign) b.getState();
-        Location loc = sign.getLocation();
-
-        if (e.getAction() == Action.LEFT_CLICK_BLOCK && b.getState() instanceof Sign) {
-            SignVariables signVariables = genericSignList.get(sign.getLocation());
-
-            if (signVariables == null) return;
-
-            //
-            //Some purchase action here
-            //
-
-            if (!genericSignList.get(loc).getOwnerName().equalsIgnoreCase(p.getName())) return;
-
-            if (signVariables.getSignState() == SignState.SHOP_UNDEFINED) {
-                if (p.isSneaking()) {
-                    if (!sign.getLine(2).isEmpty() && !sign.getLine(3).isEmpty()) {
-                        double price;
-                        int amount;
-                        try {
-                            amount = Integer.parseInt(ChatColor.stripColor(sign.getLine(2)));
-                            price = Double.parseDouble(ChatColor.stripColor(sign.getLine(3)));
-
-                        } catch (NumberFormatException exc) {
-                            p.sendMessage(ChatColor.RED + "3 и 4 строки должны быть числами.");
-                            sign.setLine(2, "<Количество>");
-                            sign.setLine(3, "<Цена>");
-                            sign.update();
-                            return;
-                        }
-                        List<String> signTexts = genericSignList.get(sign.getLocation()).getSignText();
-                        String line3 = "Цена: " + ChatColor.GREEN + String.valueOf(price);
-                        String line2 = "Кол-во: " + ChatColor.YELLOW + String.valueOf(amount);
-
-                        signVariables.setSignText(Arrays.asList(signTexts.get(0), signTexts.get(1), line2, line3));
-                        sign.setLine(2, line2);
-                        sign.setLine(3, line3);
-                        sign.update();
-                        signVariables.setSignState(SignState.SHOP_DEFINED);
-                        String markerID = "marker_" + UUID.randomUUID();
-                        signVariables.setMarkerID(markerID);
-                        addBlueMapMarker(markerID, sign.getLocation(), "shops", "Торговые точки", "point_shop", null, p);
-                        p.sendMessage(ChatColor.GREEN + "Табличка товара подтверждена.");
-                    }
-                    return;
-                }
-                String secondLine = ChatColor.stripColor(sign.getLine(1)).toLowerCase();
-
-                if (signVariables.getSignCategory() == SignCategory.SHOP_SOURCE) {
-                    if (!secondLine.isEmpty()) {
-                        signSelectionMap.put(p, b); // добавляем игрока в режим выбора
-                        p.sendMessage(ChatColor.YELLOW + "Теперь открой нужное хранилище, чтобы выбрать его.");
-                        e.setCancelled(true); // предотвращаем случайный удар по табличке
-                    }
-                }
-            }
-            if (signVariables.getSignState() == SignState.SHOP_DEFINED) {
-                if (p.isSneaking()) {
-                    List<String> text = signVariables.getSignText();
-                    String line2 = text.get(2).replace("Кол-во: ", "");
-                    String line3 = text.get(3).replace("Цена: ", "");
-                    signVariables.setSignText(Arrays.asList(text.get(0), text.get(1), line2, line3));
-                    sign.setLine(2, line2);
-                    sign.setLine(3, line3);
-                    sign.update();
-
-                    p.sendMessage(ChatColor.GRAY + "Табличка переключена в режим редактирования.");
-                    genericSignList.get(loc).setSignState(SignState.SHOP_UNDEFINED);
-                }
-            }
-        }
-
-        SignVariables vars = genericSignList.get(loc);
-        SignState state = (vars != null) ? vars.getSignState() : SignState.ATM_MENU;
-        // RIGHT_CLICK → Пауза прокрутки
-        if (action == Action.RIGHT_CLICK_BLOCK) {
-            pauseScrolling(loc);
-            return;
-        }
-
-        if (action != Action.LEFT_CLICK_BLOCK) return;
-
-        // Если табличка в режиме "Коснитесь, чтобы начать"
-        if (sign.getLine(1).equals("Коснитесь,") && genericSignList.containsKey(loc)) {
-            if (p.getItemInHand() == null || p.getItemInHand().getType() == Material.AIR) {
-                e.setCancelled(true);
-                setupSign(loc, sign, p);
-                genericSignList.get(loc).setSignState(SignState.ATM_MENU);
-                scheduleSignReset(loc);
-                return;
-            }
-        }
-
-        // ===== В режиме MENU (скроллим) =====
-        if (state == SignState.ATM_MENU) {
-            List<String> items = signPages.get(loc);
-            if (items == null || items.size() <= 3) return;
-
-            int scrollIndex = playerScrollIndex.getOrDefault(p.getUniqueId(), 0);
-
-            if (p.isSneaking()) {
-                // ЛКМ + Shift → сброс
-                scrollIndex = 0;
-                playerScrollIndex.put(p.getUniqueId(), 0);
-                p.sendMessage(ChatColor.GRAY + "Возврат к списку.");
-                updateSignView(sign, items, 0);
-            } else {
-                // ЛКМ по средней строке → выбор
-                int selectedIndex = scrollIndex + 1;
-                if (selectedIndex < items.size()) {
-                    String key = items.get(selectedIndex);
-                    SignVariables svars = genericSignList.get(loc);
-                    if (svars == null || svars.getSignState() != SignState.ATM_ACTION_READY) {
-                        if (actions.containsKey(key)) {
-                            actions.get(key).run(); // <-- Заменит табличку и установит ACTION_READY
-                            p.sendMessage(ChatColor.GRAY + "Вы выбрали: " + key);
-                        }
-                    }
-                }
-            }
-            scheduleSignReset(loc);
-            return;
-        }
-
-        // ===== В режиме ACTION_READY =====
-        if (state == SignState.ATM_ACTION_READY) {
-            Runnable signAction = signClickActions.remove(loc);
-            if (signAction != null) {
-                e.setCancelled(true);
-                signAction.run();
-            }
-            // Возврат к обычному режиму
-            genericSignList.get(loc).setSignState(SignState.ATM_MENU);
-            scheduleSignReset(loc);
-        }
-    }
-    @EventHandler
-    public void onScroll(PlayerItemHeldEvent e) {
-        Player player = e.getPlayer();
-
-        // Проверим, смотрит ли игрок на табличку
-        Block target = player.getTargetBlockExact(4); // до 6 блоков — можно увеличить
-        if (target == null || !(target.getState() instanceof Sign)) return;
-
-        Location loc = target.getLocation();
-        Sign sign = (Sign) target.getState();
-
-        List<String> items = signPages.get(loc);
-        if (items == null || items.size() <= 3) return;
-
-        int current = playerScrollIndex.getOrDefault(player.getUniqueId(), 0);
-
-        // Определим направление прокрутки
-        int fromSlot = e.getPreviousSlot();
-        int toSlot = e.getNewSlot();
-        boolean scrollDown = (toSlot - fromSlot + 9) % 9 <= 4; // учитываем wraparound hotbar (0 → 8 и наоборот)
-
-        int newIndex = scrollDown ? current + 1 : current - 1;
-
-        // Зацикливание
-        if (newIndex < 0) newIndex = items.size() - 1;
-        if (newIndex >= items.size()) newIndex = 0;
-
-        playerScrollIndex.put(player.getUniqueId(), newIndex);
-
-        // Показываем срез из 3 элементов, начиная с newIndex
-        updateSignView(sign, items, newIndex);
-        scheduleSignReset(sign.getLocation());
-        e.setCancelled(true);
-    }
-
-    // Обновление таблички
-    private void updateSignView(Sign sign, List<String> items, int offset) {
-        for (int i = 0; i < 3; i++) {
-            int itemIndex = (offset + i) % items.size(); // зацикливание
-            String text = items.get(itemIndex);
-            if (i == 1) {
-                sign.setLine(i + 1, highlightColor + text); // строка 2 выделена
-            } else {
-                sign.setLine(i + 1, ChatColor.RESET + text);
-            }
-        }
-        sign.update();
-    }
-
-    // Пример инициализации
-    public void setupSign(Location loc, Sign sign, Player p) {
-        List<String> options = Arrays.asList(".","Снятие наличных", "Взнос наличных", "Перевод игроку", "Перевод стране", "Информация");
-        signPages.put(loc, options);
-        Block block = loc.getBlock();
-
-        if (!originalSignTexts.containsKey(loc)) {
-            originalSignTexts.put(loc, sign.getLines());
-        }
-        actions.put("Снятие наличных", () -> {
-            sign.setLine(1, "Укажите данные:");
-            sign.setLine(2, "<Источник>");
-            sign.setLine(3, "<Сумма>");
-            sign.update();
-            genericSignList.get(loc).setSignState(SignState.ATM_ACTION_READY);
-            signClickActions.put(sign.getLocation(), () -> {
-                Sign updatedSign = (Sign) sign.getBlock().getState();
-                double amount;
-                try {
-                    amount = Double.parseDouble(updatedSign.getLine(3));
-                } catch (NumberFormatException ex) {
-                    p.sendMessage(ChatColor.RED + "Введите корректную сумму.");
-                    return; // прерываем выполнение, если ввод некорректный
-                }
-
-                switch (updatedSign.getLine(2).toLowerCase()) {
-                    case "страна":
-                    case "государство":
-                    case "стр":
-                    case "ст":
-                    case "с":
-                    case "country":
-                        p.sendMessage(ChatColor.GRAY + "С счёта государства было снято " + amount + "F.");
-
-                        break;
-                    case "игрок":
-                    case "я":
-                    case "мой счёт":
-                    case "me":
-                    case "игр":
-                    case "иг":
-                        p.sendMessage(ChatColor.GRAY + "С твоего счёта было снято " + amount + "F.");
-                        moneyManager.giveMoney(p, amount);
-                        break;
-                    case "admin":
-                    case "админ":
-                        p.sendMessage(ChatColor.YELLOW + "Слушай, а ловко ты это придумал. Я даже в начале не понял.");
-                    break;
-                    default:
-                        p.sendMessage(ChatColor.RED + "Необходимо указать счёт, с которого будут сняты деньги - 'Страна' или 'Игрок'.");
-                        break;
-
-                }
-            });
-        });
-        actions.put("Взнос наличных", () -> {
-            sign.setLine(1, "Укажите данные:");
-            sign.setLine(2, "<Получатель>");
-            sign.setLine(3, "<Сумма>");
-            sign.update();
-            genericSignList.get(loc).setSignState(SignState.ATM_ACTION_READY);
-            signClickActions.put(sign.getLocation(), () -> {
-                Sign updatedSign = (Sign) sign.getBlock().getState();
-                double amount;
-                try {
-                    amount = Double.parseDouble(updatedSign.getLine(3));
-                } catch (NumberFormatException ex) {
-                    p.sendMessage(ChatColor.RED + "Введите корректную сумму.");
-                    return; // прерываем выполнение, если ввод некорректный
-                }
-
-                switch (updatedSign.getLine(2).toLowerCase()) {
-                    case "страна":
-                    case "государство":
-                    case "стр":
-                    case "ст":
-                    case "с":
-                    case "country":
-                        p.sendMessage(ChatColor.GRAY + "На счёт государства было взнесено " + amount + "F.");
-                        moneyManager.takeMoney(p, amount);
-                        break;
-                    case "игрок":
-                    case "я":
-                    case "мой счёт":
-                    case "me":
-                    case "игр":
-                    case "иг":
-                        p.sendMessage(ChatColor.GRAY + "На твой счёт было взнесено " + amount + "F.");
-                        moneyManager.takeMoney(p, amount);
-                        break;
-                    default:
-                        p.sendMessage(ChatColor.RED + "Необходимо указать счёт, с которого будут сняты деньги - 'Страна' или 'Игрок'.");
-                        break;
-
-                }
-            });
-        });
-        actions.put("Перевод игроку", () -> {
-            sign.setLine(1, "Укажите данные:");
-            sign.setLine(2, "<Никнейм>");
-            sign.setLine(3, "<Сумма>");
-            sign.update();
-        });
-        actions.put("Перевод стране", () -> {
-            sign.setLine(1, "Укажите данные:");
-            sign.setLine(2, "<Сумма>");
-            sign.setLine(3, " ");
-            sign.update();
-        });
-        actions.put("Информация", () -> {
-            sign.setLine(1, "Ком. плата: ");
-            sign.setLine(2, " ");
-            sign.setLine(3, " ");
-            sign.update();
-        });
-
-        playerScrollIndex.clear();
-
-        // Первый раз отображаем
-
-        if (block.getState() instanceof Sign) {
-            updateSignView((Sign) block.getState(), options, 0);
-        }
-    }
-           //    String amountLine = sign.getLine(3);
-             //  if (amountLine == null || amountLine.isEmpty()) {
-             //      p.sendMessage(ChatColor.RED + "Сумма на табличке не указана!");
-             //      return;
-             //  }
-              /* double amount;
-               try {
-                   amount = Double.parseDouble(amountLine);
-               } catch (NumberFormatException ex) {
-                   p.sendMessage(ChatColor.RED + "Некорректная сумма на табличке!");
-                   return;
-               }*/
-               /*String operation = sign.getLine(2);
-               if (operation == null || operation.isEmpty()) {
-                   p.sendMessage(ChatColor.RED + "Тип операции на табличке не указан!");
-                   return;
-               }
-               switch (operation.toLowerCase()) {
-                   case ":withdraw":
-                   case ":снятие":
-                   case ":wd":
-                   case ":>":
-                       // Снятие денег
-                       moneyManager.giveMoney(p, amount);
-                       p.sendMessage(ChatColor.GREEN + "Вы сняли " + amount + " монет!");
-                       break;
-
-                   case ":deposit":
-                   case ":dp":
-                   case ":депозит":
-                   case ":<":
-                       // Депозит денег
-                       moneyManager.takeMoney(p, amount);
-                       break;
-
-                   case ":$":
-                       // Проверка строки для пользовательской команды
-                       if (!sign.getLine(3).isEmpty() && !sign.getLine(1).isEmpty()) {
-                           double customFee;
-                           try {
-                               customFee = Double.parseDouble(sign.getLine(1).replace(",", "."));
-                           } catch (NumberFormatException ex) {
-                               customFee = -1.0; // Устанавливаем значение по умолчанию
-                           }
-
-                           UnityCommands.getInstance().pay(p, sign.getLine(2).replace("::",""), amount, customFee);
-                       } else {
-                           p.sendMessage(ChatColor.RED + "Строки получателя (3) и суммы (4) не могут быть пустыми!");
-                       }
-                       break;
-               }*/
-
-   @EventHandler
-   public  void onPlayerLeave(PlayerQuitEvent e) {
-        Player p = e.getPlayer();
-        if(awaitingCorrectCommand.contains(p.getName())) {
-            UnityCommands.getInstance().setShops(p,UnityCommands.getInstance().getShops(p) + 1);
-            awaitingCorrectCommand.remove(p);
-        }
-
-   }
-    public void restoreScrollingSignsFromFile(FileConfiguration config) {
-        ConfigurationSection signsSection = config.getConfigurationSection("signs");
-        if (signsSection == null) return;
-
-        for (String key : signsSection.getKeys(false)) {
-            ConfigurationSection signSection = signsSection.getConfigurationSection(key);
-            if (signSection == null) continue;
-
-            // Получаем координаты
-            String worldName = signSection.getString("location.world");
-            int x = signSection.getInt("location.x");
-            int y = signSection.getInt("location.y");
-            int z = signSection.getInt("location.z");
-
-            World world = Bukkit.getWorld(worldName);
-            if (world == null) continue;
-
-            Location loc = new Location(world, x, y, z);
-            Block block = loc.getBlock();
-            if (!(block.getState() instanceof Sign)) continue;
-
-            Sign sign = (Sign) block.getState();
-
-            // Получаем индексы строк, которые нужно скроллить
-            List<Integer> scrollLines = signSection.getIntegerList("scrollLines");
-            Map<Integer, String> originalLines = new HashMap<>();
-
-            for (int lineIndex : scrollLines) {
-                if (lineIndex >= 0 && lineIndex <= 3) {
-                    String rawLine = ChatColor.stripColor(sign.getLine(lineIndex));
-                    originalLines.put(lineIndex, rawLine);
-                }
-            }
-
-            // Запускаем скроллинг
-            makeSignScrollingLines(loc, originalLines, 8, 13); // интервал и длина строки
-        }
-    }
-    public void makeSignScrollingLines(Location signLocation, Map<Integer, String> originalLines, int intervalTicks, int maxLength) {
-        Block block = signLocation.getBlock();
-        if (!(block.getState() instanceof Sign)) return;
-
-        // Удвоим текст, чтобы можно было безопасно прокручивать
-        Map<Integer, String> scrollBuffers = new HashMap<>();
-        for (Map.Entry<Integer, String> entry : originalLines.entrySet()) {
-            String base = entry.getValue() + "   "; // Добавим пробелы
-            scrollBuffers.put(entry.getKey(), base + base);
-        }
-
-        AtomicInteger offset = new AtomicInteger(0);
-
-        // Остановим предыдущую анимацию для этой таблички
-        if (scrollingTasks.containsKey(signLocation)) {
-            scrollingTasks.get(signLocation).cancel();
-        }
-
-        BukkitTask task = Bukkit.getScheduler().runTaskTimer(this, () -> {
-            if (!(signLocation.getBlock().getState() instanceof Sign)) {
-                scrollingTasks.remove(signLocation);
-                genericSignList.get(signLocation).setPaused(false);
-
-                return;
-            }
-
-            if (genericSignList.get(signLocation).isPaused) {
-                return; // ⏸ Табличка в паузе
-            }
-
-            boolean anyNearby = Bukkit.getOnlinePlayers().stream()
-                    .anyMatch(player -> player.getWorld().equals(signLocation.getWorld())
-                            && player.getLocation().distanceSquared(signLocation) <= 35 * 35);
-            if (!anyNearby) return;
-
-            Sign currentSign = (Sign) signLocation.getBlock().getState();
-            int pos = offset.getAndUpdate(i -> (i + 1) % getMaxBaseLength(originalLines.values()));
-
-            for (Map.Entry<Integer, String> entry : scrollBuffers.entrySet()) {
-                int lineIndex = entry.getKey();
-                String buffer = entry.getValue();
-
-                StringBuilder displayBuilder = new StringBuilder();
-                for (int i = 0; i < maxLength; i++) {
-                    displayBuilder.append(buffer.charAt((pos + i) % buffer.length()));
-                }
-                currentSign.setLine(lineIndex, displayBuilder.toString());
-            }
-
-            currentSign.update();
-        }, 0L, intervalTicks);
-
-        scrollingTasks.put(signLocation, task);
-    }
-    private int getMaxBaseLength(Collection<String> values) {
-        return values.stream().mapToInt(String::length).max().orElse(1);
-    }
-    public void pauseScrolling(Location location) {
-        genericSignList.get(location).setPaused(true);
-    }
-    public void resumeScrolling(Location location) {
-        genericSignList.get(location).setPaused(false);
-    }
-    @EventHandler
-    public void onSignChange(SignChangeEvent e) {
-        Sign sign = (Sign) e.getBlock().getState();
-        Player p = e.getPlayer();
-        String[] oldLines = sign.getLines();
-        String[] newLines = e.getLines();
-
-        if (genericSignList.containsKey(sign.getLocation())) {
-            if (genericSignList.get(sign.getLocation()).getSignState() == SignState.SHOP_DEFINED) {
-                p.sendMessage(ChatColor.RED + "Для редактирования таблички присядь и нажми ЛКМ.");
-                e.setCancelled(true);
-                return;
-            }
-        }
-
-        if (!e.getBlock().getType().toString().contains("HANGING")) {
-            if (genericSignList.get(sign.getLocation()) != null) {
-                resumeScrolling(sign.getLocation());
-            }
-            if (genericSignList.containsKey(sign.getLocation())) {
-                if (genericSignList.get(sign.getLocation()).getOwnerName().equals(p.getName())) {
-                    if (!oldLines[0].equals(newLines[0])) {
-                        p.sendMessage(ChatColor.RED + "Изменение первой строки невозможно. "  + ChatColor.GRAY + "\nДля изменения цели таблички сломайте её и установите с новыми параметрами.");
-                        e.setCancelled(true);
-                        return;
-                    }
-                } else {
-                    p.sendMessage(ChatColor.RED + "Ты не являешься владельцем этого магазина!");
-                    return;
-                }
-            }
-
-            if (e.getLine(0).equalsIgnoreCase("shop") || e.getLine(0).equalsIgnoreCase("магазин")) {
-                ExtrudeMarker marker = isSignWithinMarker(sign.getLocation());
-                String label = marker.getLabel();
-                if (label.isEmpty()) {
-                    e.setCancelled(true);
-                    p.sendMessage(ChatColor.RED + "Табличку о продаже можно ставить только в пределах магазина!");
-                } else {
-                  //  if (zoneManager.getZoneOwner("shop", marker.get)) {}
-                    String line0 = "Торговая точка [ " + label + " ]";
-                    e.setLine(0, line0);
-                    Map<Integer, String> linesToScroll = new HashMap<>();
-                    linesToScroll.put(0, line0);
-
-                    switch (e.getLine(1)) {
-                        case "source":
-                        case "источник":
-                            Block nearestStorage = findNearestContainer(sign.getLocation(), 5, p);
-                            makeSignScrollingLines(e.getBlock().getLocation(), linesToScroll, 6, 13);
-                            if (nearestStorage != null) {
-                                Location loc = nearestStorage.getLocation();
-                                String line1 = loc.getBlockX() + " " + loc.getBlockY() + " " + loc.getBlockZ();
-                                e.setLine(1, line1);
-                                e.setLine(2, "<Количество>");
-                                e.setLine(3, "<Цена>");
-                                p.sendMessage(ChatColor.GRAY + "Координаты источника установлены.\n" +
-                                        "Чтобы выбрать другое хранилище — кликните ЛКМ по табличке, затем откройте нужное хранилище.");//
-                                genericSignList.put(sign.getLocation(), new SignVariables(p.getName(), Arrays.asList(line0, line1, "<Количество>", "<Цена>"), List.of(0), true, false, SignCategory.SHOP_SOURCE, SignState.SHOP_UNDEFINED, null));
-                            } else {
-                                e.setCancelled(true);
-                                p.sendMessage(ChatColor.RED + "Поблизости не найдено ни одного хранилища!");
-                            }
-                            break;
-                        case "seller":
-                        case "продавец":
-                            p.sendMessage(ChatColor.GREEN + "Для показа информации о продавце");
-                            break;
-                        case "info":
-                        case "инфо":
-                        case "информация":
-                            p.sendMessage(ChatColor.GREEN + "Для показа информации о магазине");
-                            break;
-                        case "list":
-                        case "список":
-                            p.sendMessage(ChatColor.GREEN + "Для показа доступных товаров в магазине, цены и количества");
-                            break;
-                        case "help":
-                        case "помощь":
-                            p.sendMessage(ChatColor.GREEN + "Для показа помощи");
-                            break;
-                        default:
-                            p.sendMessage(ChatColor.RED + "Отсутствуют параметры на 2-ой строке таблички.");
-                            break;
-
-                    }
-
-
-                }
-            }
-            if (e.getLine(0).equalsIgnoreCase("ATM")) {
-                if (hasPermissionContaining(p, "0")) {
-                    String line0 = "ATM [" + UnityCommands.getInstance().getPlayerInfo(p).countryName + "]";
-
-                    e.setLine(0, line0);
-                    Map<Integer, String> linesToScroll = new HashMap<>();
-                    linesToScroll.put(0, line0);
-
-                    makeSignScrollingLines(e.getBlock().getLocation(), linesToScroll, 6, 13);
-                    // Если табличка не найдена и это новая табличка с "ATM"
-
-                    e.setLine(1, "Коснитесь,");
-                    e.setLine(2, "чтобы начать");
-                    p.sendMessage("АТМ установлен.");
-                    String markerID = "marker_" + UUID.randomUUID();
-
-                    //atmSignData.put(currentID, new ATMData(sign.getLocation(), p.getName(), e.getLines()));
-                    genericSignList.put(sign.getLocation(), new SignVariables(p.getName(), Arrays.asList(line0, "Коснитесь,", "чтобы начать", ""), List.of(0), false, false, SignCategory.ATM, null, markerID));
-                   // saveSignData();
-                    // Добавляем маркер на карту BlueMap
-                    addBlueMapMarker(markerID, sign.getLocation(), "services", "Сервисы", "point_atm", null, p);
-                }
-            }
-        } else {
-            if (e.getLine(0).equalsIgnoreCase("ATM")) {
-                p.sendMessage(ChatColor.RED + "Свисающие таблички нельзя использовать в качестве банковского автомата!");
-            }
-        }
-    }
-    public boolean hasPlayerShopBrand(String shopNaming, String owner) {
-        File shopFile = new File(getDataFolder().getParentFile(), "UnityLauncher/signData.yml");
-        FileConfiguration config = YamlConfiguration.loadConfiguration(shopFile);
-
-        ConfigurationSection brandSection = config.getConfigurationSection("shops." + shopNaming);
-        if (brandSection == null) return false;
-
-        for (String shopId : brandSection.getKeys(false)) {
-            ConfigurationSection shopSection = brandSection.getConfigurationSection(shopId);
-            if (shopSection != null && owner.equalsIgnoreCase(shopSection.getString("owner"))) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-    private Block findNearestContainer(Location origin, int radius, Player p) {
-        World world = origin.getWorld();
-        Block nearest = null;
-        double minDistanceSquared = Double.MAX_VALUE;
-
-        for (int x = -radius; x <= radius; x++) {
-            for (int y = -radius; y <= radius; y++) {
-                for (int z = -radius; z <= radius; z++) {
-                    Block block = world.getBlockAt(origin.clone().add(x, y, z));
-                    if (block.getState() instanceof Container) {
-                        double distanceSquared = origin.distanceSquared(block.getLocation());
-                        if (distanceSquared < minDistanceSquared) {
-                            if (isSignWithinMarker(origin) != null) {
-                                minDistanceSquared = distanceSquared;
-                                nearest = block;
-                            } else {
-                                p.sendMessage(ChatColor.RED + "Хранилище должно находится внутри зоны торговой точки.");
-                            }
-
-                        }
-                    }
-                }
-            }
-        }
-
-        return nearest;
-    }
-    public ExtrudeMarker isSignWithinMarker(Location signLocation) {
-       // System.out.println("[DEBUG] Проверка таблички на маркеры: " + signLocation);
-
-        Optional<BlueMapAPI> apiOptional = BlueMapAPI.getInstance();
-        if (apiOptional.isPresent()) {
-            BlueMapAPI api = apiOptional.get();
-          //  System.out.println("[DEBUG] BlueMapAPI получен");
-
-            Optional<BlueMapMap> mapOptional = api.getMap(signLocation.getWorld().getName());
-            if (mapOptional.isPresent()) {
-                BlueMapMap map = mapOptional.get();
-               // System.out.println("[DEBUG] Карта найдена: " + signLocation.getWorld().getName());
-
-                MarkerSet markerSet = map.getMarkerSets().get("zones_shop");
-                if (markerSet != null) {
-                   // System.out.println("[DEBUG] Найден MarkerSet с ID 'zones_shops'. Кол-во маркеров: " + markerSet.getMarkers().size());
-
-                    for (Marker marker : markerSet.getMarkers().values()) {
-                        if (marker instanceof ExtrudeMarker) {
-                            ExtrudeMarker extrudeMarker = (ExtrudeMarker) marker;
-                            Shape baseShape = extrudeMarker.getShape();
-                            double minHeight = extrudeMarker.getShapeMinY();
-                            double maxHeight = extrudeMarker.getShapeMaxY();
-                            String label = extrudeMarker.getLabel();
-
-                           // System.out.println("[DEBUG] Проверка ExtrudeMarker '" + label + "'");
-                           // System.out.println(" - Высота: " + minHeight + " до " + maxHeight);
-                           // System.out.println(" - Форма: " + baseShape.getPoints().length + " точек");
-
-                            Vector2d signPos2D = new Vector2d(signLocation.getX(), signLocation.getZ());
-                            double y = signLocation.getY();
-
-                            boolean insidePolygon = isPointInsidePolygon(signPos2D, Arrays.asList(baseShape.getPoints()));
-                            boolean insideHeight = y >= minHeight && y <= maxHeight;
-
-                            //System.out.println(" - Позиция таблички 2D: " + signPos2D + " (Y: " + y + ")");
-                           // System.out.println(" - Внутри полигона? " + insidePolygon);
-                            //System.out.println(" - В пределах высоты? " + insideHeight);
-
-                            if (insidePolygon && insideHeight) {
-                                System.out.println("[DEBUG] Табличка попала внутрь маркера: " + label);
-                                return extrudeMarker;
-                            }
-                        }
-                    }
-
-                    System.out.println("[DEBUG] Табличка не попала ни в один маркер в MarkerSet 'shops'");
-                } else {
-                    System.out.println("[DEBUG] MarkerSet с ID 'shops' не найден.");
-                }
-            } else {
-                System.out.println("[DEBUG] Карта не найдена для мира: " + signLocation.getWorld().getName());
-            }
-        } else {
-            System.out.println("[DEBUG] BlueMapAPI не инициализирован!");
-        }
-
-        return null;
-    }
-    public boolean isPointInsidePolygon(Vector2d point, List<Vector2d> polygon) {
-        boolean result = false;
-        int j = polygon.size() - 1;
-        for (int i = 0; i < polygon.size(); i++) {
-            if ((polygon.get(i).getY() > point.getY()) != (polygon.get(j).getY() > point.getY()) &&
-                    (point.getX() < (polygon.get(j).getX() - polygon.get(i).getX()) * (point.getY() - polygon.get(i).getY()) / (polygon.get(j).getY() - polygon.get(i).getY()) + polygon.get(i).getX())) {
-                result = !result;
-            }
-            j = i;
-        }
-        return result;
-    }
-
-    public boolean hasPermissionContaining(Player player, String permission) {
-        for (PermissionAttachmentInfo permInfo : player.getEffectivePermissions()) {
-            if (permInfo.getPermission().contains(permission)) {
-                return true; // Игрок имеет право, содержащее "head"
-            }
-        }
-        return false; // Игрок не имеет права, содержащего "head"
-    }
-
-    private boolean isAttachedToBlock(Block signBlock, Block possibleSupportingBlock) {
-        if (!(signBlock.getState() instanceof Sign)) return false;
-
-        // Для обычных табличек проверяем прикрепленный блок с помощью метода getAttachedFace
-        try {
-            org.bukkit.material.Sign signMaterial = (org.bukkit.material.Sign) signBlock.getState().getData();
-            Block attachedBlock = signBlock.getRelative(signMaterial.getAttachedFace());
-            return attachedBlock.equals(possibleSupportingBlock);
-        } catch (ClassCastException e) {
-            // Если это не обычная табличка, например Hanging Sign или другой тип, не обрабатываем
-            return false;
-        }
-    }
-
-    @EventHandler
-    public void onJoin(PlayerJoinEvent e){
-        webSocketManager.connectPlayer(e.getPlayer().getName());
-    }
-
-    @EventHandler
-    public void onBlockBreak(BlockBreakEvent event) {
-        Block brokenBlock = event.getBlock();
-        Player player = event.getPlayer();
-
-        // Проверка на случай, если сам блок является табличкой или hanging sign
-        if (brokenBlock.getType().toString().contains("SIGN")) {
-            if (brokenBlock.getState() instanceof Sign) {
-                Sign sign = (Sign) brokenBlock.getState();
-                if (genericSignList.containsKey(sign.getLocation())) {
-                    if (!genericSignList.get(sign.getLocation()).getOwnerName().equals(player.getName())) {
-                        player.sendMessage(ChatColor.RED + "Вы не можете сломать эту табличку, так как её установил другой игрок.");
-                        event.setCancelled(true);
-                    } else {
-                        removeBlueMapMarker(genericSignList.get(sign.getLocation()).markerID);
-                        genericSignList.remove(sign.getLocation());
-                    }
-                }
-            }
-        } else {
-            // Проверка соседних блоков на наличие табличек (включая hanging signs), которые зависят от этого блока
-            for (Map.Entry<Location, SignVariables> entry : genericSignList.entrySet()) {
-                Location signLocation = entry.getKey();
-                Block signBlock = signLocation.getBlock();
-
-                // Проверяем, прикреплена ли табличка (обычная или hanging) к разрушенному блоку
-                if (isAttachedToBlock(signBlock, brokenBlock)) {
-                    // Проверяем, совпадает ли ник игрока с ником, который установил табличку
-                    if (!entry.getValue().getOwnerName().equals(player.getName())) {
-                        player.sendMessage(ChatColor.RED + "Вы не можете сломать эту табличку, так как её установил другой игрок.");
-                        event.setCancelled(true);
-                        return;
-                    }
-                    //atmSignData.remove(idToRemove);
-                    removeBlueMapMarker(genericSignList.get(signLocation).markerID);
-                    genericSignList.remove(signLocation);
-                   // saveSignData();
-                    break;
-                }
-            }
-        }
-    }
-
-    public void addBlueMapMarker(String id, Location location, String setID, String setLabel, String markerType, List<Vector3d> extrudePoints, Player p) {
-        if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
-            BlueMapAPI.getInstance().ifPresent(blueMapAPI -> {
-                blueMapAPI.getMap(location.getWorld().getName()).ifPresent(map -> {
-                    // Проверяем наличие MarkerSet
-                    Map<String, MarkerSet> markerSets = map.getMarkerSets();
-                    if (markerSets != null) {
-                        MarkerSet markerSet = markerSets.computeIfAbsent(setID, k -> new MarkerSet(setLabel));
-                        if (markerSet != null && markerSet.getMarkers() != null) {
-                            switch (markerType) {
-                                case "extrude":
-                                    // Преобразуем extrudePoints в Vector2d для новой фигуры
-                                    List<Vector2d> basePoints = extrudePoints.stream()
-                                            .map(loc -> new Vector2d(loc.getX(), loc.getZ()))
-                                            .collect(Collectors.toList());
-                                    Shape newShape = new Shape(basePoints);
-
-                                    // Проверяем пересечение с существующими ExtrudeMarker
-                                    for (Marker existingMarker : markerSet.getMarkers().values()) {
-                                        if (existingMarker instanceof ExtrudeMarker) {
-                                            ExtrudeMarker extrudeMarker = (ExtrudeMarker) existingMarker;
-                                            if (shapesIntersect(newShape, extrudeMarker.getShape())) {
-                                                p.sendMessage(ChatColor.RED + "На этой территории уже создан другой магазин.");
-                                                Bukkit.getLogger().warning("Маркер пересекается с существующим: " + extrudeMarker.getLabel());
-                                                return; // Прекращаем добавление нового маркера
-                                            } else {
-                                                //saveShopData(p, id);
-                                                p.sendMessage(ChatColor.GREEN + "Торговая точка успешно создана!");
-                                                markerPoints.clear();
-                                                awaitingCorrectCommand.remove(p);
-                                            }
-                                        }
-                                    }
-
-                                    // Добавляем новый маркер, если пересечений нет
-                                    ExtrudeMarker extrudeMarker = new ExtrudeMarker(id, newShape, 42, 152);
-                                    extrudeMarker.setLabel(id);
-                                    markerSet.getMarkers().put(id, extrudeMarker);
-                                    break;
-
-                                case "point_atm":
-                                    // Создаём POI-маркер
-                                    Vector3d position = new Vector3d(location.getX() + 0.5, location.getY(), location.getZ() + 0.5);
-                                    POIMarker marker = new POIMarker("atm_" + id, position);
-                                    marker.setLabel("ATM");
-                                    marker.setIcon("assets/atm.png", 8, 8);
-                                    markerSet.getMarkers().put(String.valueOf(id), marker);
-                                    break;
-                                case "point_shop":
-                                    // Создаём POI-маркер
-                                    position = new Vector3d(location.getX() + 0.5, location.getY(), location.getZ() + 0.5);
-                                    marker = new POIMarker("shop_" + id, position);
-                                    marker.setLabel("ShopSign");
-                                    marker.setIcon("assets/atm.png", 8, 8);
-                                    markerSet.getMarkers().put(String.valueOf(id), marker);
-                                    break;
-
-                                default:
-                                    Bukkit.getLogger().warning("Unknown markerType: " + markerType);
-                                    break;
-                            }
-                        } else {
-                            Bukkit.getLogger().warning("MarkerSet or Markers map is null for setID: " + setID);
-                        }
-                    } else {
-                        Bukkit.getLogger().warning("MarkerSets is null for map: " + location.getWorld().getName());
-                    }
-                });
-            });
-        }
-    }
-    private boolean shapesIntersect(Shape shape1, Shape shape2) {
-        GeometryFactory geometryFactory = new GeometryFactory();
-
-        // Преобразуем точки в массив координат и замыкаем линию
-        Coordinate[] coords1 = ensureClosed(Arrays.asList(shape1.getPoints()));
-        Coordinate[] coords2 = ensureClosed(Arrays.asList(shape2.getPoints()));
-
-        // Создаем полигоны
-        Polygon polygon1 = geometryFactory.createPolygon(coords1);
-        Polygon polygon2 = geometryFactory.createPolygon(coords2);
-
-        // Проверяем пересечение
-        return polygon1.intersects(polygon2);
-    }
-
     /**
-     * Проверяет, что линии замкнуты, и добавляет первый элемент в конец массива, если необходимо.
+     * Возвращает {prefix, suffix} для TAB по UUID игрока.
      */
-    private Coordinate[] ensureClosed(List<Vector2d> points) {
-        List<Coordinate> coordinates = points.stream()
-                .map(point -> new Coordinate(point.getX(), point.getY())) // Замените на ваши реальные поля
-                .collect(Collectors.toList());
-
-        // Если первый и последний координаты не совпадают, добавляем замыкающую точку
-        if (!coordinates.get(0).equals(coordinates.get(coordinates.size() - 1))) {
-            coordinates.add(new Coordinate(coordinates.get(0)));
-        }
-
-        return coordinates.toArray(new Coordinate[0]);
-    }
-
-    private void removeBlueMapMarker(String id) {
-        if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
-            BlueMapAPI.getInstance().ifPresent(blueMapAPI -> {
-                blueMapAPI.getMap("world").ifPresent(map -> {
-                    MarkerSet markerSet = map.getMarkerSets().get("services");
-                    if (markerSet != null) {
-                        markerSet.getMarkers()
-                                .remove(id);
-                    }
-                });
-            });
-        }
-    }
-
-    public void saveBlueMapMarkers(String setID) {
-        if (Bukkit.getPluginManager().isPluginEnabled("BlueMap")) {
-            BlueMapAPI.getInstance().ifPresent(blueMapAPI -> {
-                // Перебираем все доступные карты (мира)
-                blueMapAPI.getMaps().forEach(map -> {
-                    MarkerSet markerSet = map.getMarkerSets().get(setID);
-
-                    if (markerSet != null) {
-                        // Определяем путь к файлу маркеров
-                        File markerFile = new File(getDataFolder().getParentFile(), "BMMarker/customData/" + map.getId() + "/" + setID + ".json");
-
-                        // Проверка существования файла; если не существует - создаем
-                        if (!markerFile.exists()) {
-                            try {
-                                markerFile.getParentFile().mkdirs(); // Создаем родительскую директорию, если необходимо
-                                markerFile.createNewFile(); // Создаем файл
-                            } catch (IOException e) {
-                                getLogger().severe("Ошибка при создании файла маркеров: " + markerFile.getAbsolutePath());
-                                e.printStackTrace();
-                                return; // Остановить выполнение, если не удалось создать файл
-                            }
-                        }
-
-                        // Сохранение маркеров в файл
-                        try (FileWriter writer = new FileWriter(markerFile)) {
-                            MarkerGson.INSTANCE.toJson(markerSet, writer);
-                        } catch (IOException ex) {
-                            getLogger().severe("Ошибка при сохранении маркеров BlueMap.");
-                            ex.printStackTrace();
-                        }
-                    }
-                });
-            });
-        }
-    }
-    private void loadBlueMapMarkers() {
-            BlueMapAPI.getInstance().ifPresent(blueMapAPI -> {
-                // Перебираем все доступные карты (мира)
-                blueMapAPI.getMaps().forEach(map -> {
-                    // Указываем путь к папке, где хранятся маркеры
-                    File markerDirectory = new File(getDataFolder().getParentFile(), "BMMarker/customData/" + map.getId() + "/");
-                    if (markerDirectory.exists() && markerDirectory.isDirectory()) {
-                        // Перебираем все файлы в директории
-                        File[] markerFiles = markerDirectory.listFiles((dir, name) -> name.endsWith(".json"));
-
-                        if (markerFiles != null) {
-                            for (File markerFile : markerFiles) {
-                                try (FileReader reader = new FileReader(markerFile)) {
-                                    MarkerSet markerSet = MarkerGson.INSTANCE.fromJson(reader, MarkerSet.class);
-                                    // Используем имя файла (без расширения) в качестве ключа для MarkerSet
-                                    String markerSetName = markerFile.getName().replace(".json", "");
-                                    map.getMarkerSets().put(markerSetName, markerSet);
-                                } catch (IOException ex) {
-                                    getLogger().severe("Ошибка при загрузке маркеров BlueMap из файла: " + markerFile.getName());
-                                    ex.printStackTrace();
-                                }
-                            }
-                        }
-                    } else {
-                        getLogger().warning("Папка с маркерами не найдена или не является директорией: " + markerDirectory.getAbsolutePath());
-                    }
-                });
-            });
-
-    }
-    public void loadSignData() {
-        File shopFile = new File(getDataFolder(), "signData.yml");
-        if (!shopFile.exists()) return;
-
-        YamlConfiguration shopConfig = YamlConfiguration.loadConfiguration(shopFile);
-        ConfigurationSection signsSection = shopConfig.getConfigurationSection("signs");
-        if (signsSection == null) return;
-
-        for (String key : signsSection.getKeys(false)) {
-            ConfigurationSection section = signsSection.getConfigurationSection(key);
-            if (section == null) continue;
-
-            // Восстановление локации
-            String worldName = section.getString("location.world");
-            int x = section.getInt("location.x");
-            int y = section.getInt("location.y");
-            int z = section.getInt("location.z");
-
-            World world = Bukkit.getWorld(worldName);
-            if (world == null) continue;
-
-            Location loc = new Location(world, x, y, z);
-
-            // Восстановление переменных
-            List<String> text = section.getStringList("text");
-            List<Integer> scrollLines = section.getIntegerList("scrollLines");
-            boolean isConfigurable = section.getBoolean("isConfigurable");
-            boolean isPaused = section.getBoolean("isPaused");
-            String owner = section.getString("owner");
-            String markerID = section.getString("markerID");
-
-            SignCategory category = null;
-            SignState state = null;
-
-            try {
-                category = SignCategory.valueOf(section.getString("category", "SHOP_INFO"));
-            } catch (IllegalArgumentException ignored) {}
-
-            try {
-                state = SignState.valueOf(section.getString("state", "MENU"));
-            } catch (IllegalArgumentException ignored) {}
-
-            // Обновляем блок на табличку, если это возможно
-            Block block = loc.getBlock();
-            if (block.getType().toString().contains("SIGN")) {
-                Sign sign = (Sign) block.getState();
-                for (int i = 0; i < Math.min(4, text.size()); i++) {
-                    sign.setLine(i, text.get(i));
-                }
-                sign.update();
+    public String[] computeTabPrefixFromCache(UUID uuid) {
+        try {
+            if (countryRegistryJdbc == null) {
+                getLogger().warning("[TAB] countryRegistryJdbc == null");
+                return new String[]{null, null};
             }
 
-            // Добавляем в мапу
-            genericSignList.put(loc, new SignVariables(owner, text, scrollLines, isConfigurable, isPaused, category, state, markerID));
-        }
-
-        Bukkit.getLogger().info("Таблички успешно загружены из signData.yml");
-    }
-    public void loadZoneData() {
-        File zoneFile = new File(getDataFolder(), "zones.yml");
-        if (zoneFile.exists()) {
-            YamlConfiguration zoneConfig = YamlConfiguration.loadConfiguration(zoneFile);
-
-            for (String typeKey : zoneConfig.getKeys(false)) { // "hospital", "shop" и т.д.
-                ConfigurationSection typeSection = zoneConfig.getConfigurationSection(typeKey);
-                if (typeSection == null) continue;
-
-                for (String playerName : typeSection.getKeys(false)) {
-                    ConfigurationSection playerSection = typeSection.getConfigurationSection(playerName);
-                    if (playerSection == null) continue;
-
-                    for (String zoneID : playerSection.getKeys(false)) {
-                        ConfigurationSection zoneSection = playerSection.getConfigurationSection(zoneID);
-                        if (zoneSection == null) continue;
-
-                        String zoneName = zoneSection.getString("name");
-                        String markerID = zoneSection.getString("marker_ID");
-
-                        List<Location> corners = new ArrayList<>();
-                        List<Map<?, ?>> rawCorners = zoneSection.getMapList("corners");
-                        for (Map<?, ?> cornerMap : rawCorners) {
-                            try {
-                                String worldName = (String) cornerMap.get("world");
-                                double x = (double) cornerMap.get("x");
-                                double y = (double) cornerMap.get("y");
-                                double z = (double) cornerMap.get("z");
-
-                                World world = Bukkit.getWorld(worldName);
-                                if (world == null) continue;
-
-                                Location cornerLoc = new Location(world, x, y, z);
-                                corners.add(cornerLoc);
-                            } catch (Exception e) {
-                                Bukkit.getLogger().warning("Ошибка при загрузке угла зоны: " + e.getMessage());
-                            }
-                        }
-                        List<Vector2d> corners2D = corners.stream()
-                                .map(cornerLoc -> new Vector2d(cornerLoc.getX(), cornerLoc.getZ()))
-                                .collect(Collectors.toList());
-                        for (Location loc : genericSignList.keySet()) {
-                            Vector2d point = new Vector2d(loc.getX(), loc.getZ());
-                            if (isPointInsidePolygon(point, corners2D)) {
-                                genericSignList.get(loc).setOwnerName(playerName);
-                            }
-                        }
-
-                        // Пример: логгирование загрузки
-                        Bukkit.getLogger().info("Загружена зона: " + typeKey + " / " + playerName + " → " + zoneID + " (" + zoneName + ")");
-                    }
-                }
+            OfflinePlayer off = Bukkit.getOfflinePlayer(uuid);
+            String name = off.getName();
+            if (name == null || name.isBlank()) {
+                return new String[]{null, null};
             }
+
+            String rolePrefixRaw = countryRegistryJdbc.getPlayerRolePrefix(name);
+
+            String finalPrefix = null;
+            if (rolePrefixRaw != null && !rolePrefixRaw.isBlank()) {
+                finalPrefix = rolePrefixRaw.replace('&', '§').trim() + " ";
+            }
+
+            return new String[]{finalPrefix, null};
+
+        } catch (Throwable t) {
+            getLogger().warning("[TAB] Exception while computing prefix: " + t.getMessage());
+            t.printStackTrace();
+            return new String[]{null, null};
         }
     }
+
+    /* ===================== DATABASE ===================== */
+
     @Nullable
     public static Connection DBConnect() {
         try {
-            Class.forName("com.mysql.jdbc.Driver");
-            String url = "jdbc:mysql://mysql.apexhosting.gdn:3306/apexMC1473088";
-            String username = "apexMC1473088";
-            String password = "H#pXkkgG8SbaexeB6azGXMlm";
-            return DriverManager.getConnection(url, username, password);
-        } catch (Exception e) {
-            onError("DBError", e, null);
+            UnityLauncher inst = UnityLauncher.getInstance();
+            if (inst != null && inst.getDataSource() != null) {
+                return inst.getDataSource().getConnection();
+            }
+
+            Properties props = loadDbProps();
+            String url  = props.getProperty("db.url");
+            String user = props.getProperty("db.user");
+            String pass = props.getProperty("db.password");
+
+            if (url == null || user == null || pass == null) {
+                Bukkit.getLogger().severe("[UL] db.properties: missing db.url/db.user/db.password");
+                onError("DBError", null);
+                return null;
+            }
+
+            if (DRIVER_LOADED.compareAndSet(false, true)) {
+                Class.forName("com.mysql.cj.jdbc.Driver");
+            }
+
+            return DriverManager.getConnection(url, user, pass);
+
+        } catch (Throwable t) {
+            logDbException(t);
+            onError("DBError", null);
             return null;
         }
     }
-    public static void onError(String reason, Exception e, Player p) {
-        e.printStackTrace();
+
+    /** Hikari pool init (called from onEnable). */
+    private void initDataSource() {
+        try {
+            Properties props = loadDbProps();
+            String url  = props.getProperty("db.url");
+            String user = props.getProperty("db.user");
+            String pass = props.getProperty("db.password");
+
+            if (url == null || user == null || pass == null) {
+                logError("db.properties: missing db.url/db.user/db.password — pool not initialized");
+                return;
+            }
+
+            HikariConfig cfg = buildHikariConfig(url, user, pass);
+            hikari = new HikariDataSource(cfg);
+            logInfo("HikariCP initialized: " + cfg.getPoolName());
+        } catch (Throwable t) {
+            logError("Failed to initialize HikariCP", t);
+        }
+    }
+
+    private static @NotNull HikariConfig buildHikariConfig(String url, String user, String pass) {
+        HikariConfig cfg = new HikariConfig();
+        cfg.setJdbcUrl(url);
+        cfg.setUsername(user);
+        cfg.setPassword(pass);
+
+        cfg.setMaximumPoolSize(8);
+        cfg.setMinimumIdle(1);
+        cfg.setConnectionTimeout(8000);
+        cfg.setIdleTimeout(15_000);
+        cfg.setMaxLifetime(25 * 60_000);
+        // БД сейчас удалённая (Hostinger), а сервер хостится локально — сеть/БД
+        // рвёт простаивающие соединения примерно через ~20с. Без keepalive
+        // единственное "запасное" (minimumIdle=1) соединение просто умирает в
+        // пуле и ловится только когда кто-то пытается им воспользоваться —
+        // отсюда "No operations allowed after connection closed". Пингуем
+        // каждые 10с, с запасом до дедлайна в ~20с.
+        cfg.setKeepaliveTime(10_000);
+        cfg.setPoolName("UnityLauncher-DBPool");
+        cfg.setDriverClassName("com.mysql.cj.jdbc.Driver");
+        return cfg;
+    }
+
+    private static Properties loadDbProps() throws Exception {
+        Properties cached = DB_PROPS;
+        if (cached != null) return cached;
+
+        // DB credentials live only on the server, in plugins/UnityLauncher/secrets.properties
+        // (db.url / db.user / db.password), never inside the jar: the repo is public and
+        // the jar is built by GitHub Actions.
+        Properties props = new Properties();
+        UnityLauncher inst = UnityLauncher.getInstance();
+        if (inst == null) throw new IllegalStateException("plugin not initialized");
+        java.io.File f = new java.io.File(inst.getDataFolder(), "secrets.properties");
+        if (f.exists()) {
+            try (InputStream input = new java.io.FileInputStream(f)) {
+                props.load(input);
+            }
+        }
+        if (props.getProperty("db.url", "").isBlank()) {
+            Bukkit.getLogger().severe("[UL] db.url/db.user/db.password missing in " + f.getPath());
+        }
+        DB_PROPS = props;
+        return props;
+    }
+
+    private static void logDbException(Throwable t) {
+        Bukkit.getLogger().severe("[UL] DB connection error: " + t);
+        if (t instanceof SQLException se) {
+            while (se != null) {
+                Bukkit.getLogger().severe("  SQLState=" + se.getSQLState() + " ErrorCode=" + se.getErrorCode()
+                        + " Message=" + se.getMessage());
+                se = se.getNextException();
+            }
+        }
+        StringWriter sw = new StringWriter();
+        t.printStackTrace(new PrintWriter(sw));
+        Bukkit.getLogger().severe(sw.toString());
+    }
+
+    public static long getAuthTtlMs() { return AUTH_TTL_MS; }
+    public static int getAuthIter() { return AUTH_ITER; }
+    public static int getAuthKeyLen() { return AUTH_KEY_LEN; }
+    public static byte[] getAuthPepper() { return AUTH_PEPPER; }
+
+    private void loadAuthSecrets() {
+        try {
+            var props = getProperties();
+
+            String b64 = props.getProperty("auth.pepper.base64", "").trim();
+            if (!b64.isEmpty()) AUTH_PEPPER = java.util.Base64.getDecoder().decode(b64);
+            AUTH_ITER = Integer.parseInt(props.getProperty("auth.iter", "120000").trim());
+            AUTH_KEY_LEN = Integer.parseInt(props.getProperty("auth.keyLen", "256").trim());
+            AUTH_TTL_MS = Long.parseLong(props.getProperty("auth.ttlMs", "86400000").trim());
+
+            getLogger().info("[Auth] secrets loaded: iter=" + AUTH_ITER + " keyLen=" + AUTH_KEY_LEN + " ttlMs=" + AUTH_TTL_MS);
+
+            String apiBaseUrl = props.getProperty("backend.apiBaseUrl", "").trim();
+            String apiToken = props.getProperty("backend.apiToken", "").trim();
+            farLandsApi = new com.frammy.unitylauncher.auth.FarLandsApiClient(getLogger(), apiBaseUrl, apiToken);
+            getLogger().info(farLandsApi.isEnabled()
+                    ? "[FarLandsApi] enabled, target=" + apiBaseUrl
+                    : "[FarLandsApi] disabled (set backend.apiBaseUrl / backend.apiToken in secrets.properties to enable)");
+        } catch (Throwable t) {
+            getLogger().warning("[Auth] failed to load secrets.properties: " + t);
+            farLandsApi = new com.frammy.unitylauncher.auth.FarLandsApiClient(getLogger(), "", "");
+        }
+    }
+
+    private @NotNull Properties getProperties() throws IOException {
+        java.io.File f = new java.io.File(getDataFolder(), "secrets.properties");
+        if (!f.exists()) {
+            if (f.getParentFile() != null && !f.getParentFile().exists()) {
+                f.getParentFile().mkdirs();
+            }
+            try (var out = new PrintWriter(f, java.nio.charset.StandardCharsets.UTF_8)) {
+                out.println("# UnityLauncher auth secrets");
+                out.println("# auth.pepper.base64=       # <- заполни Base64-строкой");
+                out.println("auth.iter=120000");
+                out.println("auth.keyLen=256");
+                out.println("auth.ttlMs=86400000");
+                out.println();
+                out.println("# MySQL (required)");
+                out.println("# db.url=jdbc:mysql://host:3306/db");
+                out.println("# db.user=");
+                out.println("# db.password=");
+                out.println();
+                out.println("# farlandsconnect backend bridge (auth mirror) — leave empty to disable");
+                out.println("# backend.apiBaseUrl=https://farlands.frammy.lv");
+                out.println("# backend.apiToken=");
+            }
+        }
+
+        var props = new Properties();
+        try (var in = new java.io.FileInputStream(f)) { props.load(in); }
+        return props;
+    }
+
+    /* ===================== User-facing error helper ===================== */
+
+    public static void onError(String reason, @Nullable Player p) {
+        String prefix = ChatColor.RED + "[UnityLauncher] ";
+
         switch (reason) {
             case "NotInBase":
-                if (p != null) p.sendMessage(ChatColor.RED + "Вас не существует в базе!");
+                if (p != null) p.sendMessage(prefix + "Вас не существует в базе!");
+                else Bukkit.getLogger().warning("[UnityLauncher] Игрок не найден в базе!");
                 break;
+
             case "SignErr":
-                if (p != null) p.sendMessage(ChatColor.RED + "Ошибка при оплате по табличке!");
+                if (p != null) p.sendMessage(prefix + "Ошибка при оплате по табличке!");
+                else Bukkit.getLogger().warning("[UnityLauncher] Ошибка при оплате по табличке!");
                 break;
+
             case "DBError":
-                if (p != null) p.sendMessage(ChatColor.RED + "Ошибка при соединении с базой!");
+                if (p != null) p.sendMessage(prefix + "Ошибка при соединении с базой!");
+                Bukkit.getLogger().severe("[UnityLauncher] Ошибка соединения с базой данных!");
                 break;
+
             default:
+                Bukkit.getLogger().warning("[UnityLauncher] Неизвестная ошибка: " + reason);
                 break;
         }
     }
-  /*  private static class ATMData {
-        private final Location location;
-        private final String group;
-        private final String[] lines;
 
-        public ATMData(Location location, String group, String[] lines) {
-            this.location = location;
-            this.group = group;
-            this.lines = lines;
+    private void safeRegisterListener(Listener listener) {
+        if (listener == null) {
+            getLogger().severe("[UL] Attempted to register null listener");
+            return;
         }
-
-        public Location getLocation() {
-            return location;
-        }
-
-        public String getGroup() {
-            return group;
-        }
-
-        public String[] getLines() { return lines; }
+        getServer().getPluginManager().registerEvents(listener, this);
+        getLogger().info("[UL] Registered listener: " + listener.getClass().getSimpleName()
+                + " (" + listener.getClass().getName() + ")");
     }
-    */
+
+    /**
+     * Автоматическая регистрация всех апгрейдов из пакета impl
+     */
+    private void registerAllUpgrades() {
+        try {
+            // Массив всех классов апгрейдов (явный список, но в одном месте)
+            Class<?>[] upgradeClasses = {
+                AntiPhantomUpgrade.class, BrewSpeedUpgrade.class, ChurchUpgrade.class,
+                CountryEffectsUpgrade.class, EcoFuelUpgrade.class, FarmlandProtectionUpgrade.class,
+                FoodRationUpgrade.class, FurnaceHeatBoostUpgrade.class, FurnaceOreBonusUpgrade.class,
+                GoldenFoodUpgrade.class, HopperSmartUpgrade.class, LivestockUpgrade.class,
+                LoaderUpgrade.class, NetheriteAndBeaconUpgrade.class, RedstoneGatingUpgrade.class,
+                OutpostUpgrade.class, RecyclerUpgrade.class, TntQuarryUpgrade.class,
+                BloodGiftUpgrade.class, DietUpgrade.class, PsychSupportUpgrade.class,
+                RegenPulseUpgrade.class, SafeZoneUpgrade.class, SanitaryZoneUpgrade.class,
+                TriageUpgrade.class, CalmUpgrade.class, EducationUpgrade.class,
+                ScrollsUpgrade.class, GardenerUpgrade.class, QuietGuardUpgrade.class,
+                PondBedsUpgrade.class, QuietHourUpgrade.class, BenchesUpgrade.class,
+                DepositInterestUpgrade.class, AtmFeesUpgrade.class, SafeDepositUpgrade.class,
+                EnergySavingUpgrade.class, FestivalOfLightsUpgrade.class, TruePondsAndFlowerbedsUpgrade.class,
+                ReturnOfTheSparkUpgrade.class, HolyAuraUpgrade.class, CitizenBenefitsUpgrade.class,
+                // military-diplomacy-design.md §3.3/§13 Фаза 2 — не завязаны на войну
+                DefensePatrolUpgrade.class, MilitaryHospitalRegenUpgrade.class,
+                AttackSupportUpgrade.class, LogisticsUpgrade.class,
+                // GH#24 — оборонительные сооружения (саб-роли под DEFENSE), идеи 1-4 (5-я отложена)
+                LiveDefensePostUpgrade.class, AuraUpgrade.class, ScorchUpgrade.class, CrossbowUpgrade.class,
+                // military-diplomacy-design.md §17.3/§17.4 (2026-08-22) — дефолтное
+                // состояние "Обороны" на линии фронта (§16): pity-патруль + "Отголосок"
+                FrontierDefenseUpgrade.class,
+                // §17.10 (2026-08-22) — "Диверсия", единственный способ нейтрализовать
+                // оборонительное сооружение (заменяет PVE_WAVES/BREAK_ANCHOR у DEFENSE)
+                SabotageUpgrade.class
+            };
+
+            int registered = 0;
+            for (Class<?> clazz : upgradeClasses) {
+                try {
+                    Upgrade upgrade = (Upgrade) clazz.getDeclaredConstructor().newInstance();
+                    upgradesManager.register(upgrade);
+                    registered++;
+                } catch (Exception e) {
+                    logWarn("Failed to register " + clazz.getSimpleName() + ": " + e.getMessage());
+                }
+            }
+
+            logInfo("Registered " + registered + "/" + upgradeClasses.length + " upgrades");
+        } catch (Exception e) {
+            logError("Failed to register upgrades", e);
+        }
+    }
 
 }

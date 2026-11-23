@@ -1,0 +1,250 @@
+package com.frammy.unitylauncher.upgrades.impl;
+
+import com.frammy.unitylauncher.UnityLauncher;
+import com.frammy.unitylauncher.military.MilitaryDefenseSubtype;
+import com.frammy.unitylauncher.upgrades.UpgradeCondition;
+import com.frammy.unitylauncher.upgrades.config.types.MilitaryCfg;
+import com.frammy.unitylauncher.upgrades.core.BaseUpgrade;
+import com.frammy.unitylauncher.upgrades.core.UpgradeContext;
+import com.frammy.unitylauncher.upgrades.core.UpgradeKey;
+import com.frammy.unitylauncher.upgrades.core.UpgradeScope;
+import com.frammy.unitylauncher.zones.ZoneInfo;
+import com.frammy.unitylauncher.zones.ZoneType;
+import org.bukkit.Bukkit;
+import org.bukkit.Location;
+import org.bukkit.block.Biome;
+import org.bukkit.entity.Entity;
+import org.bukkit.entity.EntityType;
+import org.bukkit.entity.LivingEntity;
+import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.Listener;
+import org.bukkit.event.entity.EntityTargetLivingEntityEvent;
+import org.bukkit.metadata.FixedMetadataValue;
+import org.bukkit.scheduler.BukkitTask;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
+// infra/military-diplomacy-design.md §3.3/§13 Фаза 2+4, §14.2/§14.5 "Оборона".
+// Примета (слабый фоновый патруль) — Фаза 2.
+//
+// Фидбек 2026-08-22 — PVE_WAVES (5 волн подряд без паузы >3 мин = нейтрализация)
+// убран как способ нейтрализации оборонительных сооружений: "это требование
+// было изначально как заглушка". Единственный способ теперь — "Диверсия"
+// (SabotageUpgrade, долгий канал у якоря-колокола с майлстоунами). Патруль
+// этого класса остаётся — просто фоновая угроза/отвлечение, которое
+// прикрывающему всё ещё нужно отбивать, пока напарник ведёт диверсию, но
+// сам он больше ничего не решает и никуда не репортится.
+//
+// Фидбек 2026-08-14 — переработка условий срабатывания:
+//  1. Раньше работал на ЛЮБОМ объекте со специализацией DEFENSE, независимо
+//     от того, какой тип обороны (Живой пост/Ореол/Жгучий/Арбалет) реально
+//     выбран — то есть накладывался поверх каждого из них дополнительным,
+//     никак не связанным патрулём. Теперь — только на объекте, у которого
+//     реально активен ОДИН ИЗ типов ("каждое активное оборонительное
+//     сооружение").
+//  2. Раньше спавнил и поддерживал патруль ПОСТОЯННО, независимо от того,
+//     есть ли вообще враг рядом. Теперь — только если в территории страны
+//     (любая её COUNTRY-зона) реально находится игрок вражеской (по войне)
+//     страны, раз в period, а не "поддерживать до потолка".
+//  3. Десинхронизация между объектами — иначе все объекты страны спавнили
+//     бы патруль ровно в одном и том же тике (все качались бы синхронно:
+//     то куча мобов везде, то нигде), т.к. используют общий period.
+public final class DefensePatrolUpgrade extends BaseUpgrade implements Listener {
+
+    private static final UpgradeKey KEY = UpgradeKey.of("military.defense");
+    private static final String META_KEY = "unityMilitaryGuardCountry";
+
+    @Override public UpgradeKey key() { return KEY; }
+    @Override public UpgradeScope scope() { return UpgradeScope.COUNTRY; }
+    @Override public Listener listener() { return this; }
+
+    // markerId зоны -> живые мобы патруля этой зоны (в памяти — переживать
+    // рестарт плагина не обязано, как и остальные in-memory кеши апгрейдов).
+    private final Map<String, List<UUID>> guardsByZone = new ConcurrentHashMap<>();
+    // Фидбек 2026-08-14 п.3 — следующий момент, когда ЭТОЙ зоне разрешено
+    // (снова) заспавнить патруль. Инициализируется случайным сдвигом в
+    // пределах одного периода при первом появлении зоны — так все объекты
+    // страны расходятся по фазе вместо синхронного тиканья.
+    private final Map<String, Long> nextSpawnAtByZone = new ConcurrentHashMap<>();
+    private BukkitTask task;
+
+    @Override
+    public boolean enabledByConfig(UpgradeContext ctx) {
+        MilitaryCfg.DefensePatrolCfg cfg = ctx.config().military().defensePatrol();
+        return cfg != null && cfg.enabled();
+    }
+
+    @Override
+    protected void onEnable() {
+        var cfg = C().military().defensePatrol();
+        long period = Math.max(20L, cfg.periodTicks());
+
+        task = Bukkit.getScheduler().runTaskTimer(plugin(), () -> tick(cfg), period, period);
+
+        if (C().core().debug()) {
+            plugin().getLogger().info("[Military/DefensePatrol] started period=" + period);
+        }
+    }
+
+    private void tick(MilitaryCfg.DefensePatrolCfg cfg) {
+        var subtypeService = UnityLauncher.getInstance().militaryDefenseSubtypeService;
+        long periodMs = cfg.periodTicks() * 50L;
+        // Считаем "враг в территории страны" один раз на страну за тик, не на
+        // каждый объект — сама проверка не зависит от конкретного объекта.
+        Map<String, Boolean> enemyPresentByCountry = new java.util.HashMap<>();
+
+        for (ZoneInfo z : zones().getAllZonesSnapshot()) {
+            if (z.getType() != ZoneType.MILITARY) continue;
+
+            // Фидбек 2026-08-14 п.1 — только объект с реально активным типом
+            // обороны, любым из четырёх (не просто специализация DEFENSE).
+            boolean hasActiveSubtype = false;
+            for (MilitaryDefenseSubtype subtype : MilitaryDefenseSubtype.values()) {
+                if (subtypeService.isActiveAs(z, subtype)) { hasActiveSubtype = true; break; }
+            }
+            if (!hasActiveSubtype) continue;
+
+            String countryName = z.getCountryName();
+            if (countryName == null) continue;
+
+            String markerId = z.getMarkerID();
+            List<UUID> alive = guardsByZone.computeIfAbsent(markerId, k -> new ArrayList<>());
+            alive.removeIf(id -> {
+                Entity e = Bukkit.getEntity(id);
+                return e == null || !e.isValid();
+            });
+
+            long now = System.currentTimeMillis();
+            // Первое появление этой зоны — случайный сдвиг фазы в пределах
+            // периода, чтобы не спавнить в один тик со всеми остальными.
+            Long nextSpawnAt = nextSpawnAtByZone.computeIfAbsent(markerId,
+                    k -> now + java.util.concurrent.ThreadLocalRandom.current().nextLong(periodMs));
+            if (now < nextSpawnAt) continue;
+
+            // Фидбек 2026-08-14 п.2 — спавним только если враг реально есть
+            // в территории страны прямо сейчас; иначе просто откладываем
+            // следующую попытку на period, ничего не спавня.
+            boolean enemyPresent = enemyPresentByCountry.computeIfAbsent(countryName, this::enemyInCountryTerritory);
+            nextSpawnAtByZone.put(markerId, now + periodMs);
+            if (!enemyPresent) continue;
+
+            if (alive.size() < cfg.maxAlive()) {
+                Location center = z.getCenter();
+                if (center != null && center.getWorld() != null) {
+                    int toSpawn = Math.min(cfg.mobsPerWave(), cfg.maxAlive() - alive.size());
+                    for (int i = 0; i < toSpawn; i++) {
+                        // GH#30 п.4 — своя случайная точка внутри реальной
+                        // территории объекта для каждого моба (тот же приём,
+                        // что LiveDefensePostUpgrade.randomPointIn), не один
+                        // общий center на всех — раньше вся волна спавнилась
+                        // друг на друге в одном блоке.
+                        Location spawnLoc = randomPointIn(z, center);
+                        LivingEntity mob = (LivingEntity) spawnLoc.getWorld().spawnEntity(spawnLoc, patrolTypeFor(center));
+                        mob.setMetadata(META_KEY, new FixedMetadataValue(plugin(), markerId));
+                        mob.setRemoveWhenFarAway(true);
+                        alive.add(mob.getUniqueId());
+                    }
+                }
+            }
+        }
+    }
+
+    /** Есть ли прямо сейчас в любой COUNTRY-зоне этой страны игрок вражеской (по войне) страны. */
+    private boolean enemyInCountryTerritory(String countryName) {
+        for (ZoneInfo countryZone : zones().getAllZonesSnapshot()) {
+            if (countryZone.getType() != ZoneType.COUNTRY) continue;
+            if (!countryName.equalsIgnoreCase(countryZone.getCountryName())) continue;
+            for (Player p : Bukkit.getOnlinePlayers()) {
+                if (!countryZone.contains2D(p.getLocation())) continue;
+                String playerCountry = UnityLauncher.getInstance().countryRegistryJdbc.getCountryOfPlayer(p.getName());
+                if (playerCountry == null || playerCountry.equalsIgnoreCase(countryName)) continue;
+                if (!UnityLauncher.getInstance().warStatusCache.isAtWar(countryName, playerCountry)) continue;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // GH#30 п.4 — сколько раз пробовать случайную точку внутри AABB, прежде
+    // чем сдаться и упасть на center() (полигон может занимать малую долю
+    // своего же bounding box). То же число, что у LiveDefensePostUpgrade.
+    private static final int RANDOM_POINT_ATTEMPTS = 12;
+
+    /** Случайная точка внутри реальной территории зоны (rejection sampling по AABB), с фоллбеком на center при неудаче/маленьком полигоне. */
+    private Location randomPointIn(ZoneInfo z, Location fallbackCenter) {
+        var w = z.getWorld();
+        if (w == null) return fallbackCenter;
+
+        var bb = z.getBoundingBoxXZ();
+        var rnd = java.util.concurrent.ThreadLocalRandom.current();
+        for (int i = 0; i < RANDOM_POINT_ATTEMPTS; i++) {
+            double x = bb.getMinX() + rnd.nextDouble() * (bb.getMaxX() - bb.getMinX());
+            double zc = bb.getMinZ() + rnd.nextDouble() * (bb.getMaxZ() - bb.getMinZ());
+            int y = w.getHighestBlockYAt((int) Math.floor(x), (int) Math.floor(zc));
+            Location candidate = new Location(w, x, y, zc);
+            if (z.contains2D(candidate)) return candidate;
+        }
+        return fallbackCenter;
+    }
+
+    /** Скелет/зомби по биому — только ванильные мобы, ничего нового (§14.2). */
+    private static EntityType patrolTypeFor(Location loc) {
+        Biome biome = loc.getBlock().getBiome();
+        String name = biome.name();
+        if (name.contains("DESERT")) return EntityType.HUSK;
+        if (name.contains("SNOW") || name.contains("FROZEN") || name.contains("ICE")) return EntityType.STRAY;
+        return Math.random() < 0.5 ? EntityType.ZOMBIE : EntityType.SKELETON;
+    }
+
+    /** GH#30 п.4 — без дропа/опыта, как и у Живого поста (§14.2 "защита объекта, не источник фарма"). HIGHEST — тот же приём против других плагинов, что и у LiveDefensePostUpgrade. */
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onDeath(org.bukkit.event.entity.EntityDeathEvent e) {
+        if (e.getEntity().getMetadata(META_KEY).isEmpty()) return;
+        e.getDrops().clear();
+        e.setDroppedExp(0);
+    }
+
+    // Враждебны к чужакам, не к своим (§14.2: "не из страны/союза" — союзники
+    // сюда пока не входят, см. CountryRegistryJdbc.getPlayerViewMilitaryPermission).
+    @EventHandler(ignoreCancelled = true)
+    public void onTarget(EntityTargetLivingEntityEvent e) {
+        if (!(e.getTarget() instanceof Player p)) return;
+        List<org.bukkit.metadata.MetadataValue> meta = e.getEntity().getMetadata(META_KEY);
+        if (meta.isEmpty()) return;
+
+        // meta value here is the zone markerId (not the country) — resolve
+        // via the zone to compare against the target player's own country.
+        String markerId = meta.get(0).asString();
+        String guardCountry = zones().getAllZonesSnapshot().stream()
+                .filter(z -> markerId.equals(z.getMarkerID()))
+                .findFirst()
+                .map(UpgradeCondition::zoneCountryCanonical)
+                .orElse(null);
+        String playerCountry = UpgradeCondition.playerCountryCanonical(p.getName());
+        if (guardCountry != null && guardCountry.equals(playerCountry)) {
+            e.setCancelled(true);
+        }
+    }
+
+    @Override
+    protected void onDisable() {
+        if (task != null) {
+            task.cancel();
+            task = null;
+        }
+        for (List<UUID> alive : guardsByZone.values()) {
+            for (UUID id : alive) {
+                Entity e = Bukkit.getEntity(id);
+                if (e != null && e.isValid()) e.remove();
+            }
+        }
+        guardsByZone.clear();
+        nextSpawnAtByZone.clear();
+    }
+}

@@ -1,10 +1,13 @@
 package com.frammy.unitylauncher;
 
+import com.frammy.unitylauncher.zones.ZoneManager;
+import com.frammy.unitylauncher.zones.ZoneType;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
+import org.jspecify.annotations.NonNull;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -13,71 +16,90 @@ public class CommandCompleter implements TabCompleter {
 
     @Nullable
     @Override
-    public List<String> onTabComplete(@NotNull CommandSender sender, @NotNull Command command, @NotNull String alias, @NotNull String[] args) {
-        List<String> completions = new ArrayList<>();
+    public List<String> onTabComplete(@NotNull CommandSender sender,
+                                      @NotNull Command command,
+                                      @NotNull String alias,
+                                      @NotNull String @NonNull [] args) {
 
-        // Проверяем количество аргументов
+        List<String> completions = new ArrayList<>();
+        ZoneManager zoneManager = UnityLauncher.getInstance().getZoneManager();
+
+        // первый аргумент — список подкоманд /ul <...>
         if (args.length == 1) {
-            // Предлагаем команды на первом уровне аргументов
-            completions.add("rcode");
+            // auth
+            completions.add("login");
+            completions.add("reg");
+            completions.add("change");         // смена пароля
+
+            // экономика/инфо
             completions.add("balance");
-            completions.add("notifications");
-            completions.add("countrybalance");
-            completions.add("daydeal");
-            completions.add("group");
-            completions.add("change");
-            completions.add("top");
             completions.add("country");
+
+            // зоны / дипломатия
             completions.add("zone");
+            completions.add("relations");
+
+            // банк/сейф
+            completions.add("safe");
+
+            // дейлик
+            completions.add("daydeal");
 
         } else if (args.length == 2) {
             switch (args[0].toLowerCase()) {
-                case "zone":
+                case "zone" -> {
                     completions.add("build");
                     completions.add("addcorner");
                     completions.add("removecorner");
                     completions.add("update");
-                    break;
-                case "top":
-                    completions.add("Playtime");
-                    completions.add("Balance");
-                    completions.add("Events");
-                    break;
-                case "notifications":
+                    completions.add("remove");
+                    completions.add("price");
+                }
+                case "notifications" -> {
                     completions.add("on");
                     completions.add("off");
-                    break;
-                case "group":
+                }
+                case "group" -> {
                     completions.add("list");
                     completions.add("set");
                     completions.add("prefix");
-                    break;
-                case "countrybalance":
+                }
+                case "countrybalance" -> {
                     completions.add("add");
                     completions.add("withdraw");
-                    break;
-
+                }
+                case "safe" -> {
+                    completions.add("create");
+                }
+                case "daydeal" -> {
+                    completions.add("info");
+                    completions.add("complete");
+                }
             }
-        }
-        else if (args.length == 3) {
-            switch (args[1].toLowerCase()) {
 
-                case "update":
+        } else if (args.length == 3) {
+            switch (args[1].toLowerCase()) {
+                case "update" -> {
                     completions.add("corners");
                     completions.add("name");
-                    break;
-                case "build":
-                    break;
+                    completions.add("color");
+                }
+                case "build", "addcorner" -> {
+                    if (zoneManager != null) {
+                        for (ZoneType zoneType : zoneManager.zoneLimits.keySet()) {
+                            completions.add(zoneType.toString().toUpperCase());
+                        }
+                    }
+                }
+            }
+
+        } else if (args.length == 4) {
+            if (args[2].equalsIgnoreCase("corners")) {
+                completions.add("+");
+                completions.add("-");
             }
         }
-        else if (args.length == 4) {
-            switch (args[2].toLowerCase()) {
-                case "corners":
-                    completions.add("+");
-                    completions.add("-");
-                    break;
-            }
-        }
+
         return completions;
     }
 }

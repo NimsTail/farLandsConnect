@@ -1,0 +1,435 @@
+package com.frammy.unitylauncher.auth;
+
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.frammy.unitylauncher.UnityLauncher;
+import com.frammy.unitylauncher.zones.ZoneInfo;
+import com.frammy.unitylauncher.zones.ZoneManager;
+import com.frammy.unitylauncher.zones.ZoneType;
+import com.frammy.unitylauncher.zones.web.ZoneWebRequestHandler;
+import com.frammy.unitylauncher.zones.web.ZoneWebRequestService;
+import org.bukkit.Bukkit;
+import org.bukkit.Location;
+import org.bukkit.plugin.java.JavaPlugin;
+
+import java.time.LocalDate;
+import java.util.List;
+import java.util.UUID;
+import java.util.logging.Logger;
+
+/**
+ * Executes zone-request "jobs" created by the site (see routes/zones.ts
+ * in the farlandsconnect repo) — real zone/country state only exists in this
+ * plugin's ZoneManager, so the site can't settle these on its own. Same shape
+ * as MoneyRequestPoller: the queue lives on the backend (Postgres, polled
+ * over HTTP via FarLandsApiClient) instead of the MySQL zone_requests table
+ * ZoneWebRequestService already polls directly — this is the HTTP-queue
+ * counterpart the comment in MoneyRequestPoller referred to. Both queues
+ * feed the exact same ZoneManager.handle(...)/handleWebRequest(...), so no
+ * new game logic was needed here, only transport.
+ *
+ * See infra/game-integration-architecture.md in the farlandsconnect repo.
+ */
+public class ZoneRequestPoller {
+
+    private final JavaPlugin plugin;
+    private final FarLandsApiClient api;
+    private final ZoneManager zoneManager;
+    private final Logger log;
+
+    public ZoneRequestPoller(JavaPlugin plugin, FarLandsApiClient api, ZoneManager zoneManager, Logger log) {
+        this.plugin = plugin;
+        this.api = api;
+        this.zoneManager = zoneManager;
+        this.log = log;
+    }
+
+    /** Call once from onEnable. periodTicks: 20 ticks = 1 second. No-op if the API bridge is disabled. */
+    public void start(long periodTicks) {
+        if (!api.isEnabled()) return;
+        Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, this::pollOnce, periodTicks, periodTicks);
+    }
+
+    private void pollOnce() {
+        List<FarLandsApiClient.PendingZoneRequest> batch = api.fetchPendingZoneRequests();
+        for (FarLandsApiClient.PendingZoneRequest req : batch) {
+            // ZoneManager touches Bukkit/world state directly, so — same as the
+            // MySQL-direct ZoneWebRequestService — every request runs on the main thread.
+            Bukkit.getScheduler().runTask(plugin, () -> process(req));
+        }
+    }
+
+    private void process(FarLandsApiClient.PendingZoneRequest req) {
+        try {
+            if ("zones_sync".equals(req.action())) {
+                processZonesSync(req);
+                return;
+            }
+            if ("country_activity_sync".equals(req.action())) {
+                processCountryActivitySync(req);
+                return;
+            }
+            if ("zone_quota_sync".equals(req.action())) {
+                processZoneQuotaSync(req);
+                return;
+            }
+            if ("military_specialization_quota_sync".equals(req.action())) {
+                processMilitarySpecQuotaSync(req);
+                return;
+            }
+            if ("military_defense_subtype_quota_sync".equals(req.action())) {
+                processMilitaryDefenseSubtypeQuotaSync(req);
+                return;
+            }
+            if ("START_RECON_MINIGAME".equals(req.action())) {
+                processStartReconMinigame(req);
+                return;
+            }
+            if ("shop_inventory_sync".equals(req.action())) {
+                processShopInventorySync(req);
+                return;
+            }
+            processMutation(req);
+        } catch (Exception e) {
+            log.warning("[ZoneRequestPoller] processing " + req.id() + " (" + req.action() + ") failed: " + e);
+            api.reportZoneRequestResult(req.id(), false, "internal_error", null);
+        }
+    }
+
+    /**
+     * Read-only — reports the requesting player's OWN zones (ownership is
+     * always by player, never by country — see ZoneInfo.owner) so the site
+     * can catch drift. Matches old/zoneManager.html's myOwnedZones(): a
+     * simple owner-name filter, not a country-membership one.
+     */
+    private void processZonesSync(FarLandsApiClient.PendingZoneRequest req) {
+        String ownerUsername = (req.payload() != null && req.payload().has("ownerUsername"))
+                ? req.payload().get("ownerUsername").getAsString()
+                : null;
+        if (ownerUsername == null) {
+            api.reportZoneRequestResult(req.id(), false, "missing_owner_username", null);
+            return;
+        }
+
+        JsonArray snapshot = new JsonArray();
+        for (ZoneInfo z : zoneManager.getZones()) {
+            if (z.getOwner() == null || !z.getOwner().equalsIgnoreCase(ownerUsername)) continue;
+            snapshot.add(zoneToJson(z));
+        }
+        api.reportZoneRequestResult(req.id(), true, null, null, snapshot);
+    }
+
+    /**
+     * Read-only — reports the accumulated chunk-activity tax due for a
+     * country's current weekly billing period (CountryInfo.WeeklyTaxDue,
+     * see ZoneActivityCalculations/WeeklyCountryInvoiceService). Old never
+     * displayed this on the site; the site wants to show it as an info
+     * panel now, so this is a new sync action (not one of the 10 mutation
+     * actions ZoneManager.handle already supports).
+     */
+    private void processCountryActivitySync(FarLandsApiClient.PendingZoneRequest req) {
+        String countryName = (req.payload() != null && req.payload().has("countryName"))
+                ? req.payload().get("countryName").getAsString()
+                : null;
+        if (countryName == null) {
+            api.reportZoneRequestResult(req.id(), false, "missing_country_name", null);
+            return;
+        }
+
+        double weeklyTaxDue = zoneManager.ul.countryRegistryJdbc.getWeeklyTaxDue(countryName);
+
+        JsonObject result = new JsonObject();
+        result.addProperty("weeklyTaxDue", weeklyTaxDue);
+        JsonArray wrapper = new JsonArray();
+        wrapper.add(result);
+        api.reportZoneRequestResult(req.id(), true, null, null, wrapper);
+    }
+
+    /**
+     * Read-only — reports how many more zones of each upgradeable type
+     * (see PLOT_UPGRADE_TARGETS in old/zoneManager.html) the country can
+     * still create right now, per ZoneQuotaService's LuckPerms-permission
+     * quota (unity.zone.<type>.<N> on the country's group). The site shows
+     * this as "(N мест)" in the upgrade-type dropdown instead of letting the
+     * player pick a type that's actually full and only finding out on submit.
+     */
+    private void processZoneQuotaSync(FarLandsApiClient.PendingZoneRequest req) {
+        String countryName = (req.payload() != null && req.payload().has("countryName"))
+                ? req.payload().get("countryName").getAsString()
+                : null;
+        if (countryName == null) {
+            api.reportZoneRequestResult(req.id(), false, "missing_country_name", null);
+            return;
+        }
+
+        var quotaService = zoneManager.getQuotaService();
+        JsonObject result = new JsonObject();
+        for (ZoneType t : new ZoneType[] {
+                ZoneType.BANK, ZoneType.HOSPITAL, ZoneType.INDUSTRIAL, ZoneType.PARK,
+                ZoneType.CHURCH, ZoneType.LIBRARY, ZoneType.GREENHOUSE, ZoneType.MILITARY,
+        }) {
+            result.addProperty(t.name(), quotaService.getAvailableCountryQuota(countryName, t));
+        }
+        JsonArray wrapper = new JsonArray();
+        wrapper.add(result);
+        api.reportZoneRequestResult(req.id(), true, null, null, wrapper);
+    }
+
+    /**
+     * Read-only — GH#24 (правки из комментария, п.3): та же идея, что
+     * processZoneQuotaSync, но для военных специализаций — "сколько ещё
+     * объектов страны можно назначить на специализацию X прямо сейчас"
+     * (unity.military.<slug>.<N> квота минус уже занятые слоты, см.
+     * MilitarySpecializationService.availableQuota). Сайт показывает это в
+     * дропдауне специализации объекта, как "(N доступно)".
+     */
+    private void processMilitarySpecQuotaSync(FarLandsApiClient.PendingZoneRequest req) {
+        String countryName = (req.payload() != null && req.payload().has("countryName"))
+                ? req.payload().get("countryName").getAsString()
+                : null;
+        if (countryName == null) {
+            api.reportZoneRequestResult(req.id(), false, "missing_country_name", null);
+            return;
+        }
+
+        String canonical = com.frammy.unitylauncher.upgrades.UpgradeCondition.resolveCountryGroupId(countryName);
+        var specService = com.frammy.unitylauncher.UnityLauncher.getInstance().militarySpecializationService;
+        JsonObject result = new JsonObject();
+        for (var spec : com.frammy.unitylauncher.military.MilitarySpecialization.values()) {
+            result.addProperty(spec.name(), specService.availableQuota(canonical, spec));
+        }
+        JsonArray wrapper = new JsonArray();
+        wrapper.add(result);
+        api.reportZoneRequestResult(req.id(), true, null, null, wrapper);
+    }
+
+    /**
+     * Read-only — GH#24 (фидбек 2026-08-14 п.1/4): та же идея, что
+     * processMilitarySpecQuotaSync, но для типов обороны внутри DEFENSE.
+     */
+    private void processMilitaryDefenseSubtypeQuotaSync(FarLandsApiClient.PendingZoneRequest req) {
+        String countryName = (req.payload() != null && req.payload().has("countryName"))
+                ? req.payload().get("countryName").getAsString()
+                : null;
+        if (countryName == null) {
+            api.reportZoneRequestResult(req.id(), false, "missing_country_name", null);
+            return;
+        }
+
+        String canonical = com.frammy.unitylauncher.upgrades.UpgradeCondition.resolveCountryGroupId(countryName);
+        var subtypeService = com.frammy.unitylauncher.UnityLauncher.getInstance().militaryDefenseSubtypeService;
+        JsonObject result = new JsonObject();
+        for (var subtype : com.frammy.unitylauncher.military.MilitaryDefenseSubtype.values()) {
+            result.addProperty(subtype.name(), subtypeService.availableQuota(canonical, subtype));
+        }
+        JsonArray wrapper = new JsonArray();
+        wrapper.add(result);
+        api.reportZoneRequestResult(req.id(), true, null, null, wrapper);
+    }
+
+    /**
+     * military-diplomacy-design.md §4.1 п.3, GH#24 п.1/вопрос №15 — the site
+     * just started a MilitaryReconSession and wants the Колокол-timing
+     * minigame running at this zone. Fire-and-forget from the site's
+     * perspective (see routes/zones.ts's comment on this call) — "success"
+     * here only means "the minigame actually started", not "recon
+     * succeeded"; the real result comes later via
+     * FarLandsApiClient.reportReconQuality once the window ends.
+     */
+    private void processStartReconMinigame(FarLandsApiClient.PendingZoneRequest req) {
+        String markerId = req.markerId();
+        String sessionId = (req.payload() != null && req.payload().has("sessionId"))
+                ? req.payload().get("sessionId").getAsString()
+                : null;
+        if (markerId == null || sessionId == null) {
+            api.reportZoneRequestResult(req.id(), false, "missing_params", null);
+            return;
+        }
+
+        ZoneInfo zone = zoneManager.getAllZonesSnapshot().stream()
+                .filter(z -> markerId.equals(z.getMarkerID()))
+                .findFirst()
+                .orElse(null);
+        if (zone == null) {
+            api.reportZoneRequestResult(req.id(), false, "zone_not_found", null);
+            return;
+        }
+
+        boolean started = UnityLauncher.getInstance().militaryReconMinigame.start(zone, sessionId);
+        api.reportZoneRequestResult(req.id(), started, started ? null : "not_specialized_or_no_anchor", null);
+    }
+
+    /**
+     * Read-only — GH#34 (личный кабинет продавца / автолистинг из сундуков
+     * магазина, farlandsconnect infra/personal-upgrades-catalog.md
+     * обсуждение 2026-08-27). Возвращает то же самое ItemData[], что уже
+     * строит ShopListUpdater для табличек SHOP_LIST этого магазина —
+     * никакого нового сканирования сундуков не добавляется, сайт просто
+     * запрашивает уже готовый снимок по требованию (открыл "Мои магазины",
+     * нажал "Обновить", или раз в 5 минут для магазинов с включённым
+     * автолистингом — см. lib/shopSync.ts на сайте), а не каждый тик.
+     */
+    private void processShopInventorySync(FarLandsApiClient.PendingZoneRequest req) {
+        String markerId = req.markerId();
+        if (markerId == null) {
+            api.reportZoneRequestResult(req.id(), false, "missing_marker_id", null);
+            return;
+        }
+
+        var items = com.frammy.unitylauncher.UnityLauncher.getInstance().getSignManager().getShopItemsByMarkerId(markerId);
+
+        // GH#35 (2026-08-28) — тот же payload shape, что и у push-пути
+        // (FarLandsApiClient.pushShopInventory) — общая сериализация,
+        // единственное отличие pull vs push — транспорт (ответ на запрос
+        // сайта vs звонок плагина самому себе по факту события).
+        JsonArray snapshot = new JsonArray();
+        for (var it : items) snapshot.add(FarLandsApiClient.shopItemToJson(it));
+        api.reportZoneRequestResult(req.id(), true, null, null, snapshot);
+    }
+
+    private JsonObject zoneToJson(ZoneInfo z) {
+        JsonObject o = new JsonObject();
+        o.addProperty("markerId", z.getMarkerID());
+        o.addProperty("name", z.getName());
+        o.addProperty("world", z.getWorld() != null ? z.getWorld().getName() : null);
+        o.addProperty("zoneType", z.getType().name());
+        o.addProperty("color", z.getFillColor() != null ? String.format("#%06X", z.getFillColor().asRGB() & 0xFFFFFF) : null);
+        o.addProperty("countryName", z.getCountryName());
+
+        // Weekly upkeep billing state — old's zoneDetailHtml showed these as
+        // "Активность (накоплено)" and "След. списание" on each zone card
+        // (see old/zoneManager.html). Same accrual ZoneActivityCalculations
+        // already tracks per-zone; nothing new to compute here.
+        o.addProperty("dueCost", z.getDueSinceLastBill(LocalDate.now()));
+        o.addProperty("nextBillingDate", z.getNextBillingDate().toString());
+
+        // Remaining cooldown (ms, 0 = available now) on territory changes
+        // (COUNTRY/COLONY only) and name/color changes (any zone) — lets the
+        // site grey out those buttons up front instead of the player only
+        // finding out from a rejected request. See ZoneManager.
+        o.addProperty("cornersCooldownMs", zoneManager.cornersCooldownRemainingMs(z));
+        o.addProperty("nameColorCooldownMs", zoneManager.nameColorCooldownRemainingMs(z));
+
+        JsonArray points = new JsonArray();
+        for (Location loc : z.getCorners()) {
+            JsonObject p = new JsonObject();
+            p.addProperty("x", loc.getX());
+            p.addProperty("z", loc.getZ());
+            points.add(p);
+        }
+        o.add("points", points);
+
+        // getCorners() only ever returns shape 0 ("points" above) — a
+        // multi-polygon zone (e.g. a country claim added via "Добавить
+        // фигуру") has additional disjoint shapes that were previously never
+        // exposed on this read path, so the site's Postgres mirror (and
+        // everything drawn from it — Zone Manager, the heatmap zones
+        // overlay) only ever showed the first shape even though BlueMap,
+        // reading the plugin's own MySQL zones_view directly, showed all of
+        // them correctly.
+        JsonArray extraShapes = new JsonArray();
+        List<List<Location>> shapes = z.getShapes();
+        for (int i = 1; i < shapes.size(); i++) {
+            JsonArray shapePoints = new JsonArray();
+            for (Location loc : shapes.get(i)) {
+                JsonObject p = new JsonObject();
+                p.addProperty("x", loc.getX());
+                p.addProperty("z", loc.getZ());
+                shapePoints.add(p);
+            }
+            extraShapes.add(shapePoints);
+        }
+        o.add("extraShapes", extraShapes);
+
+        JsonArray members = new JsonArray();
+        for (String m : z.getMembers()) members.add(m);
+        o.add("members", members);
+
+        // military-diplomacy-design.md §4.1/§14.2, GH#24 п.2-3 — только
+        // осмысленно у type == MILITARY, но поле шлём всегда (null у
+        // остальных типов — как и с остальными military-only полями ниже).
+        // militarySpecialization уже учитывает окно переключения — во время
+        // него specService.current() отдаёт null, то есть сайт видит
+        // "временно без специализации", ровно как это отражается в игре.
+        var specService = com.frammy.unitylauncher.UnityLauncher.getInstance().militarySpecializationService;
+        var currentSpec = specService.current(z);
+        o.addProperty("militarySpecialization", currentSpec != null ? currentSpec.name() : null);
+        o.addProperty("militarySpecializationSwitching", z.isSpecializationSwitching());
+        // Абсолютная метка (epoch ms) конца окна переключения — 0, если
+        // переключение не идёт. Сайт считает обратный отсчёт сам, не нужно
+        // гонять тикающий таймер через опрос.
+        o.addProperty("militarySpecializationSwitchLockedUntil", z.isSpecializationSwitching() ? z.getSpecializationSwitchLockedUntil() : 0L);
+        // GH#24 п.2 (правки из комментария) — сайт хочет показывать "с X на Y",
+        // а не просто погашенный дропдаун во время переключения — цель
+        // переключения плагин уже хранит (pendingMilitarySpecialization),
+        // просто раньше не зеркалил её на сайт.
+        var pendingSpec = z.getPendingMilitarySpecialization();
+        o.addProperty("militarySpecializationPending", z.isSpecializationSwitching() && pendingSpec != null ? pendingSpec.name() : null);
+        // Тот же п.2 — "с X" половина: сырое (немаскированное) значение
+        // z.getMilitarySpecialization() всё время окна переключения остаётся
+        // старым (меняется только внутри resolvePending, когда окно уже
+        // прошло) — в отличие от currentSpec выше, который замаскирован в
+        // null всё это время. Осмысленно только вместе с militarySpecializationSwitching.
+        var rawSpec = z.getMilitarySpecialization();
+        o.addProperty("militarySpecializationPrevious", z.isSpecializationSwitching() && rawSpec != null ? rawSpec.name() : null);
+
+        // GH#24 (фидбек 2026-08-14 п.1/4) — тип обороны, тот же паттерн зеркалирования, что и специализация выше.
+        var subtypeService = com.frammy.unitylauncher.UnityLauncher.getInstance().militaryDefenseSubtypeService;
+        var currentSubtype = subtypeService.current(z);
+        o.addProperty("militaryDefenseSubtype", currentSubtype != null ? currentSubtype.name() : null);
+        o.addProperty("militaryDefenseSubtypeSwitching", z.isDefenseSubtypeSwitching());
+        o.addProperty("militaryDefenseSubtypeSwitchLockedUntil", z.isDefenseSubtypeSwitching() ? z.getDefenseSubtypeSwitchLockedUntil() : 0L);
+        var pendingSubtype = z.getPendingMilitaryDefenseSubtype();
+        o.addProperty("militaryDefenseSubtypePending", z.isDefenseSubtypeSwitching() && pendingSubtype != null ? pendingSubtype.name() : null);
+        var rawSubtype = z.getMilitaryDefenseSubtype();
+        o.addProperty("militaryDefenseSubtypePrevious", z.isDefenseSubtypeSwitching() && rawSubtype != null ? rawSubtype.name() : null);
+
+        // GH#24 (защита от закапывания) — анкер считается "живым" только
+        // пока он и стоит, и остаётся выше Y63/открыт небу — см.
+        // MilitaryAnchorService.isExposed. Закопали уже стоявший якорь —
+        // на ближайшем же zones_sync он тихо перестаёт засчитываться, без
+        // отдельного слушателя за постройкой над ним.
+        Location anchorLoc = z.getMilitaryAnchorLocation();
+        boolean anchorExposed = anchorLoc != null && com.frammy.unitylauncher.military.MilitaryAnchorService.isExposed(anchorLoc);
+        o.addProperty("militaryAnchorPresent", anchorExposed);
+        // GH#32 (раунд 5, п.6) — "отображать точное местоположение сооружений
+        // по колоколу" — раньше сайт знал только да/нет, сам якорь не
+        // отдавался; координаты нужны только пока якорь реально жив
+        // (anchorExposed), иначе null — сайт падает обратно на центроид зоны.
+        o.addProperty("militaryAnchorX", anchorExposed ? anchorLoc.getX() : null);
+        o.addProperty("militaryAnchorZ", anchorExposed ? anchorLoc.getZ() : null);
+
+        return o;
+    }
+
+    /** CREATE/UPDATE_CORNERS/UPDATE_NAME/UPDATE_COLOR/DELETE/UPGRADE_TYPE/ADD_SHAPE/ADD_MEMBER/REMOVE_MEMBER/TRANSFER_OWNERSHIP. */
+    private void processMutation(FarLandsApiClient.PendingZoneRequest req) {
+        ZoneWebRequestService.Action action;
+        try {
+            action = ZoneWebRequestService.Action.valueOf(req.action());
+        } catch (IllegalArgumentException ex) {
+            api.reportZoneRequestResult(req.id(), false, "unknown_action", null);
+            return;
+        }
+
+        var player = Bukkit.getOfflinePlayer(req.username());
+        if (player.getName() == null) {
+            api.reportZoneRequestResult(req.id(), false, "user_not_found", null);
+            return;
+        }
+        UUID playerUuid = player.getUniqueId();
+
+        JsonObject payload = req.payload() != null ? req.payload() : new JsonObject();
+        ZoneWebRequestService.ZoneWebRequest webRequest = new ZoneWebRequestService.ZoneWebRequest(
+                0L, playerUuid, action, req.markerId(), req.zoneType(), req.zoneName(), req.worldName(), payload);
+
+        ZoneWebRequestHandler.Result result;
+        try {
+            result = zoneManager.handle(webRequest);
+        } catch (Throwable t) {
+            result = ZoneWebRequestHandler.Result.error("internal_error: " + t.getMessage());
+        }
+
+        api.reportZoneRequestResult(req.id(), result.success(), result.message(), result.markerId());
+    }
+}

@@ -1,0 +1,47 @@
+name: Build
+
+# Every push/PR builds the plugin jar (no secrets needed: DB and backend
+# credentials are read at runtime from plugins/UnityLauncher/secrets.properties).
+# A tag v* additionally publishes the jar as a GitHub Release, which is what the
+# game server should run.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: maven
+      - run: mvn -B -ntp package
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unityLauncher-${{ github.sha }}
+          path: target/unityLauncher-*.jar
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unityLauncher-${{ github.sha }}
+      - run: gh release create "$GITHUB_REF_NAME" unityLauncher-*.jar --repo "$GITHUB_REPOSITORY" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
