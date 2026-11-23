@@ -1204,21 +1204,41 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
         // entirely when the cache still isn't loaded is the fix — better to
         // skip this pass and retry next cycle (2 min later) than to trust
         // country-doesn't-exist answers from an empty cache.
-        ul.countryRegistryJdbc.forceRefreshBlocking();
+        // (forceRefreshBlocking() itself now runs async right before this,
+        // see startOrphanCountryZoneCleanup.)
         if (!ul.countryRegistryJdbc.isCacheLoaded()) {
             Bukkit.getLogger().warning("[Zones] cleanupOrphanCountryZones: countries cache still isn't loaded "
                     + "(DB not ready yet?) — skipping this pass rather than risk disbanding real countries.");
             return;
         }
 
+        // B5: loaded-but-wrong data (empty Countries after a migration, wrong
+        // DB name) would otherwise disband every country within one pass.
+        if (ul.countryRegistryJdbc.getAllCountryNames().isEmpty()) {
+            Bukkit.getLogger().warning("[Zones] cleanupOrphanCountryZones: Countries table is empty but there are "
+                    + countryZones.size() + " COUNTRY zones — skipping (wrong DB / migration?).");
+            return;
+        }
+        List<ZoneInfo> orphans = new ArrayList<>();
         for (ZoneInfo zi : countryZones) {
+            String countryName = zoneCountry(zi);
+            if (countryName == null || countryName.isBlank()) countryName = zi.getName();
+            if (!ul.countryRegistryJdbc.countryExistsCached(countryName)) orphans.add(zi);
+        }
+        if (orphans.size() > Math.max(1, countryZones.size() * 0.2)) { // one real orphan may go even on a small server
+            Bukkit.getLogger().warning("[Zones] cleanupOrphanCountryZones: " + orphans.size() + " of "
+                    + countryZones.size() + " COUNTRY zones have no country in the DB (>20% and more than one) — NOT disbanding. "
+                    + "Check the DB; remove legitimately dead countries with /ul zone remove.");
+            return;
+        }
+
+        for (ZoneInfo zi : orphans) {
             // маркер мог быть уже удалён предыдущей итерацией (одна COUNTRY-зона —
             // один маркер, но на всякий случай проверяем актуальность)
             if (!zoneList.containsKey(zi.getMarkerID())) continue;
 
             String countryName = zoneCountry(zi);
             if (countryName == null || countryName.isBlank()) countryName = zi.getName();
-            if (ul.countryRegistryJdbc.countryExistsCached(countryName)) continue;
 
             Bukkit.getLogger().info("[Zones] Обнаружена осиротевшая территория Государства \""
                     + countryName + "\" (страны больше нет в Countries) — удаляю.");
@@ -1229,18 +1249,16 @@ public class ZoneManager implements com.frammy.unitylauncher.zones.web.ZoneWebRe
 
     /**
      * Запускает периодическую чистку осиротевших территорий Государств (см.
-     * cleanupOrphanCountryZones). Остаётся на главном потоке намеренно —
-     * cleanupOrphanCountryZones/disbandCountryZoneCascade зовут
-     * Bukkit.broadcastMessage/getOnlinePlayers и мутируют zoneList/BlueMap
-     * напрямую, без самостоятельного ухода на главный поток (в отличие от
-     * записи в БД в конце каскада, которая уже async сама по себе).
-     * forceRefreshBlocking() внутри — блокирующий JDBC-вызов раз в 2 минуты;
-     * известная цена (небольшой хитч), не трогал — раскидывать эти
-     * Bukkit-вызовы по потокам отдельная, более рискованная задача, не то,
-     * о чём просили в этом заходе.
+     * cleanupOrphanCountryZones). Блокирующее обновление кэша стран
+     * (forceRefreshBlocking, JDBC) идёт в async-задаче; сама чистка —
+     * на главном потоке, т.к. cleanupOrphanCountryZones/disbandCountryZoneCascade
+     * зовут Bukkit.broadcastMessage/getOnlinePlayers и мутируют zoneList/BlueMap.
      */
     public void startOrphanCountryZoneCleanup(long periodTicks) {
-        Bukkit.getScheduler().runTaskTimer(ul, this::cleanupOrphanCountryZones, periodTicks, periodTicks);
+        Bukkit.getScheduler().runTaskTimerAsynchronously(ul, () -> {
+            ul.countryRegistryJdbc.forceRefreshBlocking();
+            Bukkit.getScheduler().runTask(ul, this::cleanupOrphanCountryZones);
+        }, periodTicks, periodTicks);
     }
 
     public void cancelRemoveZone(Player p) {

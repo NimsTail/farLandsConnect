@@ -15,6 +15,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 
 /**
@@ -36,6 +37,7 @@ public class ZoneRequestPoller {
     private final FarLandsApiClient api;
     private final ZoneManager zoneManager;
     private final Logger log;
+    private final AtomicBoolean busy = new AtomicBoolean();
 
     public ZoneRequestPoller(JavaPlugin plugin, FarLandsApiClient api, ZoneManager zoneManager, Logger log) {
         this.plugin = plugin;
@@ -51,11 +53,26 @@ public class ZoneRequestPoller {
     }
 
     private void pollOnce() {
-        List<FarLandsApiClient.PendingZoneRequest> batch = api.fetchPendingZoneRequests();
-        for (FarLandsApiClient.PendingZoneRequest req : batch) {
+        // The guard is held until the main-thread task below has processed the
+        // batch, so the next fetch can't pick up requests still being handled.
+        if (!busy.compareAndSet(false, true)) return;
+        boolean handedOff = false;
+        try {
+            List<FarLandsApiClient.PendingZoneRequest> batch = api.fetchPendingZoneRequests();
+            if (batch.isEmpty()) return;
             // ZoneManager touches Bukkit/world state directly, so — same as the
-            // MySQL-direct ZoneWebRequestService — every request runs on the main thread.
-            Bukkit.getScheduler().runTask(plugin, () -> process(req));
+            // MySQL-direct ZoneWebRequestService — requests run on the main thread.
+            // Result reports are async HTTP (FarLandsApiClient.sendResult).
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                try {
+                    for (FarLandsApiClient.PendingZoneRequest req : batch) process(req);
+                } finally {
+                    busy.set(false);
+                }
+            });
+            handedOff = true;
+        } finally {
+            if (!handedOff) busy.set(false);
         }
     }
 

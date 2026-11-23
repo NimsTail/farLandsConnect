@@ -514,9 +514,18 @@ public class UnityCommands {
             return;
         }
 
-        String raw = getDayDealRawFromCacheOrDB(p.getName());
-        DayDealParsed dd = parseDayDeal(raw);
+        // Чтение (кэш или БД) — в фоне; рука/инвентарь — на главном потоке.
+        UnityLauncher ul = UnityLauncher.getInstance();
+        String name = p.getName();
+        UnityLauncher.runDbAsync(() -> {
+            String raw = getDayDealRawFromCacheOrDB(name);
+            Bukkit.getScheduler().runTask(ul, () -> {
+                if (Bukkit.getPlayer(p.getUniqueId()) == p) dayDealCompleteMain(ul, p, parseDayDeal(raw)); // не вышел/не перезашёл
+            });
+        });
+    }
 
+    private void dayDealCompleteMain(UnityLauncher ul, Player p, DayDealParsed dd) {
         if (!dd.generated) {
             p.sendMessage(ChatColor.RED + "Дейлик ещё не сгенерирован.");
             return;
@@ -560,20 +569,8 @@ public class UnityCommands {
             return;
         }
 
-        // Помечаем как выполненный: "0;item;amount;price;rerolls[;materialKey]" —
-        // меняем только код, хвост (рероллы, ключ материала) сохраняем как был.
-        // Условный UPDATE: флип проходит, только если в БД всё ещё ровно это
-        // невыполненное задание. Раньше писали безусловно, а повторный вызов
-        // в окне async-обновления кэша видел старое значение и платил второй раз.
-        String newRaw = "0" + dd.raw.substring(dd.raw.indexOf(';'));
-        if (!flipDayDealIfUnchanged(p.getName(), dd.raw, newRaw)) {
-            refreshPlayerCacheAsync(p.getName());
-            p.sendMessage(ChatColor.YELLOW + "Дейлик уже выполнен или изменился. Попробуй ещё раз через пару секунд.");
-            return;
-        }
-        refreshPlayerCacheAsync(p.getName());
-
-        // Списываем из ведущей руки ровно нужное количество (тот же тик, рука проверена выше)
+        // Забираем предметы в том же тике, где проверили руку; БД — потом, в фоне.
+        // Если флип/выплата не пройдут — предметы возвращаются.
         org.bukkit.inventory.ItemStack taken = hand.clone();
         taken.setAmount(dd.amount);
         if (have == dd.amount) {
@@ -584,35 +581,66 @@ public class UnityCommands {
         }
 
         double baseTotal = dd.amount * dd.pricePerOne;
-        double total = applyEducationBonusMaybe(p, baseTotal);
+        double total = applyEducationBonusMaybe(p, baseTotal); // Bukkit API (локация, сообщение) — до ухода в фон
+        String name = p.getName();
 
-        boolean paid = addMoneyToPlayer(p.getName(), total);
-
-        if (!paid) {
+        // Помечаем как выполненный: "0;item;amount;price;rerolls[;materialKey]" —
+        // меняем только код, хвост (рероллы, ключ материала) сохраняем как был.
+        // Условный UPDATE: флип проходит, только если в БД всё ещё ровно это
+        // невыполненное задание. Раньше писали безусловно, а повторный вызов
+        // в окне async-обновления кэша видел старое значение и платил второй раз.
+        String newRaw = "0" + dd.raw.substring(dd.raw.indexOf(';'));
+        UnityLauncher.runDbAsync(() -> {
+            boolean flipped = flipDayDealIfUnchanged(name, dd.raw, newRaw);
+            boolean paid = flipped && addMoneyToPlayer(name, total);
             // Откатываем: задание снова открыто, предметы возвращаются игроку.
-            boolean reopened = flipDayDealIfUnchanged(p.getName(), newRaw, dd.raw);
-            refreshPlayerCacheAsync(p.getName());
-            p.getInventory().addItem(taken).values()
-                    .forEach(rest -> p.getWorld().dropItemNaturally(p.getLocation(), rest));
-            if (reopened) {
-                p.sendMessage(ChatColor.RED + "Не удалось начислить деньги (БД недоступна). Предметы возвращены, задание не закрыто — попробуй позже.");
-                return;
-            }
-            p.sendMessage(ChatColor.RED + "Не удалось начислить деньги (БД недоступна).");
-            p.sendMessage(ChatColor.GRAY + "DayDeal (для компенсации):");
-            p.sendMessage(ChatColor.GRAY + "Предмет: " + ChatColor.WHITE + dd.itemName);
-            p.sendMessage(ChatColor.GRAY + "Количество: " + ChatColor.WHITE + dd.amount);
-            p.sendMessage(ChatColor.GRAY + "Цена за штуку: " + ChatColor.WHITE +
-                    String.format(java.util.Locale.US, "%.2f", dd.pricePerOne));
-            p.sendMessage(ChatColor.GRAY + "Итого: " + ChatColor.GOLD +
-                    String.format(java.util.Locale.US, "%.2f", total) + ChatColor.GRAY + " Ⓕ");
-            p.sendMessage(ChatColor.DARK_GRAY + "Скриншотни это сообщение и отправь администратору.");
+            boolean reopened = flipped && !paid && flipDayDealIfUnchanged(name, newRaw, dd.raw);
+            refreshPlayerCacheAsync(name);
 
-        } else {
-            p.sendMessage(ChatColor.GREEN + "Дейлик выполнен!");
-            p.sendMessage(ChatColor.GRAY + "Получено: " + ChatColor.GOLD +
-                    String.format(java.util.Locale.US, "%.2f", total) + ChatColor.GRAY + " Ⓕ");
-        }
+            // Предметы уже забраны; возврат — на главном потоке, которого при выключении
+            // может уже не быть. Пишем след для компенсации заранее, здесь.
+            String refundNote = "[UnityCommands] dayDealComplete: " + name + " is owed back " + dd.amount + "x "
+                    + taken.getType() + " (flipped=" + flipped + ", reopened=" + reopened + ", total="
+                    + String.format(java.util.Locale.US, "%.2f", total) + ")";
+            if (!paid) Bukkit.getLogger().warning(refundNote + " — returning items; if no refund follows (server stop), compensate manually.");
+
+            try {
+                Bukkit.getScheduler().runTask(ul, () -> {
+                    if (paid) {
+                        p.sendMessage(ChatColor.GREEN + "Дейлик выполнен!");
+                        p.sendMessage(ChatColor.GRAY + "Получено: " + ChatColor.GOLD +
+                                String.format(java.util.Locale.US, "%.2f", total) + ChatColor.GRAY + " Ⓕ");
+                        return;
+                    }
+                    if (Bukkit.getPlayer(p.getUniqueId()) != p) {
+                        // addItem на вышедшего игрока потеряется — оставляем след для компенсации.
+                        Bukkit.getLogger().warning(refundNote + " — player left before refund, compensate manually.");
+                        return;
+                    }
+                    p.getInventory().addItem(taken).values()
+                            .forEach(rest -> p.getWorld().dropItemNaturally(p.getLocation(), rest));
+                    if (!flipped) {
+                        p.sendMessage(ChatColor.YELLOW + "Дейлик уже выполнен или изменился. Попробуй ещё раз через пару секунд.");
+                        return;
+                    }
+                    if (reopened) {
+                        p.sendMessage(ChatColor.RED + "Не удалось начислить деньги (БД недоступна). Предметы возвращены, задание не закрыто — попробуй позже.");
+                        return;
+                    }
+                    p.sendMessage(ChatColor.RED + "Не удалось начислить деньги (БД недоступна).");
+                    p.sendMessage(ChatColor.GRAY + "DayDeal (для компенсации):");
+                    p.sendMessage(ChatColor.GRAY + "Предмет: " + ChatColor.WHITE + dd.itemName);
+                    p.sendMessage(ChatColor.GRAY + "Количество: " + ChatColor.WHITE + dd.amount);
+                    p.sendMessage(ChatColor.GRAY + "Цена за штуку: " + ChatColor.WHITE +
+                            String.format(java.util.Locale.US, "%.2f", dd.pricePerOne));
+                    p.sendMessage(ChatColor.GRAY + "Итого: " + ChatColor.GOLD +
+                            String.format(java.util.Locale.US, "%.2f", total) + ChatColor.GRAY + " Ⓕ");
+                    p.sendMessage(ChatColor.DARK_GRAY + "Скриншотни это сообщение и отправь администратору.");
+                });
+            } catch (org.bukkit.plugin.IllegalPluginAccessException disabled) { // plugin is disabling
+                if (!paid) Bukkit.getLogger().severe(refundNote + " — plugin disabled before refund, compensate manually.");
+            }
+        });
     }
 
     /** dayDealCode: expected -> next, только если в БД сейчас ровно expected. true = флип прошёл. */
@@ -917,19 +945,40 @@ public class UnityCommands {
             return;
         }
 
-        boolean ok = auth.checkPassword(p.getName(), oldPass.toCharArray());
-        if (!ok) {
-            sender.sendMessage(ChatColor.RED + "Старый пароль неверен.");
-            return;
-        }
-        boolean upd = auth.setNewPassword(p.getName(), newPass.toCharArray());
-        if (!upd) {
-            sender.sendMessage(ChatColor.RED + "Не удалось сохранить новый пароль.");
-            return;
-        }
+        // Две PBKDF2 + UPDATE — в фоне; limiter, in-flight и сообщение — на главном потоке.
+        // Тот же limiter и ключ, что у /login: подбор старого пароля здесь не обходит его.
+        String name = p.getName();
         String ip = (p.getAddress()!=null) ? p.getAddress().getAddress().getHostAddress() : "unknown";
-        auth.markSession(p.getName(), ip);
-        sender.sendMessage(ChatColor.GREEN + "Пароль изменён.");
+        UnityLauncher ul = UnityLauncher.getInstance();
+        var limiter = ul.getLoginLimiter();
+        String key = p.getUniqueId() + "|" + (p.getAddress() != null ? ip : "");
+        long waitSec = limiter.checkAllowed(key);
+        if (waitSec > 0) {
+            sender.sendMessage(ChatColor.RED + "Слишком много неверных попыток. Подожди " + waitSec + " сек.");
+            return;
+        }
+        java.util.UUID id = p.getUniqueId();
+        if (!limiter.tryBeginCheck(id)) {
+            sender.sendMessage(ChatColor.YELLOW + "Проверяем пароль, подожди секунду...");
+            return;
+        }
+        UnityLauncher.runDbAsync(() -> {
+            boolean oldOk = auth.checkPassword(name, oldPass.toCharArray());
+            String msg;
+            if (!oldOk) {
+                msg = ChatColor.RED + "Старый пароль неверен.";
+            } else if (!auth.setNewPassword(name, newPass.toCharArray())) {
+                msg = ChatColor.RED + "Не удалось сохранить новый пароль.";
+            } else {
+                auth.markSession(name, ip);
+                msg = ChatColor.GREEN + "Пароль изменён.";
+            }
+            Bukkit.getScheduler().runTask(ul, () -> {
+                limiter.endCheck(id);
+                if (oldOk) limiter.reset(key); else limiter.registerFailure(key);
+                p.sendMessage(msg);
+            });
+        });
     }
 
     /* ===================== Внутренние JSON/SQL утилиты ===================== */

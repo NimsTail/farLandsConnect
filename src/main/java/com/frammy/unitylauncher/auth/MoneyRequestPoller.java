@@ -5,6 +5,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 
 /**
@@ -22,6 +23,7 @@ public class MoneyRequestPoller {
     private final JavaPlugin plugin;
     private final FarLandsApiClient api;
     private final Logger log;
+    private final AtomicBoolean busy = new AtomicBoolean();
 
     public MoneyRequestPoller(JavaPlugin plugin, FarLandsApiClient api, Logger log) {
         this.plugin = plugin;
@@ -36,12 +38,17 @@ public class MoneyRequestPoller {
     }
 
     private void pollOnce() {
-        List<FarLandsApiClient.PendingMoneyRequest> batch = api.fetchPendingMoneyRequests();
-        for (FarLandsApiClient.PendingMoneyRequest req : batch) {
-            // applyMoneyDelta touches the DB directly (no Bukkit API), but keeping all
-            // money movement on the main thread avoids racing other in-game economy
-            // actions (shop trades, zone billing) that also go through it.
-            Bukkit.getScheduler().runTask(plugin, () -> process(req));
+        // Async timer runs can overlap if a DB/HTTP stall outlasts the period.
+        if (!busy.compareAndSet(false, true)) return;
+        try {
+            // Runs entirely on this async thread, one request after another: nothing
+            // below touches the Bukkit API, and applyMoneyDelta/transferMoney lock
+            // the rows FOR UPDATE, so they can't race in-game economy actions.
+            for (FarLandsApiClient.PendingMoneyRequest req : api.fetchPendingMoneyRequests()) {
+                com.frammy.unitylauncher.UnityLauncher.trackDb(() -> process(req));
+            }
+        } finally {
+            busy.set(false);
         }
     }
 

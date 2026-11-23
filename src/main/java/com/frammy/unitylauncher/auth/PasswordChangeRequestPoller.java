@@ -3,7 +3,7 @@ package com.frammy.unitylauncher.auth;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.java.JavaPlugin;
 
-import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.logging.Logger;
 
 /**
@@ -24,6 +24,7 @@ public class PasswordChangeRequestPoller {
     private final FarLandsApiClient api;
     private final AuthService authService;
     private final Logger log;
+    private final AtomicBoolean busy = new AtomicBoolean();
 
     public PasswordChangeRequestPoller(JavaPlugin plugin, FarLandsApiClient api, AuthService authService, Logger log) {
         this.plugin = plugin;
@@ -39,9 +40,14 @@ public class PasswordChangeRequestPoller {
     }
 
     private void pollOnce() {
-        List<FarLandsApiClient.PendingPasswordRequest> batch = api.fetchPendingPasswordRequests();
-        for (FarLandsApiClient.PendingPasswordRequest req : batch) {
-            Bukkit.getScheduler().runTask(plugin, () -> process(req));
+        if (!busy.compareAndSet(false, true)) return; // previous cycle still running
+        try {
+            // PBKDF2 + UPDATE stay on this async thread: no Bukkit API involved.
+            for (FarLandsApiClient.PendingPasswordRequest req : api.fetchPendingPasswordRequests()) {
+                com.frammy.unitylauncher.UnityLauncher.trackDb(() -> process(req));
+            }
+        } finally {
+            busy.set(false);
         }
     }
 
