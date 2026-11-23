@@ -363,6 +363,14 @@ public class Unity implements CommandExecutor {
         if (args.length == 1) {
             String sub = args[0].toLowerCase(Locale.ROOT);
 
+            // Admin-only: fsnap re-bills every zone (adds the daily tax to each
+            // country's invoice again on every call).
+            if ((sub.equals("expo") || sub.equals("fsnap") || sub.equals("blist"))
+                    && !p.hasPermission("unitylauncher.admin")) {
+                p.sendMessage(ChatColor.RED + "Нет прав.");
+                return true;
+            }
+
             switch (sub) {
                 case "expo": {
                     // тепловая карта активности чанков

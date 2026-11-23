@@ -1,7 +1,7 @@
 name: UnityLauncher
 version: '${project.version}'
 main: com.frammy.unitylauncher.UnityLauncher
-api-version: 1.20
+api-version: '1.21'
 authors: [ frammy, NimsTail ]
 description: Connects with our Unity launcher
 prefix: Unity Launcher
@@ -40,6 +40,9 @@ permissions:
     default: op
   unitylauncher.use:
     default: true
+  unitylauncher.admin:
+    description: Admin zone tools (/ul expo, fsnap, blist)
+    default: op
   unitylauncher.reload:
     description: Reload UnityLauncher configs and upgrades
     default: op

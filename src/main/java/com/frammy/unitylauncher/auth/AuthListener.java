@@ -148,16 +148,18 @@ public class AuthListener implements Listener {
         if (blockIfNotAuth(e.getPlayer())) e.setCancelled(true);
     }
 
+    private static final java.util.Set<String> PRE_LOGIN_COMMANDS =
+            java.util.Set.of("/login", "/l", "/register", "/reg");
+
     @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGHEST)
     public void onCmd(PlayerCommandPreprocessEvent e) {
         Player p = e.getPlayer();
         if (isAuthenticated(p)) return;
 
-        String msg = e.getMessage().toLowerCase(Locale.ROOT).trim();
-        if (msg.startsWith("/login") || msg.startsWith("/l") ||
-                msg.startsWith("/register") || msg.startsWith("/reg")) {
-            return;
-        }
+        // Exact command names only: a prefix check also let /lp, /luckperms,
+        // /loot etc. through before login (offline-mode server, nick spoofing).
+        String cmd = e.getMessage().trim().split("\\s+", 2)[0].toLowerCase(Locale.ROOT);
+        if (PRE_LOGIN_COMMANDS.contains(cmd)) return;
 
         e.setCancelled(true);
         blockIfNotAuth(p);
