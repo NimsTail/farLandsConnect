@@ -560,20 +560,26 @@ public class UnityCommands {
             return;
         }
 
-        // Списываем из ведущей руки ровно нужное количество
+        // Помечаем как выполненный: "0;item;amount;price;rerolls[;materialKey]" —
+        // меняем только код, хвост (рероллы, ключ материала) сохраняем как был.
+        // Условный UPDATE: флип проходит, только если в БД всё ещё ровно это
+        // невыполненное задание. Раньше писали безусловно, а повторный вызов
+        // в окне async-обновления кэша видел старое значение и платил второй раз.
+        String newRaw = "0" + dd.raw.substring(dd.raw.indexOf(';'));
+        if (!flipDayDealIfUnchanged(p.getName(), dd.raw, newRaw)) {
+            refreshPlayerCacheAsync(p.getName());
+            p.sendMessage(ChatColor.YELLOW + "Дейлик уже выполнен или изменился. Попробуй ещё раз через пару секунд.");
+            return;
+        }
+        refreshPlayerCacheAsync(p.getName());
+
+        // Списываем из ведущей руки ровно нужное количество (тот же тик, рука проверена выше)
         if (have == dd.amount) {
             p.getInventory().setItemInMainHand(null);
         } else {
             hand.setAmount(have - dd.amount);
             p.getInventory().setItemInMainHand(hand);
         }
-
-        // Помечаем как выполненный: "0;item;amount;price;rerolls[;materialKey]" —
-        // меняем только код, хвост (рероллы, ключ материала) сохраняем как был
-        String newRaw = "0" + dd.raw.substring(dd.raw.indexOf(';'));
-
-        // Запись в GeneralData.dayDealCode + обновление кэша через mergeAndUpdatePlayerData
-        mergeAndUpdatePlayerData(p.getName(), "GeneralData", java.util.Map.of("dayDealCode", newRaw));
 
         double baseTotal = dd.amount * dd.pricePerOne;
         double total = applyEducationBonusMaybe(p, baseTotal);
@@ -595,6 +601,24 @@ public class UnityCommands {
             p.sendMessage(ChatColor.GREEN + "Дейлик выполнен!");
             p.sendMessage(ChatColor.GRAY + "Получено: " + ChatColor.GOLD +
                     String.format(java.util.Locale.US, "%.2f", total) + ChatColor.GRAY + " Ⓕ");
+        }
+    }
+
+    /** dayDealCode: expected -> next, только если в БД сейчас ровно expected. true = флип прошёл. */
+    private boolean flipDayDealIfUnchanged(String playerName, String expected, String next) {
+        String sql = "UPDATE Users SET GeneralData = JSON_SET(GeneralData, '$.dayDealCode', ?) "
+                + "WHERE Name = ? AND TRIM(JSON_UNQUOTE(JSON_EXTRACT(GeneralData, '$.dayDealCode'))) = ?";
+        try (Connection con = DBConnect()) {
+            if (con == null) return false;
+            try (PreparedStatement ps = con.prepareStatement(sql)) {
+                ps.setString(1, next);
+                ps.setString(2, playerName);
+                ps.setString(3, expected);
+                return ps.executeUpdate() == 1;
+            }
+        } catch (Exception e) {
+            Bukkit.getLogger().warning("[UnityCommands] flipDayDealIfUnchanged failed: " + e);
+            return false;
         }
     }
 
