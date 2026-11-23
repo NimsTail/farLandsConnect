@@ -191,7 +191,7 @@ public class MoneyRequestPoller {
             api.reportMoneyRequestResult(req.id(), false, "missing_username");
             return;
         }
-        boolean debited = UnityCommands.getInstance().applyMoneyDelta(req.fromUsername(), -req.amount(), "Пополнение казны страны");
+        boolean debited = UnityCommands.getInstance().applyMoneyDelta(req.fromUsername(), -req.amount(), null, false); // silent: routes/countries/treasury.ts пишет свою запись country_treasury_deposit и двигает зеркало сам
         api.reportMoneyRequestResult(req.id(), debited, debited ? null : "insufficient_funds");
     }
 
@@ -207,7 +207,7 @@ public class MoneyRequestPoller {
             api.reportMoneyRequestResult(req.id(), false, "missing_username");
             return;
         }
-        boolean credited = UnityCommands.getInstance().applyMoneyDelta(req.toUsername(), req.amount(), "Снятие из казны страны");
+        boolean credited = UnityCommands.getInstance().applyMoneyDelta(req.toUsername(), req.amount(), null, false); // silent: сайт сам пишет country_treasury_withdraw и двигает зеркало
         api.reportMoneyRequestResult(req.id(), credited, credited ? null : "user_not_found");
     }
 
