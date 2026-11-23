@@ -671,6 +671,7 @@ public class FarLandsApiClient {
         } else {
             o.add("durabilityPct", com.google.gson.JsonNull.INSTANCE);
         }
+        if (it.colorHex() != null) o.addProperty("colorHex", it.colorHex());
         return o;
     }
 

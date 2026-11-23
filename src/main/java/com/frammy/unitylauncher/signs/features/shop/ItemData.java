@@ -22,7 +22,9 @@ public record ItemData(
         // Средний % оставшейся прочности по всем стакам этого варианта
         // (100 = новый, 0 = вот-вот сломается), null — материал без
         // прочности (блоки, еда и т.п.).
-        Double durabilityPct
+        Double durabilityPct,
+        // #40 — цвет окраски ("#RRGGBB", кожаная броня и т.п.), null — не крашено.
+        String colorHex
 ) {
     public ItemData {
         Objects.requireNonNull(chestLocation, "chestLocation");

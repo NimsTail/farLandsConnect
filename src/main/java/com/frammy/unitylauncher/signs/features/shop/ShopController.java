@@ -921,7 +921,7 @@ public final class ShopController {
         final int qty = item.dealQuantity();
         final Location chestLoc = SignStore.keyLoc(item.chestLocation());
         // вариант лота (как в ShopListUpdater): выдаём только его, а не первый стак сундука
-        final String variantSig = item.enchantments() == null ? "" : String.join(",", item.enchantments());
+        final String variantSig = ShopListUpdater.variantSig(item.enchantments(), item.colorHex());
 
         final boolean payWithCash = isCashInHand(p);
         final String saleNote = shopSaleNote(loc, qty, mat, p.getName());
@@ -1228,7 +1228,7 @@ public final class ShopController {
             for (int i = 0; i < inv.getSize() && have < qty; i++) {
                 ItemStack it = inv.getItem(i);
                 if (it == null || it.getType() != mat) continue;
-                if (enchantSig != null && !enchantSig.equals(String.join(",", ShopListUpdater.enchantSlugsOf(it)))) continue;
+                if (enchantSig != null && !enchantSig.equals(ShopListUpdater.variantSig(it))) continue;
                 slots.add(i);
                 have += it.getAmount();
             }
