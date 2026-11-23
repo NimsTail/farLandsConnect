@@ -1,7 +1,7 @@
 name: UnityLauncher
 version: '${project.version}'
 main: com.frammy.unitylauncher.UnityLauncher
-api-version: '1.21'
+api-version: '26.3'
 authors: [ frammy, NimsTail ]
 description: Connects with our Unity launcher
 prefix: Unity Launcher
