@@ -945,13 +945,27 @@ public class UnityCommands {
             return;
         }
 
-        // Две PBKDF2 + UPDATE — в фоне, сообщение — на главном потоке.
+        // Две PBKDF2 + UPDATE — в фоне; limiter, in-flight и сообщение — на главном потоке.
+        // Тот же limiter и ключ, что у /login: подбор старого пароля здесь не обходит его.
         String name = p.getName();
         String ip = (p.getAddress()!=null) ? p.getAddress().getAddress().getHostAddress() : "unknown";
         UnityLauncher ul = UnityLauncher.getInstance();
-        Bukkit.getScheduler().runTaskAsynchronously(ul, () -> {
+        var limiter = ul.getLoginLimiter();
+        String key = p.getUniqueId() + "|" + (p.getAddress() != null ? ip : "");
+        long waitSec = limiter.checkAllowed(key);
+        if (waitSec > 0) {
+            sender.sendMessage(ChatColor.RED + "Слишком много неверных попыток. Подожди " + waitSec + " сек.");
+            return;
+        }
+        java.util.UUID id = p.getUniqueId();
+        if (!limiter.tryBeginCheck(id)) {
+            sender.sendMessage(ChatColor.YELLOW + "Проверяем пароль, подожди секунду...");
+            return;
+        }
+        UnityLauncher.runDbAsync(() -> {
+            boolean oldOk = auth.checkPassword(name, oldPass.toCharArray());
             String msg;
-            if (!auth.checkPassword(name, oldPass.toCharArray())) {
+            if (!oldOk) {
                 msg = ChatColor.RED + "Старый пароль неверен.";
             } else if (!auth.setNewPassword(name, newPass.toCharArray())) {
                 msg = ChatColor.RED + "Не удалось сохранить новый пароль.";
@@ -959,7 +973,11 @@ public class UnityCommands {
                 auth.markSession(name, ip);
                 msg = ChatColor.GREEN + "Пароль изменён.";
             }
-            Bukkit.getScheduler().runTask(ul, () -> p.sendMessage(msg));
+            Bukkit.getScheduler().runTask(ul, () -> {
+                limiter.endCheck(id);
+                if (oldOk) limiter.reset(key); else limiter.registerFailure(key);
+                p.sendMessage(msg);
+            });
         });
     }
 

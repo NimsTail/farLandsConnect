@@ -31,7 +31,6 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
-import java.util.Set;
 import java.util.UUID;
 
 public class Unity implements CommandExecutor {
@@ -42,8 +41,6 @@ public class Unity implements CommandExecutor {
     private final WebSocketManager webSocketManager;
     private final ActivityTracker tracker;
     private final ZoneManager zoneManager;
-    /** /login, /register: one async PBKDF2/DB check per player at a time (main thread only). */
-    private final Set<UUID> authInFlight = new java.util.HashSet<>();
 
     public Unity(HelpCommandManager helpManager,
                  WebSocketManager webSocketManager,
@@ -92,7 +89,7 @@ public class Unity implements CommandExecutor {
 
             // Без этого пачка /login до первого ответа обошла бы limiter.
             UUID id = p.getUniqueId();
-            if (!authInFlight.add(id)) {
+            if (!limiter.tryBeginCheck(id)) {
                 p.sendMessage(ChatColor.YELLOW + "Проверяем пароль, подожди секунду...");
                 return true;
             }
@@ -106,7 +103,7 @@ public class Unity implements CommandExecutor {
                     auth.updateCacheAfterSession(name, System.currentTimeMillis(), ip);
                 }
                 Bukkit.getScheduler().runTask(plugin, () -> {
-                    authInFlight.remove(id);
+                    limiter.endCheck(id);
                     if (ok) {
                         limiter.reset(key);
                         if (Bukkit.getPlayer(id) == p) authListener.completeLogin(p); // не вышел/не перезашёл
@@ -134,9 +131,10 @@ public class Unity implements CommandExecutor {
             UnityLauncher plugin = UnityLauncher.getInstance();
             var auth         = plugin.getAuthService();
             var authListener = plugin.getAuthListener();
+            var limiter      = plugin.getLoginLimiter();
 
             UUID id = p.getUniqueId();
-            if (!authInFlight.add(id)) {
+            if (!limiter.tryBeginCheck(id)) {
                 p.sendMessage(ChatColor.YELLOW + "Проверяем пароль, подожди секунду...");
                 return true;
             }
@@ -162,7 +160,7 @@ public class Unity implements CommandExecutor {
                     auth.updateCacheAfterSession(name, System.currentTimeMillis(), ip);
                 }
                 Bukkit.getScheduler().runTask(plugin, () -> {
-                    authInFlight.remove(id);
+                    limiter.endCheck(id);
                     if (fail != null) p.sendMessage(fail);
                     else if (Bukkit.getPlayer(id) == p) authListener.completeRegister(p);
                 });
