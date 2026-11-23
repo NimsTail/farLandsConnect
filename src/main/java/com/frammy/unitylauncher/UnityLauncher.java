@@ -762,13 +762,20 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         Properties cached = DB_PROPS;
         if (cached != null) return cached;
 
+        // DB credentials live only on the server, in plugins/UnityLauncher/secrets.properties
+        // (db.url / db.user / db.password), never inside the jar: the repo is public and
+        // the jar is built by GitHub Actions.
         Properties props = new Properties();
-        try (InputStream input = UnityLauncher.class.getClassLoader().getResourceAsStream("db.properties")) {
-            if (input == null) {
-                Bukkit.getLogger().severe("[UL] db.properties not found in resources!");
-                throw new IllegalStateException("db.properties not found");
+        UnityLauncher inst = UnityLauncher.getInstance();
+        if (inst == null) throw new IllegalStateException("plugin not initialized");
+        java.io.File f = new java.io.File(inst.getDataFolder(), "secrets.properties");
+        if (f.exists()) {
+            try (InputStream input = new java.io.FileInputStream(f)) {
+                props.load(input);
             }
-            props.load(input);
+        }
+        if (props.getProperty("db.url", "").isBlank()) {
+            Bukkit.getLogger().severe("[UL] db.url/db.user/db.password missing in " + f.getPath());
         }
         DB_PROPS = props;
         return props;
@@ -830,8 +837,13 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
                 out.println("auth.keyLen=256");
                 out.println("auth.ttlMs=86400000");
                 out.println();
+                out.println("# MySQL (required)");
+                out.println("# db.url=jdbc:mysql://host:3306/db");
+                out.println("# db.user=");
+                out.println("# db.password=");
+                out.println();
                 out.println("# farlandsconnect backend bridge (auth mirror) — leave empty to disable");
-                out.println("# backend.apiBaseUrl=https://farlands.frammy.lat");
+                out.println("# backend.apiBaseUrl=https://farlands.frammy.lv");
                 out.println("# backend.apiToken=");
             }
         }
