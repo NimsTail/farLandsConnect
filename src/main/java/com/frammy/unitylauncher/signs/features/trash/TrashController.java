@@ -99,34 +99,41 @@ public final class TrashController {
             return;
         }
 
-        // Всё совпало — идём продавать (далее твоя старая логика, но строго по now.snap)
+        // Всё совпало — сначала забираем предметы (main thread, тот же тик, что и
+        // пересканирование), и только потом начисляем деньги атомарной дельтой.
+        // Раньше деньги писались первыми абсолютным значением из кэша, а удаление
+        // пропускало изменённые слоты/офлайн — можно было получить деньги и
+        // оставить предметы себе.
+        pending.remove(id);
+        Map<Integer, ItemStack> taken = applyTrashRemoval(p, now.slots());
+        if (taken == null) {
+            p.sendMessage(ChatColor.YELLOW + "Инвентарь изменился во время сдачи. Отмена, нажми табличку ещё раз.");
+            return;
+        }
+
         p.sendMessage(ChatColor.GRAY + "Сдаём мусор...");
-
-        UnityCommands.getInstance().getPlayerInfo(p.getName(), data -> {
-            if (data == null) {
-                Bukkit.getScheduler().runTask(plugin, () ->
-                        p.sendMessage(ChatColor.RED + "Не удалось получить твои данные. Сообщи администрации.")
-                );
-                return;
-            }
-
-            Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                double newMoney = round2(data.money + now.totalReward);
-                Map<String, Object> updates = new HashMap<>();
-                updates.put("money", newMoney);
-                UnityCommands.getInstance().mergeAndUpdatePlayerData(p.getName(), "GeneralData", updates);
-
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    if (!p.isOnline()) return;
-
-                    // удаляем строго то, что пересканили при confirm
-                    applyTrashRemoval(p, now.slots());
-
-                    pending.remove(id);
-
-                    p.sendMessage(ChatColor.GREEN + "Сдано мусора: " + ChatColor.YELLOW + now.totalItems + ChatColor.GREEN + " шт.");
-                    p.sendMessage(ChatColor.GREEN + "Зачислено: " + ChatColor.YELLOW + now.totalReward + ChatColor.GREEN + " Ⓕ.");
-                });
+        String name = p.getName();
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            boolean ok = UnityCommands.getInstance().applyMoneyDelta(name, now.totalReward(), "Сдача мусора");
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                if (ok) {
+                    if (p.isOnline()) {
+                        p.sendMessage(ChatColor.GREEN + "Сдано мусора: " + ChatColor.YELLOW + now.totalItems() + ChatColor.GREEN + " шт.");
+                        p.sendMessage(ChatColor.GREEN + "Зачислено: " + ChatColor.YELLOW + now.totalReward() + ChatColor.GREEN + " Ⓕ.");
+                    }
+                    return;
+                }
+                // начисление не прошло — возвращаем предметы
+                if (!p.isOnline()) {
+                    plugin.getLogger().severe("[Trash] начисление " + now.totalReward() + " игроку " + name
+                            + " не прошло, игрок вышел — предметы не возвращены: " + taken.values());
+                    return;
+                }
+                for (ItemStack it : taken.values()) {
+                    p.getInventory().addItem(it).values()
+                            .forEach(left -> p.getWorld().dropItemNaturally(p.getLocation(), left));
+                }
+                p.sendMessage(ChatColor.RED + "Не удалось начислить деньги (БД). Предметы возвращены.");
             });
         });
     }
@@ -246,17 +253,19 @@ public final class TrashController {
         return new TrashSnap(round2(totalReward), totalItems, slots, lines);
     }
 
-    private void applyTrashRemoval(Player p, Map<Integer, ItemStack> slots) {
+    /** Удаляет ровно снятые слоты; если хоть один изменился — ничего не трогает и возвращает null. */
+    private Map<Integer, ItemStack> applyTrashRemoval(Player p, Map<Integer, ItemStack> slots) {
+        if (!p.isOnline()) return null;
         Inventory inv = p.getInventory();
         for (var e : slots.entrySet()) {
-            int slot = e.getKey();
-            ItemStack expected = e.getValue();
-
-            ItemStack cur = inv.getItem(slot);
-            if (!sameStack(expected, cur)) continue; // предмет поменяли — не трогаем
-
-            inv.setItem(slot, null);
+            if (!sameStack(e.getValue(), inv.getItem(e.getKey()))) return null;
         }
+        Map<Integer, ItemStack> taken = new HashMap<>();
+        for (var e : slots.entrySet()) {
+            taken.put(e.getKey(), e.getValue().clone());
+            inv.setItem(e.getKey(), null);
+        }
+        return taken;
     }
 
 }
