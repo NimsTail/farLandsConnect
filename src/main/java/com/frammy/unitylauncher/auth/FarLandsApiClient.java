@@ -706,6 +706,51 @@ public class FarLandsApiClient {
         return o;
     }
 
+    // ===== чат на карте (routes/plugin/mapChat.ts) =====
+
+    public record MapChatMessage(String id, String authorName, String text) {}
+
+    /** Не идемпотентно (каждый вызов — новая строка), поэтому одна попытка. */
+    public void postMapChatMessage(String username, String text) {
+        JsonObject body = new JsonObject();
+        body.addProperty("username", username);
+        body.addProperty("text", text);
+        send("POST", "/plugin/map-chat/incoming", body);
+    }
+
+    /** Blocking GET; сайт переводит выданные сообщения в processing. */
+    public List<MapChatMessage> fetchPendingMapChat() {
+        List<MapChatMessage> out = new ArrayList<>();
+        if (!isEnabled()) return out;
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/plugin/map-chat/pending"))
+                    .timeout(Duration.ofSeconds(10))
+                    .header("Authorization", "Bearer " + token)
+                    .GET()
+                    .build();
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 300) {
+                log.warning("[FarLandsApi] GET /plugin/map-chat/pending -> HTTP " + response.statusCode());
+                return out;
+            }
+            JsonObject body = GSON.fromJson(response.body(), JsonObject.class);
+            for (JsonElement el : body.getAsJsonArray("messages")) {
+                JsonObject o = el.getAsJsonObject();
+                out.add(new MapChatMessage(o.get("id").getAsString(),
+                        o.get("authorName").getAsString(), o.get("text").getAsString()));
+            }
+        } catch (Exception e) {
+            log.warning("[FarLandsApi] fetchPendingMapChat failed: " + e);
+        }
+        return out;
+    }
+
+    /** processing -> delivered; повтор получает 404, так что повторы безопасны. */
+    public void reportMapChatDelivered(String id) {
+        sendResult("/plugin/map-chat/" + encode(id) + "/delivered", new JsonObject());
+    }
+
     public record WarPair(String countryA, String countryB) {}
 
     /** Blocking GET — called from WarStatusCache's own scheduler thread (mirrors fetchPendingCountryCreateRequests). Country NAMES, not site cuids — see routes/plugin.ts. */

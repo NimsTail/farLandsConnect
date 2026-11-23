@@ -479,6 +479,9 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         getServer().getPluginManager().registerEvents(phantomDelivery, this);
         phantomDelivery.start(20L); // ~1s
 
+        // Чат на карте BlueMap: игра <-> сайт.
+        new com.frammy.unitylauncher.marketplace.MapChatBridge(this, farLandsApi).start(40L); // ~2s
+
         // --- server messages (join/quit/advancement phrases) ---
         this.serverMessagesListener = ServerMessagesListener.init(this);
 
