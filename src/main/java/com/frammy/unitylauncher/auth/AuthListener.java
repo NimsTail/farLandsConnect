@@ -1,6 +1,7 @@
 package com.frammy.unitylauncher.auth;
 
 import com.frammy.unitylauncher.UnityLauncher;
+import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.GameMode;
 import org.bukkit.entity.Player;
@@ -20,21 +21,25 @@ import java.util.concurrent.ConcurrentHashMap;
 
 public class AuthListener implements Listener {
 
+    private final UnityLauncher plugin;
     private final AuthService auth;
+    /** Joined, async registration/session check still running: blocked like needLogin. Value = per-join token. */
+    private final Map<UUID, Object> pendingCheck = new ConcurrentHashMap<>();
     private final Set<UUID> needLogin = ConcurrentHashMap.newKeySet();
     private final Set<UUID> needRegister = ConcurrentHashMap.newKeySet();
-    private final Map<UUID, String> joinIp = new ConcurrentHashMap<>();
     private final AuthBossbarManager bossbars;
     private final Map<UUID, Long> lastPrompt = new ConcurrentHashMap<>();
     private static final long PROMPT_COOLDOWN_MS = 3000L; // раз в 3 секунды максимум
 
     public AuthListener(UnityLauncher plugin, AuthService auth, AuthBossbarManager bossbars) {
+        this.plugin = plugin;
         this.auth = auth;
         this.bossbars = bossbars;
     }
 
     public boolean isAuthenticated(Player p) {
-        return !(needLogin.contains(p.getUniqueId()) || needRegister.contains(p.getUniqueId()));
+        UUID id = p.getUniqueId();
+        return !(pendingCheck.containsKey(id) || needLogin.contains(id) || needRegister.contains(id));
     }
 
     /* --------- JOIN/QUIT --------- */
@@ -42,27 +47,40 @@ public class AuthListener implements Listener {
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onJoin(PlayerJoinEvent e) {
         Player p = e.getPlayer();
+        UUID id = p.getUniqueId();
+        String name = p.getName();
         String ip = (p.getAddress() != null) ? p.getAddress().getAddress().getHostAddress() : null;
-        joinIp.put(p.getUniqueId(), ip);
 
-        boolean hasPass = auth.isRegistered(p.getName());
+        // Блокируем сразу: проверка ниже идёт в БД асинхронно, и до её ответа
+        // игрок не считается вошедшим (isAuthenticated смотрит pendingCheck).
+        Object token = new Object();
+        pendingCheck.put(id, token);
 
-        // валидная сессия?
-        if (hasPass && auth.isSessionValid(p.getName(), ip)) {
-            send(p, ChatColor.GREEN + "Сессия подтверждена — добро пожаловать!");
-            return;
-        }
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            boolean hasPass = auth.isRegistered(name);
+            boolean sessionOk = hasPass && auth.isSessionValid(name, ip);
 
-        // нет пароля -> регистрация, иначе логин
-        if (!hasPass) {
-            needRegister.add(p.getUniqueId());
-            if (bossbars != null) bossbars.startTimer(p, true);
-            promptIfDue(p); // <--- добавь
-        } else {
-            needLogin.add(p.getUniqueId());
-            if (bossbars != null) bossbars.startTimer(p, false);
-            promptIfDue(p); // <--- добавь
-        }
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                // Игрок вышел (или вышел и зашёл заново — там уже свой токен),
+                // либо успел войти через /login, пока шла проверка.
+                if (!pendingCheck.remove(id, token)) return;
+
+                if (sessionOk) {
+                    send(p, ChatColor.GREEN + "Сессия подтверждена — добро пожаловать!");
+                    return;
+                }
+
+                // нет пароля -> регистрация, иначе логин
+                if (!hasPass) {
+                    needRegister.add(id);
+                    if (bossbars != null) bossbars.startTimer(p, true);
+                } else {
+                    needLogin.add(id);
+                    if (bossbars != null) bossbars.startTimer(p, false);
+                }
+                promptIfDue(p);
+            });
+        });
     }
 
     @EventHandler
@@ -77,9 +95,9 @@ public class AuthListener implements Listener {
                 plugin.getFarLandsApi().lastSeen(e.getPlayer().getName());
             }
         }
+        pendingCheck.remove(id);
         needLogin.remove(id);
         needRegister.remove(id);
-        joinIp.remove(id);
         lastPrompt.remove(e.getPlayer().getUniqueId());
     }
 
@@ -167,23 +185,21 @@ public class AuthListener implements Listener {
 
     /* --------- Внешние хуки для UnityCommands --------- */
 
-    /** Вызови это после УСПЕШНОГО логина (когда введён пароль и записана сессия в БД). */
+    /** Вызови это после УСПЕШНОГО логина (когда введён пароль и записана сессия в БД — markSession делает вызывающий, async). Main thread. */
     public void completeLogin(Player p) {
+        pendingCheck.remove(p.getUniqueId());
         needLogin.remove(p.getUniqueId());
         needRegister.remove(p.getUniqueId());
         if (bossbars != null) bossbars.stopTimer(p);
-        String ip = joinIp.get(p.getUniqueId());
-        auth.markSession(p.getName(), ip);
         send(p, ChatColor.GREEN + "Ты вошёл. Приятной игры!");
     }
 
-    /** Вызови это после УСПЕШНОЙ регистрации (когда Password записан в БД). */
+    /** Вызови это после УСПЕШНОЙ регистрации (когда Password и сессия записаны в БД — markSession делает вызывающий, async). Main thread. */
     public void completeRegister(Player p) {
+        pendingCheck.remove(p.getUniqueId());
         needLogin.remove(p.getUniqueId());
         needRegister.remove(p.getUniqueId());
         if (bossbars != null) bossbars.stopTimer(p);
-        String ip = joinIp.get(p.getUniqueId());
-        auth.markSession(p.getName(), ip);
         send(p, ChatColor.GREEN + "Пароль установлен. Ты вошёл!");
     }
 

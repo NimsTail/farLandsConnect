@@ -917,19 +917,22 @@ public class UnityCommands {
             return;
         }
 
-        boolean ok = auth.checkPassword(p.getName(), oldPass.toCharArray());
-        if (!ok) {
-            sender.sendMessage(ChatColor.RED + "Старый пароль неверен.");
-            return;
-        }
-        boolean upd = auth.setNewPassword(p.getName(), newPass.toCharArray());
-        if (!upd) {
-            sender.sendMessage(ChatColor.RED + "Не удалось сохранить новый пароль.");
-            return;
-        }
+        // Две PBKDF2 + UPDATE — в фоне, сообщение — на главном потоке.
+        String name = p.getName();
         String ip = (p.getAddress()!=null) ? p.getAddress().getAddress().getHostAddress() : "unknown";
-        auth.markSession(p.getName(), ip);
-        sender.sendMessage(ChatColor.GREEN + "Пароль изменён.");
+        UnityLauncher ul = UnityLauncher.getInstance();
+        Bukkit.getScheduler().runTaskAsynchronously(ul, () -> {
+            String msg;
+            if (!auth.checkPassword(name, oldPass.toCharArray())) {
+                msg = ChatColor.RED + "Старый пароль неверен.";
+            } else if (!auth.setNewPassword(name, newPass.toCharArray())) {
+                msg = ChatColor.RED + "Не удалось сохранить новый пароль.";
+            } else {
+                auth.markSession(name, ip);
+                msg = ChatColor.GREEN + "Пароль изменён.";
+            }
+            Bukkit.getScheduler().runTask(ul, () -> p.sendMessage(msg));
+        });
     }
 
     /* ===================== Внутренние JSON/SQL утилиты ===================== */
