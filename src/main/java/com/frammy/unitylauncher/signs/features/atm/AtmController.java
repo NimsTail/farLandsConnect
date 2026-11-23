@@ -882,13 +882,14 @@ public final class AtmController {
         // получает amount ЦЕЛИКОМ, отправитель платит gross = amount + комиссия.
         // Обе ноги — одной транзакцией с блокировкой строк (transferMoney), а не
         // абсолютной записью баланса из кэша.
-        double rate = atmFeeRate(p, atmLoc, amount);
-        double fee = round2(amount * rate);
-        double gross = round2(amount + fee);
         String senderName = p.getName();
 
         new BukkitRunnable() {
             @Override public void run() {
+                // комиссия считается off-main, как и раньше (может трогать кэш стран/БД)
+                double rate = atmFeeRate(p, atmLoc, amount);
+                double fee = round2(amount * rate);
+                double gross = round2(amount + fee);
                 String err = UnityCommands.getInstance().transferMoney(senderName, targetName, gross, amount,
                         "Перевод игроку " + targetName + " в банкомате", "Перевод от " + senderName + " в банкомате", true);
 
