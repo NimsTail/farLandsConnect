@@ -106,11 +106,35 @@ public class ZoneRequestPoller {
                 processShopInventorySync(req);
                 return;
             }
+            if ("player_location".equals(req.action())) {
+                processPlayerLocation(req);
+                return;
+            }
             processMutation(req);
         } catch (Exception e) {
             log.warning("[ZoneRequestPoller] processing " + req.id() + " (" + req.action() + ") failed: " + e);
             api.reportZoneRequestResult(req.id(), false, "internal_error", null);
         }
+    }
+
+    /**
+     * "Use my location" in the marketplace (site routes/marketplace/location.ts):
+     * the player's current block coordinates as zonesSnapshot=[{x,y,z}].
+     */
+    private void processPlayerLocation(FarLandsApiClient.PendingZoneRequest req) {
+        org.bukkit.entity.Player p = Bukkit.getPlayerExact(req.username());
+        if (p == null) {
+            api.reportZoneRequestResult(req.id(), false, "player_offline", null);
+            return;
+        }
+        var loc = p.getLocation();
+        JsonObject point = new JsonObject();
+        point.addProperty("x", loc.getBlockX());
+        point.addProperty("y", loc.getBlockY());
+        point.addProperty("z", loc.getBlockZ());
+        JsonArray snapshot = new JsonArray();
+        snapshot.add(point);
+        api.reportZoneRequestResult(req.id(), true, null, null, snapshot);
     }
 
     /**
