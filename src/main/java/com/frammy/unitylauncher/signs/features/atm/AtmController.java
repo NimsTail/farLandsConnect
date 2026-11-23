@@ -810,16 +810,17 @@ public final class AtmController {
 
                     new BukkitRunnable() {
                         @Override public void run() {
-                            double countryMoney = UnityLauncher.getInstance().countryRegistryJdbc.getCountryMoney(myCountry);
-                            if (countryMoney < gross) {
+                            // Проверка и списание — одним условным UPDATE: раньше проверяли
+                            // кэш, списывали fire-and-forget и выдавали наличку в любом случае
+                            // (двойной клик/устаревший кэш/ошибка БД = наличка из воздуха).
+                            if (!UnityLauncher.getInstance().countryRegistryJdbc.withdrawCountryMoneySync(myCountry, gross)) {
+                                double countryMoney = UnityLauncher.getInstance().countryRegistryJdbc.getCountryMoney(myCountry);
                                 new BukkitRunnable(){ @Override public void run(){
-                                    p.sendMessage(ChatColor.RED + "В казне недостаточно средств. Доступно: "
+                                    p.sendMessage(ChatColor.RED + "В казне недостаточно средств (или БД недоступна). Доступно: "
                                             + ChatColor.YELLOW + round2(countryMoney) + ChatColor.RED + " Ⓕ.");
                                 }}.runTask(UnityLauncher.getInstance());
                                 return;
                             }
-
-                            UnityLauncher.getInstance().countryRegistryJdbc.addCountryMoney(myCountry, -gross);
 
                             new BukkitRunnable(){ @Override public void run(){
                                 // Казна платит gross, игрок получает запрошенную сумму целиком.
