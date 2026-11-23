@@ -212,6 +212,40 @@ public record ShopListUpdater(UnityLauncher plugin, ZoneManager zoneManager, Sig
         return variantSig(enchantSlugsOf(stack), colorHexOf(stack));
     }
 
+    /**
+     * Забирает из инвентаря до qty штук варианта (mat + variantSig; null sig —
+     * любой вариант материала) и возвращает реальные снятые стаки. allOrNothing:
+     * не хватает — инвентарь не трогается, возвращается null.
+     */
+    public static List<ItemStack> takeVariant(org.bukkit.inventory.Inventory inv, Material mat, String variantSig,
+                                              int qty, boolean allOrNothing) {
+        List<Integer> slots = new ArrayList<>();
+        int have = 0;
+        for (int i = 0; i < inv.getSize() && have < qty; i++) {
+            ItemStack it = inv.getItem(i);
+            if (it == null || it.getType() != mat) continue;
+            if (variantSig != null && !variantSig.equals(variantSig(it))) continue;
+            slots.add(i);
+            have += it.getAmount();
+        }
+        if (allOrNothing && have < qty) return null;
+
+        List<ItemStack> out = new ArrayList<>();
+        int left = qty;
+        for (int i : slots) {
+            if (left <= 0) break;
+            ItemStack it = inv.getItem(i);
+            int take = Math.min(left, it.getAmount());
+            ItemStack part = it.clone();
+            part.setAmount(take);
+            out.add(part);
+            if (take == it.getAmount()) inv.setItem(i, null);
+            else { it.setAmount(it.getAmount() - take); inv.setItem(i, it); }
+            left -= take;
+        }
+        return out;
+    }
+
     /** #40 — "#RRGGBB" окраски (кожаная броня, конская/волчья броня), null если не крашено. */
     public static String colorHexOf(ItemStack stack) {
         if (!(stack.getItemMeta() instanceof LeatherArmorMeta meta) || !meta.isDyed()) return null;

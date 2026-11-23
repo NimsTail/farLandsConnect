@@ -474,6 +474,11 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         // backend's FRONTIER_REPORT_PERIOD_MS (lib/frontierPressure.ts).
         new com.frammy.unitylauncher.military.FrontierPresenceReporter(this, zoneManager, farLandsApi).start(1200L); // ~60s
 
+        // infra/phantom-delivery-design.md — фантом-доставка заказов маркетплейса (review C1).
+        var phantomDelivery = new com.frammy.unitylauncher.marketplace.PhantomDeliveryController(this, farLandsApi);
+        getServer().getPluginManager().registerEvents(phantomDelivery, this);
+        phantomDelivery.start(20L); // ~1s
+
         // --- server messages (join/quit/advancement phrases) ---
         this.serverMessagesListener = ServerMessagesListener.init(this);
 

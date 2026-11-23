@@ -571,7 +571,9 @@ public class FarLandsApiClient {
     // PhantomDeliveryController) — этот клиент только тянет список активных
     // заказов и шлёт два вебхука по факту смерти торговца/подбора груза.
     public record PhantomTrade(
-            String id, String itemMaterial, int quantity, String buyerUsername,
+            String id, String itemMaterial, String materialKey,
+            List<String> enchantSlugs, String colorHex,
+            int quantity, String buyerUsername,
             double sourceX, double sourceY, double sourceZ,
             double destX, double destY, double destZ,
             long startedAtMs, long etaAtMs
@@ -579,9 +581,10 @@ public class FarLandsApiClient {
 
     /** Blocking GET, тот же паттерн, что fetchActiveWars — вызывается из
      * собственного планировщика PhantomDeliveryController. */
+    /** null — запрос не удался (не путать с "активных заказов нет"). */
     public List<PhantomTrade> fetchPhantomActiveTrades() {
         List<PhantomTrade> out = new ArrayList<>();
-        if (!isEnabled()) return out;
+        if (!isEnabled()) return null;
 
         try {
             HttpRequest request = HttpRequest.newBuilder()
@@ -594,7 +597,7 @@ public class FarLandsApiClient {
             HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() >= 300) {
                 log.warning("[FarLandsApi] GET /plugin/marketplace/phantom-active -> HTTP " + response.statusCode());
-                return out;
+                return null;
             }
 
             JsonObject body = GSON.fromJson(response.body(), JsonObject.class);
@@ -607,9 +610,23 @@ public class FarLandsApiClient {
                 Long startedAtMs = o.get("startedAtMs").isJsonNull() ? null : o.get("startedAtMs").getAsLong();
                 Long etaAtMs = o.get("etaAtMs").isJsonNull() ? null : o.get("etaAtMs").getAsLong();
                 if (startedAtMs == null || etaAtMs == null) continue;
+                List<String> enchantSlugs = new ArrayList<>();
+                String colorHex = null;
+                JsonObject variant = o.has("variant") && o.get("variant").isJsonObject() ? o.getAsJsonObject("variant") : null;
+                if (variant != null) {
+                    if (variant.has("enchantSlugs") && variant.get("enchantSlugs").isJsonArray()) {
+                        for (JsonElement e : variant.getAsJsonArray("enchantSlugs")) enchantSlugs.add(e.getAsString());
+                    }
+                    if (variant.has("colorHex") && !variant.get("colorHex").isJsonNull()) {
+                        colorHex = variant.get("colorHex").getAsString().toUpperCase(java.util.Locale.ROOT);
+                    }
+                }
+                java.util.Collections.sort(enchantSlugs);
                 out.add(new PhantomTrade(
                         o.get("id").getAsString(),
                         o.get("itemMaterial").getAsString(),
+                        o.has("materialKey") && !o.get("materialKey").isJsonNull() ? o.get("materialKey").getAsString() : null,
+                        enchantSlugs, colorHex,
                         o.get("quantity").getAsInt(),
                         o.get("buyerUsername").getAsString(),
                         src.get("x").getAsDouble(), src.get("y").getAsDouble(), src.get("z").getAsDouble(),
@@ -619,18 +636,32 @@ public class FarLandsApiClient {
             }
         } catch (Exception e) {
             log.warning("[FarLandsApi] fetchPhantomActiveTrades failed: " + e);
+            return null;
         }
         return out;
     }
 
-    /** Покупатель сам подобрал груз своего же заказа — не ограбление, обычная досрочная доставка. */
-    public void reportPhantomDelivered(String tradeId) {
-        send("POST", "/plugin/marketplace/" + encode(tradeId) + "/phantom-delivered", new JsonObject());
+    /**
+     * Груз доставлен (или его подобрал сам покупатель). droppedNearby — груз
+     * лежит у точки назначения, а не в сундуке. С повторами: сайт отвечает 409
+     * на повтор, так что дубля не будет.
+     */
+    public void reportPhantomDelivered(String tradeId, boolean droppedNearby) {
+        JsonObject body = new JsonObject();
+        if (droppedNearby) body.addProperty("droppedNearby", true);
+        sendResult("/plugin/marketplace/" + encode(tradeId) + "/phantom-delivered", body);
     }
 
     /** Груз подобрал кто-то другой (или деспавнился неподобранным) — настоящее ограбление. */
     public void reportPhantomRobbed(String tradeId) {
-        send("POST", "/plugin/marketplace/" + encode(tradeId) + "/phantom-robbed", new JsonObject());
+        sendResult("/plugin/marketplace/" + encode(tradeId) + "/phantom-robbed", new JsonObject());
+    }
+
+    /** Курьер застрял: сайт сдвигает ETA по оставшейся прямой дистанции. */
+    public void reportPhantomDelay(String tradeId, double remainingBlocks) {
+        JsonObject body = new JsonObject();
+        body.addProperty("remainingBlocks", remainingBlocks);
+        send("POST", "/plugin/marketplace/" + encode(tradeId) + "/phantom-delay", body);
     }
 
     /**
