@@ -5,10 +5,6 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-    ignore:
-      # Paper API must match the game server's Minecraft version: bump it
-      # together with the server, not on its own.
-      - dependency-name: io.papermc.paper:paper-api
   - package-ecosystem: github-actions
     directory: /
     schedule:
