@@ -49,12 +49,35 @@ import java.sql.*;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class UnityLauncher extends JavaPlugin implements Listener {
 
     // === singleton ===
     private static UnityLauncher instance;
     public static UnityLauncher getInstance() { return instance; }
+
+    /** Async DB work onDisable waits for (bounded) before closing the pool. */
+    private static final AtomicInteger dbInFlight = new AtomicInteger();
+
+    /** Runs body on the current thread, counted as in-flight DB work. */
+    public static void trackDb(Runnable body) {
+        dbInFlight.incrementAndGet();
+        try { body.run(); } finally { dbInFlight.decrementAndGet(); }
+    }
+
+    /** runTaskAsynchronously, counted as in-flight DB work from the moment it is scheduled. */
+    public static void runDbAsync(Runnable body) {
+        dbInFlight.incrementAndGet();
+        try {
+            Bukkit.getScheduler().runTaskAsynchronously(instance, () -> {
+                try { body.run(); } finally { dbInFlight.decrementAndGet(); }
+            });
+        } catch (RuntimeException e) {
+            dbInFlight.decrementAndGet();
+            throw e;
+        }
+    }
 
     // === managers / services ===
     private final Set<UUID> awaitingCorrectCommand = ConcurrentHashMap.newKeySet();
@@ -511,7 +534,18 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             b.saveBlueMapMarkers("shops");
         });
         safeShutdown("DailyEconomyTask", dailyEconomyTask, DailyEconomyTask::stop);
+        safeShutdown("UpgradesManager", upgradesManager, UpgradesManager::stop);
+        // Stop pollers/timers before the pool goes away (Bukkit would only cancel them after onDisable).
+        Bukkit.getScheduler().cancelTasks(this);
+        // cancelTasks doesn't stop async work already running (money batches, daily-deal
+        // settlement, /login...): give it a bounded chance to finish on a live pool.
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (dbInFlight.get() > 0 && System.currentTimeMillis() < deadline) {
+            try { Thread.sleep(50); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+        }
+        if (dbInFlight.get() > 0) getLogger().warning("Closing DB pool with " + dbInFlight.get() + " async DB task(s) still running");
 
+        // Last: everything above may still need the DB.
         if (hikari != null) {
             try {
                 hikari.close();
@@ -520,7 +554,6 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
             hikari = null;
         }
 
-        safeShutdown("UpgradesManager", upgradesManager, UpgradesManager::stop);
         instance = null;
         logInfo("Plugin disabled successfully");
     }
@@ -747,12 +780,11 @@ public final class UnityLauncher extends JavaPlugin implements Listener {
         cfg.setIdleTimeout(15_000);
         cfg.setMaxLifetime(25 * 60_000);
         // БД сейчас удалённая (Hostinger), а сервер хостится локально — сеть/БД
-        // рвёт простаивающие соединения примерно через ~20с. Без keepalive
-        // единственное "запасное" (minimumIdle=1) соединение просто умирает в
-        // пуле и ловится только когда кто-то пытается им воспользоваться —
-        // отсюда "No operations allowed after connection closed". Пингуем
-        // каждые 10с, с запасом до дедлайна в ~20с.
-        cfg.setKeepaliveTime(10_000);
+        // рвёт простаивающие соединения примерно через ~20с. Hikari молча
+        // отключает keepalive < 30с (было 10_000 — не работало вовсе), поэтому
+        // 30с — минимум; должен быть < maxLifetime. Соединение, умершее между
+        // пингами, ловит проверка Hikari при выдаче из пула (isValid).
+        cfg.setKeepaliveTime(30_000);
         cfg.setPoolName("UnityLauncher-DBPool");
         cfg.setDriverClassName("com.mysql.cj.jdbc.Driver");
         return cfg;

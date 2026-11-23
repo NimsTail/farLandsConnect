@@ -15,6 +15,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
+import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -30,6 +31,7 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.UUID;
 
 public class Unity implements CommandExecutor {
 
@@ -85,15 +87,32 @@ public class Unity implements CommandExecutor {
                 return true;
             }
 
-            if (auth.checkPassword(p.getName(), password.toCharArray())) {
-                auth.markSession(p.getName(), ip);
-                auth.updateCacheAfterSession(p.getName(), System.currentTimeMillis(), ip);
-                limiter.reset(key);
-                authListener.completeLogin(p);
-            } else {
-                limiter.registerFailure(key);
-                p.sendMessage(ChatColor.RED + "Неверный пароль!");
+            // Без этого пачка /login до первого ответа обошла бы limiter.
+            UUID id = p.getUniqueId();
+            if (!limiter.tryBeginCheck(id)) {
+                p.sendMessage(ChatColor.YELLOW + "Проверяем пароль, подожди секунду...");
+                return true;
             }
+
+            // PBKDF2 + БД — в фоне; limiter и состояние игрока — только на главном потоке.
+            String name = p.getName();
+            UnityLauncher.runDbAsync(() -> {
+                boolean ok = auth.checkPassword(name, password.toCharArray());
+                if (ok) {
+                    auth.markSession(name, ip);
+                    auth.updateCacheAfterSession(name, System.currentTimeMillis(), ip);
+                }
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    limiter.endCheck(id);
+                    if (ok) {
+                        limiter.reset(key);
+                        if (Bukkit.getPlayer(id) == p) authListener.completeLogin(p); // не вышел/не перезашёл
+                    } else {
+                        limiter.registerFailure(key);
+                        p.sendMessage(ChatColor.RED + "Неверный пароль!");
+                    }
+                });
+            });
             return true;
         }
 
@@ -112,31 +131,40 @@ public class Unity implements CommandExecutor {
             UnityLauncher plugin = UnityLauncher.getInstance();
             var auth         = plugin.getAuthService();
             var authListener = plugin.getAuthListener();
+            var limiter      = plugin.getLoginLimiter();
 
-            // если строка уже есть в Users/пароль уже задан — считаем, что имя занято
-            if (auth.isRegistered(p.getName())) {
-                p.sendMessage(ChatColor.RED + "Ты уже зарегистрирован. Используй /login.");
+            UUID id = p.getUniqueId();
+            if (!limiter.tryBeginCheck(id)) {
+                p.sendMessage(ChatColor.YELLOW + "Проверяем пароль, подожди секунду...");
                 return true;
             }
 
-            String err = com.frammy.unitylauncher.auth.PasswordPolicy.validate(password);
-            if (err != null) {
-                p.sendMessage(ChatColor.RED + err);
-                return true;
-            }
-
-            // СОЗДАЁМ ЗАПИСЬ как в PHP: INSERT Users(Name, Password, CustomizationData, SocialData, GeneralData, StatsData)
-            boolean created = auth.registerNewUser(p.getName(), password.toCharArray(), "0");
-            if (!created) {
-                p.sendMessage(ChatColor.RED + "Ошибка регистрации (возможно имя уже существует). Попробуй позже.");
-                return true;
-            }
-
+            String name = p.getName();
             String ip = (p.getAddress() != null) ? p.getAddress().getAddress().getHostAddress() : "unknown";
-            auth.markSession(p.getName(), ip);
-            auth.updateCacheAfterSession(p.getName(), System.currentTimeMillis(), ip);
+            String err = com.frammy.unitylauncher.auth.PasswordPolicy.validate(password);
 
-            authListener.completeRegister(p);
+            // БД + PBKDF2 — в фоне; сообщения и состояние игрока — на главном потоке.
+            UnityLauncher.runDbAsync(() -> {
+                String fail;
+                // если строка уже есть в Users/пароль уже задан — считаем, что имя занято
+                if (auth.isRegistered(name)) {
+                    fail = ChatColor.RED + "Ты уже зарегистрирован. Используй /login.";
+                } else if (err != null) {
+                    fail = ChatColor.RED + err;
+                // СОЗДАЁМ ЗАПИСЬ как в PHP: INSERT Users(Name, Password, CustomizationData, SocialData, GeneralData, StatsData)
+                } else if (!auth.registerNewUser(name, password.toCharArray(), "0")) {
+                    fail = ChatColor.RED + "Ошибка регистрации (возможно имя уже существует). Попробуй позже.";
+                } else {
+                    fail = null;
+                    auth.markSession(name, ip);
+                    auth.updateCacheAfterSession(name, System.currentTimeMillis(), ip);
+                }
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    limiter.endCheck(id);
+                    if (fail != null) p.sendMessage(fail);
+                    else if (Bukkit.getPlayer(id) == p) authListener.completeRegister(p);
+                });
+            });
             return true;
         }
 
