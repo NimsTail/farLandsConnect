@@ -13,6 +13,7 @@ import org.bukkit.Material;
 import org.bukkit.block.Block;
 import org.bukkit.block.Sign;
 import org.bukkit.enchantments.Enchantment;
+import org.bukkit.inventory.meta.LeatherArmorMeta;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.Damageable;
 import org.bukkit.inventory.meta.EnchantmentStorageMeta;
@@ -150,11 +151,12 @@ public record ShopListUpdater(UnityLauncher plugin, ZoneManager zoneManager, Sig
             Map<VariantKey, VariantAgg> totalsByVariant = new LinkedHashMap<>();
             for (var it : c.getInventory().getContents()) {
                 if (it == null || it.getType().isAir()) continue;
+                if (com.frammy.unitylauncher.marketplace.PickupReservationController.isReserved(it)) continue; // бронь самовывоза — уже продано
 
                 List<String> slugs = enchantSlugsOf(it);
-                String sig = String.join(",", slugs);
-                VariantKey key = new VariantKey(it.getType(), sig);
-                VariantAgg agg = totalsByVariant.computeIfAbsent(key, k -> new VariantAgg(slugs));
+                String color = colorHexOf(it);
+                VariantKey key = new VariantKey(it.getType(), variantSig(slugs, color));
+                VariantAgg agg = totalsByVariant.computeIfAbsent(key, k -> new VariantAgg(slugs, color));
                 agg.count += it.getAmount();
 
                 Double dur = durabilityPctOf(it);
@@ -174,7 +176,8 @@ public record ShopListUpdater(UnityLauncher plugin, ZoneManager zoneManager, Sig
                         agg.count,
                         dealPrice,
                         agg.enchantSlugs,
-                        avgDurability
+                        avgDurability,
+                        agg.colorHex
                 ));
             }
         }
@@ -182,17 +185,73 @@ public record ShopListUpdater(UnityLauncher plugin, ZoneManager zoneManager, Sig
         return allItems;
     }
 
-    private record VariantKey(Material material, String enchantSig) {}
+    private record VariantKey(Material material, String variantSig) {}
 
     private static final class VariantAgg {
         final List<String> enchantSlugs;
+        final String colorHex;
         int count;
         double durabilitySum;
         int durabilityCount;
 
-        VariantAgg(List<String> enchantSlugs) {
+        VariantAgg(List<String> enchantSlugs, String colorHex) {
             this.enchantSlugs = enchantSlugs;
+            this.colorHex = colorHex;
         }
+    }
+
+    /**
+     * Ключ варианта лота — тот же, что у сайта (lib/shopSync.ts: материал +
+     * сигнатура зачарований + colorHex). Прочность в ключ не входит.
+     */
+    public static String variantSig(List<String> enchantSlugs, String colorHex) {
+        String sig = String.join(",", enchantSlugs);
+        return colorHex == null ? sig : sig + "|" + colorHex;
+    }
+
+    public static String variantSig(ItemStack stack) {
+        return variantSig(enchantSlugsOf(stack), colorHexOf(stack));
+    }
+
+    /**
+     * Забирает из инвентаря до qty штук варианта (mat + variantSig; null sig —
+     * любой вариант материала) и возвращает реальные снятые стаки. allOrNothing:
+     * не хватает — инвентарь не трогается, возвращается null.
+     */
+    public static List<ItemStack> takeVariant(org.bukkit.inventory.Inventory inv, Material mat, String variantSig,
+                                              int qty, boolean allOrNothing) {
+        List<Integer> slots = new ArrayList<>();
+        int have = 0;
+        for (int i = 0; i < inv.getSize() && have < qty; i++) {
+            ItemStack it = inv.getItem(i);
+            if (it == null || it.getType() != mat) continue;
+            if (com.frammy.unitylauncher.marketplace.PickupReservationController.isReserved(it)) continue; // бронь самовывоза — не продаём второй раз
+            if (variantSig != null && !variantSig.equals(variantSig(it))) continue;
+            slots.add(i);
+            have += it.getAmount();
+        }
+        if (allOrNothing && have < qty) return null;
+
+        List<ItemStack> out = new ArrayList<>();
+        int left = qty;
+        for (int i : slots) {
+            if (left <= 0) break;
+            ItemStack it = inv.getItem(i);
+            int take = Math.min(left, it.getAmount());
+            ItemStack part = it.clone();
+            part.setAmount(take);
+            out.add(part);
+            if (take == it.getAmount()) inv.setItem(i, null);
+            else { it.setAmount(it.getAmount() - take); inv.setItem(i, it); }
+            left -= take;
+        }
+        return out;
+    }
+
+    /** #40 — "#RRGGBB" окраски (кожаная броня, конская/волчья броня), null если не крашено. */
+    public static String colorHexOf(ItemStack stack) {
+        if (!(stack.getItemMeta() instanceof LeatherArmorMeta meta) || !meta.isDyed()) return null;
+        return String.format(java.util.Locale.ROOT, "#%06X", meta.getColor().asRGB());
     }
 
     /**
@@ -203,7 +262,7 @@ public record ShopListUpdater(UnityLauncher plugin, ZoneManager zoneManager, Sig
      * в обычной ItemStack.getEnchantments() — оба случая нужны, продают и то,
      * и другое. Отсортировано — сигнатура не зависит от порядка перечисления.
      */
-    static List<String> enchantSlugsOf(ItemStack stack) {
+    public static List<String> enchantSlugsOf(ItemStack stack) {
         ItemMeta meta = stack.getItemMeta();
         Map<Enchantment, Integer> map = (meta instanceof EnchantmentStorageMeta esm)
                 ? esm.getStoredEnchants()

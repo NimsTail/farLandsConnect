@@ -22,7 +22,12 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.NamespacedKey;
+import org.bukkit.configuration.file.YamlConfiguration;
+import com.frammy.unitylauncher.signs.features.shop.ShopListUpdater;
 
+import java.io.File;
+import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -31,6 +36,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * infra/phantom-delivery-design.md — Странствующий торговец, реально
@@ -62,8 +68,9 @@ import java.util.concurrent.ConcurrentHashMap;
  *    навсегда. Заменена на честное сообщение игрокам рядом (notifyDelayed).
  * B. Дюп предметов: completeDelivery могла сработать несколько раз подряд
  *    для одного заказа, пока асинхронный вебхук "доставлено" долетал до
- *    сайта — каждый повторный тик клал/ронял товар заново. completedTrades
- *    гарантирует ровно одно исполнение за жизнь процесса.
+ *    сайта — каждый повторный тик клал/ронял товар заново. Состояние груза
+ *    DELIVERED в phantom-cargo.yml гарантирует ровно одну выдачу, в том
+ *    числе после рестарта сервера.
  */
 public final class PhantomDeliveryController implements Listener {
 
@@ -77,26 +84,23 @@ public final class PhantomDeliveryController implements Listener {
     // времени с нуля при каждом обращении, спавн/деспавн — просто следствие.
     private final Map<String, UUID> spawned = new ConcurrentHashMap<>();
 
-    // GH#36 п.3 — товар списывается с реального сундука-источника РОВНО
-    // один раз за всю жизнь заказа (в момент первого физического спавна),
-    // не при каждом респавне сущности (её могут спавнить/деспавнить много
-    // раз за путь — по присутствию игроков рядом). Только в памяти, как и
-    // spawned — на рестарт плагина эффект тот же, что и раньше (заказ
-    // просто продолжит считаться по времени, повторного списания не будет,
-    // т.к. tradeId уже не будет в этом множестве, но это не хуже прежнего
-    // поведения "то ли выдали, то ли нет").
-    private final Set<String> pickedUpFromSource = ConcurrentHashMap.newKeySet();
-
-    // GH#36 (2026-08-28, второй раунд) — БАГ: reportPhantomDelivered — это
-    // fire-and-forget POST (см. FarLandsApiClient.send), сайт помечает заказ
-    // не-IN_TRANSIT не мгновенно. Пока webhook долетает и обрабатывается,
-    // api.fetchPhantomActiveTrades() продолжает возвращать этот же заказ ещё
-    // несколько тиков планировщика (раз в секунду) — без этой защёлки
-    // completeDelivery срабатывала повторно КАЖДУЮ секунду, пока сайт не
-    // догонит, и товар клался в сундук назначения (или ронялся) заново на
-    // каждый такой тик — дюп. Один tradeId — ровно одно исполнение эффектов
-    // (выдача товара + вебхук) за жизнь процесса плагина.
-    private final Set<String> completedTrades = ConcurrentHashMap.newKeySet();
+    // Груз заказа: реальные стаки, снятые с сундука-источника РОВНО один раз
+    // за жизнь заказа, и его состояние. Хранится в phantom-cargo.yml, а не
+    // только в памяти: иначе после рестарта сервера сундук продавца списывался
+    // бы повторно, а уже доставленный груз выдавался бы ещё раз.
+    //   CARRYING  — груз у торговца (виртуально или в руке реальной сущности);
+    //   DROPPED   — торговец убит, груз лежит на земле, судьбу решают
+    //               onItemPickup/onItemDespawn (торговца больше не спавним);
+    //   DELIVERED — груз выдан, отчёт отправлен; ждём, пока сайт уберёт заказ
+    //               из активных (повторно не выдаём — защита от дюпа GH#36 B).
+    private enum CargoState { CARRYING, DROPPED, DELIVERED }
+    private final File cargoFile;
+    private final YamlConfiguration cargo;
+    // Заказы, по которым в этом процессе уже отправлен отчёт "доставлено" /
+    // уже решена судьба выпавшего груза — не шлём повторно на каждый тик/стак.
+    private final Set<String> reported = ConcurrentHashMap.newKeySet();
+    private final Set<String> decided = ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean ticking = new AtomicBoolean();
 
     // GH#36 (2026-08-28, второй раунд) — БАГ первой версии этого же фикса:
     // если сущность не двигалась несколько тиков подряд, код телепортировал
@@ -148,7 +152,7 @@ public final class PhantomDeliveryController implements Listener {
     // Убрать (или выключить DEBUG=false) после того, как причина найдена —
     // на каждый тик планировщика (раз в секунду) на каждый активный заказ,
     // может быть многословно при нескольких одновременных доставках.
-    private static final boolean DEBUG = true;
+    private static final boolean DEBUG = false;
 
     private void debug(String msg) {
         if (DEBUG) plugin.getLogger().info("[PhantomDelivery][DEBUG] " + msg);
@@ -168,6 +172,8 @@ public final class PhantomDeliveryController implements Listener {
         this.api = api;
         this.keyTradeId = new NamespacedKey(plugin, "phantom.tradeId");
         this.keyBuyer = new NamespacedKey(plugin, "phantom.buyer");
+        this.cargoFile = new File(plugin.getDataFolder(), "phantom-cargo.yml");
+        this.cargo = YamlConfiguration.loadConfiguration(cargoFile);
     }
 
     /** Call once from onEnable, после регистрации Listener'а. periodTicks: 20 = 1с. No-op, если API-мост выключен. */
@@ -180,8 +186,15 @@ public final class PhantomDeliveryController implements Listener {
 
     /** Блокирующий HTTP на асинхронном потоке планировщика — сам спавн/деспавн (Bukkit entity API) обязан идти на главном. */
     private void tickAsync() {
+        // Тики не накладываются друг на друга (HTTP-таймаут 10с > периода 1с).
+        if (!ticking.compareAndSet(false, true)) return;
         List<FarLandsApiClient.PhantomTrade> trades = api.fetchPhantomActiveTrades();
-        Bukkit.getScheduler().runTask(plugin, () -> tickSync(trades));
+        // Ошибка запроса — не "активных заказов нет": иначе тик ниже убрал бы
+        // торговцев и забыл состояние груза, а следующий успешный — выдал заново.
+        if (trades == null) { ticking.set(false); return; }
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            try { tickSync(trades); } finally { ticking.set(false); }
+        });
     }
 
     private void tickSync(List<FarLandsApiClient.PhantomTrade> trades) {
@@ -194,6 +207,17 @@ public final class PhantomDeliveryController implements Listener {
         }
         for (FarLandsApiClient.PhantomTrade trade : trades) {
             activeIds.add(trade.id());
+
+            CargoState state = state(trade.id());
+            if (state == CargoState.DROPPED) continue; // груз на земле — ждём подбора/деспавна
+            if (state == CargoState.DELIVERED) {
+                // Отчёт уже ушёл (возможно, до рестарта и не дошёл) — повторяем
+                // один раз за процесс; груз второй раз не выдаём.
+                if (reported.add(trade.id())) {
+                    api.reportPhantomDelivered(trade.id(), cargo.getBoolean(trade.id() + ".droppedNearby"));
+                }
+                continue;
+            }
 
             Location target = computePosition(world, trade);
             // GH#36 (2026-08-28, третий раунд) — БАГ: "рядом ли игрок" всегда
@@ -250,16 +274,14 @@ public final class PhantomDeliveryController implements Listener {
                 } else if (existing instanceof Mob mob) {
                     progressOrCorrect(world, trade, mob, target);
                 }
+            } else if (arrived) {
+                // Маршрут пройден по времени, а торговца рядом нет (никто не
+                // видел его в пути) — выдаём груз без спавна, даже если у
+                // точки назначения сейчас нет игроков: иначе сайт закрыл бы
+                // заказ по ETA, а покупатель ничего бы не получил.
+                debug(shortId(trade.id()) + ": ПРИБЫЛ без сущности, завершаю без спавна");
+                completeDelivery(world, trade, null);
             } else if (isAnyPlayerNear(world, target)) {
-                if (arrived) {
-                    // Никто не видел торговца всю дорогу, а к моменту, когда
-                    // игрок наконец оказался рядом, маршрут уже пройден по
-                    // времени — не спавним истукана специально чтобы тут же
-                    // его убрать, просто сразу завершаем доставку.
-                    debug(shortId(trade.id()) + ": ПРИБЫЛ ещё до первого спавна (никто не видел всю дорогу), завершаю без спавна");
-                    completeDelivery(world, trade, null);
-                    continue;
-                }
                 debug(shortId(trade.id()) + ": СПАВН у " + fmtLoc(target));
                 spawnTrader(world, trade, target);
             }
@@ -279,13 +301,16 @@ public final class PhantomDeliveryController implements Listener {
             stuckTicks.remove(e.getKey());
             return true;
         });
-        // pickedUpFromSource/completedTrades переживают даже заказы,
-        // которых не было в spawned вовсе (доставлены с первого тика,
-        // торговца никто не видел — см. completeDelivery(..., null)) —
-        // чистим по activeIds отдельно, иначе эти записи никогда бы не
-        // убрались.
-        pickedUpFromSource.removeIf(id -> !activeIds.contains(id));
-        completedTrades.removeIf(id -> !activeIds.contains(id));
+        // Состояние груза по заказам, которых больше нет среди активных.
+        boolean changed = false;
+        for (String id : cargo.getKeys(false)) {
+            if (!activeIds.contains(id)) { cargo.set(id, null); changed = true; }
+        }
+        if (changed) saveCargo();
+        reported.retainAll(activeIds);
+        // decided не чистим по activeIds: им пользуются и курьеры v2
+        // (PhantomCourierController), чьих заказов нет в этом списке.
+        // ponytail: растёт на один id за выпавший груз, до рестарта.
     }
 
     /**
@@ -335,6 +360,7 @@ public final class PhantomDeliveryController implements Listener {
             if (stuck >= STUCK_TICKS_LIMIT) {
                 debug(shortId(trade.id()) + ": уведомляю игроков о задержке (телепорта НЕТ, только сообщение)");
                 notifyDelayed(world, idealNow);
+                api.reportPhantomDelay(trade.id(), distToDest);
                 stuckTicks.put(trade.id(), 0); // не спамим — снова покажем через ещё STUCK_TICKS_LIMIT тиков без прогресса
             }
         } else {
@@ -381,89 +407,99 @@ public final class PhantomDeliveryController implements Listener {
     }
 
     /**
-     * GH#36 п.3-4 — реальный обмен товаром вместо "берёт из ниоткуда,
-     * никуда не кладёт": сундук-источник списывается один раз за заказ (при
-     * первом физическом спавне сущности, см. pickedUpFromSource), сундук
-     * назначения пополняется по прибытии. Если в точке назначения контейнера
-     * нет — груз падает на землю тем же тегированным предметом, что и при
-     * ограблении/смерти, и его дальше ведут уже существующие
-     * onItemPickup/onItemDespawn (не дублируем логику начисления денег
-     * здесь). Если контейнер есть — предмет уходит прямо в него, и отчёт
-     * "доставлено" шлётся сразу (тот же вебхук, что и при личном подборе
-     * груза покупателем — с точки зрения сайта это тот же самый исход).
+     * GH#36 п.3-4 — реальный обмен товаром: груз — стаки, снятые с
+     * сундука-источника один раз за заказ (loadCargo), по прибытии кладутся в
+     * сундук назначения. Что не влезло или если сундука нет — падает рядом, и
+     * заказ закрывается как доставленный с droppedNearby=true (review C7).
      */
     private void completeDelivery(World world, FarLandsApiClient.PhantomTrade trade, Entity traderEntity) {
-        if (!completedTrades.add(trade.id())) {
-            debug(shortId(trade.id()) + ": completeDelivery — уже выполнено раньше, пропускаю повтор (сайт ещё не убрал заказ из активных)");
-            // Уже выполнено раньше в этом же процессе — сайт просто ещё не
-            // успел убрать заказ из активных (см. комментарий у
-            // completedTrades выше). Товар второй раз не выдаём, сущность
-            // на всякий случай всё равно убираем, если она ещё жива.
-            if (traderEntity != null) traderEntity.remove();
-            return;
-        }
+        if (traderEntity != null) traderEntity.remove();
+        if (state(trade.id()) == CargoState.DELIVERED) return; // уже выдано (GH#36 B)
 
         Material material = resolveMaterial(trade);
-        int amount = material != null ? clampToStack(trade.quantity(), material) : 0;
-        debug(shortId(trade.id()) + ": completeDelivery — material=" + material + " amount=" + amount);
-
-        // GH#36 п.3 (дыра в первой версии этого же фикса) — если торговца
-        // вообще ни разу не видели за весь путь (игрок оказался рядом уже
-        // ПОСЛЕ etaAtMs), spawnTrader ни разу не вызывался — а значит и
-        // списание с сундука-источника тоже. Гарантируем списание здесь же,
-        // тем же pickedUpFromSource.add(...) — идемпотентно, если spawnTrader
-        // уже списал раньше, второй раз не спишет.
-        if (material != null && pickedUpFromSource.add(trade.id())) {
-            withdrawFromSource(world, trade, material);
-        }
-
-        Location dest = destinationLocation(world, trade);
-        Container container = findContainerNear(dest, DEST_CONTAINER_SEARCH_RADIUS);
-        debug(shortId(trade.id()) + ": назначение=" + fmtLoc(dest) + " контейнер="
-                + (container == null ? "НЕ найден (роняю на землю)" : "найден в " + fmtLoc(container.getInventory().getLocation())));
-
-        if (traderEntity != null) traderEntity.remove();
-
         if (material == null) {
-            // Материал так и не резолвится (тот же случай, что в
-            // spawnTrader) — ничего физически выдать нельзя, просто
-            // закрываем заказ как доставленный, чтобы не завис навечно.
-            api.reportPhantomDelivered(trade.id());
+            // Материал не резолвится — выдать нечего. Закрываем как
+            // ограбление: покупателю возвращаются деньги (а не "доставлено"
+            // без товара), заказ не висит вечно.
+            cargo.set(trade.id() + ".state", CargoState.DROPPED.name());
+            saveCargo();
+            if (decided.add(trade.id())) api.reportPhantomRobbed(trade.id());
             return;
         }
 
+        List<ItemStack> load = loadCargo(world, trade, material);
+        Location dest = destinationLocation(world, trade);
+        Container container = findContainerNear(dest, DEST_CONTAINER_SEARCH_RADIUS);
+        debug(shortId(trade.id()) + ": completeDelivery — " + load.size() + " стак(ов), контейнер "
+                + (container == null ? "НЕ найден" : "в " + fmtLoc(container.getInventory().getLocation())));
+
+        // В сундук назначения; что не влезло (или сундука нет) — рядом на землю,
+        // уже без тегов заказа: заказ закрыт как доставленный с droppedNearby
+        // (контракт сайта, routes/plugin/marketplace.ts phantom-delivered).
+        List<ItemStack> rest = new ArrayList<>();
         if (container != null) {
-            ItemStack cargo = new ItemStack(material, amount);
-            Map<Integer, ItemStack> leftovers = container.getInventory().addItem(cargo);
-            if (!leftovers.isEmpty()) {
-                // Сундук назначения переполнен — остаток роняем рядом,
-                // тегированным предметом (та же обвязка, что ниже), чтобы
-                // хотя бы не терялся молча.
-                for (ItemStack rest : leftovers.values()) {
-                    dropTaggedCargo(world, trade, dest, rest.getAmount(), material);
-                }
-            }
-            api.reportPhantomDelivered(trade.id());
+            rest.addAll(container.getInventory().addItem(clones(load)).values());
         } else {
-            // Контейнера в точке назначения нет — роняем груз на месте с
-            // теми же PDC-тегами, что и раньше при смерти торговца:
-            // подберёт покупатель — сработает onItemPickup (доставлено),
-            // не подберёт никто — onItemDespawn (ограблено/потеряно). Не
-            // шлём вебхук сами — эти два обработчика уже это делают.
-            dropTaggedCargo(world, trade, dest, amount, material);
+            rest.addAll(List.of(clones(load)));
+        }
+        for (ItemStack it : rest) world.dropItem(dest, it);
+        markDelivered(trade.id(), !rest.isEmpty());
+    }
+
+    private void markDelivered(String tradeId, boolean droppedNearby) {
+        cargo.set(tradeId + ".state", CargoState.DELIVERED.name());
+        cargo.set(tradeId + ".items", null);
+        cargo.set(tradeId + ".droppedNearby", droppedNearby);
+        saveCargo();
+        reported.add(tradeId);
+        api.reportPhantomDelivered(tradeId, droppedNearby);
+    }
+
+    // ===== груз =====
+
+    private CargoState state(String tradeId) {
+        String st = cargo.getString(tradeId + ".state");
+        return st == null ? null : CargoState.valueOf(st);
+    }
+
+    /** Груз заказа: при первом обращении снимается с сундука-источника и запоминается на диск. */
+    private List<ItemStack> loadCargo(World world, FarLandsApiClient.PhantomTrade trade, Material material) {
+        if (state(trade.id()) != null) {
+            List<ItemStack> out = new ArrayList<>();
+            for (Object o : cargo.getList(trade.id() + ".items", List.of())) {
+                if (o instanceof ItemStack it) out.add(it);
+            }
+            return out;
+        }
+        List<ItemStack> load = withdrawFromSource(world, trade, material);
+        cargo.set(trade.id() + ".state", CargoState.CARRYING.name());
+        cargo.set(trade.id() + ".items", load);
+        saveCargo();
+        return load;
+    }
+
+    private void saveCargo() {
+        try {
+            cargo.save(cargoFile);
+        } catch (IOException e) {
+            plugin.getLogger().severe("[PhantomDelivery] не удалось сохранить " + cargoFile.getName() + ": " + e);
         }
     }
 
-    private void dropTaggedCargo(World world, FarLandsApiClient.PhantomTrade trade, Location at, int amount, Material material) {
-        if (amount <= 0) return;
-        ItemStack stack = new ItemStack(material, amount);
-        ItemMeta meta = stack.getItemMeta();
+    private static ItemStack[] clones(List<ItemStack> items) {
+        return items.stream().map(ItemStack::clone).toArray(ItemStack[]::new);
+    }
+
+    /** Копия стака с тегами заказа на самом предмете — переживают отделение от торговца. */
+    private ItemStack tagged(ItemStack stack, String tradeId, String buyer) {
+        ItemStack copy = stack.clone();
+        ItemMeta meta = copy.getItemMeta();
         if (meta != null) {
-            meta.getPersistentDataContainer().set(keyTradeId, PersistentDataType.STRING, trade.id());
-            meta.getPersistentDataContainer().set(keyBuyer, PersistentDataType.STRING, trade.buyerUsername());
-            stack.setItemMeta(meta);
+            meta.getPersistentDataContainer().set(keyTradeId, PersistentDataType.STRING, tradeId);
+            if (buyer != null) meta.getPersistentDataContainer().set(keyBuyer, PersistentDataType.STRING, buyer);
+            copy.setItemMeta(meta);
         }
-        world.dropItem(at, stack);
+        return copy;
     }
 
     // GH#36 (2026-08-28, третий раунд) — точка на клике по карте у адреса
@@ -474,7 +510,7 @@ public final class PhantomDeliveryController implements Listener {
     // хотя сундук вот же" — искали строго в упор, без допуска. Небольшой
     // радиус поиска терпим к такой погрешности, не требуя от игрока
     // ювелирной точности координат.
-    private static final int DEST_CONTAINER_SEARCH_RADIUS = 1;
+    static final int DEST_CONTAINER_SEARCH_RADIUS = 1;
 
     private static Container containerAt(Location loc) {
         var state = loc.getBlock().getState();
@@ -482,7 +518,7 @@ public final class PhantomDeliveryController implements Listener {
     }
 
     /** Как containerAt, но терпимо к небольшой погрешности координат — ищет ближайший контейнер в кубе radius вокруг center. */
-    private static Container findContainerNear(Location center, int radius) {
+    static Container findContainerNear(Location center, int radius) {
         Container exact = containerAt(center);
         if (exact != null) return exact;
 
@@ -549,21 +585,22 @@ public final class PhantomDeliveryController implements Listener {
     }
 
     private Material resolveMaterial(FarLandsApiClient.PhantomTrade trade) {
-        try {
-            // itemMaterial приходит с сайта в формате каталога Item.name
-            // ("Blue_Wool", см. backend/src/routes/plugin.ts) — не в
-            // формате Bukkit-enum ("BLUE_WOOL"). Тот же .toUpperCase(),
-            // что уже используется везде в плагине при конвертации ключа
-            // в Material (ZonesEconomyConfig, UpgradeCondition и т.д.).
-            return Material.valueOf(trade.itemMaterial().toUpperCase(Locale.ROOT));
-        } catch (IllegalArgumentException ex) {
-            plugin.getLogger().warning("[PhantomDelivery] неизвестный материал '" + trade.itemMaterial() + "' для заказа " + trade.id());
-            return null;
-        }
+        return resolveMaterial(plugin.getLogger(), trade.itemMaterial(), trade.materialKey(), trade.id());
     }
 
-    private static int clampToStack(int quantity, Material material) {
-        return Math.max(1, Math.min(quantity, material.getMaxStackSize()));
+    /**
+     * materialKey — Bukkit-ключ, если сайт его прислал; иначе имя из каталога
+     * ("Blue Wool" / "Blue_Wool") — для большинства предметов совпадает с
+     * ключом с точностью до пробелов и регистра. null — не резолвится.
+     */
+    static Material resolveMaterial(java.util.logging.Logger log, String itemMaterial, String materialKey, String orderId) {
+        String key = materialKey != null ? materialKey : itemMaterial == null ? "" : itemMaterial.trim().replace(' ', '_');
+        Material m = Material.matchMaterial(key);
+        if (m == null || !m.isItem()) {
+            log.warning("[PhantomDelivery] неизвестный материал '" + key + "' для заказа " + orderId);
+            return null;
+        }
+        return m;
     }
 
     private void spawnTrader(World world, FarLandsApiClient.PhantomTrade trade, Location at) {
@@ -577,9 +614,8 @@ public final class PhantomDeliveryController implements Listener {
         // доставку (деньги с покупателя уже списаны на сайте при покупке),
         // просто предупреждаем в лог — груз всё равно материализуется в
         // руке торговца, как и раньше, это лучше, чем застрявший заказ.
-        if (pickedUpFromSource.add(trade.id())) {
-            withdrawFromSource(world, trade, material);
-        }
+        List<ItemStack> load = loadCargo(world, trade, material);
+        if (load.isEmpty()) return;
 
         WanderingTrader mob = (WanderingTrader) world.spawnEntity(at, org.bukkit.entity.EntityType.WANDERING_TRADER);
         // Не персистентный — если контроллер вдруг перестанет тикать
@@ -593,22 +629,14 @@ public final class PhantomDeliveryController implements Listener {
         // напрямую через Merchant API в обход клика.
         mob.setRecipes(Collections.emptyList());
         mob.getPersistentDataContainer().set(keyTradeId, PersistentDataType.STRING, trade.id());
+        mob.getPersistentDataContainer().set(keyBuyer, PersistentDataType.STRING, trade.buyerUsername());
 
-        int amount = clampToStack(trade.quantity(), material);
-        ItemStack cargo = new ItemStack(material, amount);
-        ItemMeta meta = cargo.getItemMeta();
-        if (meta != null) {
-            // Оба тега — на самом ПРЕДМЕТЕ, не только на сущности: переживают
-            // отделение от торговца (выпадение при смерти), см. onItemPickup.
-            meta.getPersistentDataContainer().set(keyTradeId, PersistentDataType.STRING, trade.id());
-            meta.getPersistentDataContainer().set(keyBuyer, PersistentDataType.STRING, trade.buyerUsername());
-            cargo.setItemMeta(meta);
-        }
-
+        // В руке — только витрина (первый стак груза). Весь груз (может быть
+        // несколько стаков) выпадает в onTraderDeath, из phantom-cargo.yml.
         EntityEquipment equipment = mob.getEquipment();
         if (equipment != null) {
-            equipment.setItemInMainHand(cargo);
-            equipment.setItemInMainHandDropChance(1.0f);
+            equipment.setItemInMainHand(load.get(0).clone());
+            equipment.setItemInMainHandDropChance(0f);
         }
 
         spawned.put(trade.id(), mob.getUniqueId());
@@ -617,32 +645,44 @@ public final class PhantomDeliveryController implements Listener {
         stuckTicks.remove(trade.id());
     }
 
-    private void withdrawFromSource(World world, FarLandsApiClient.PhantomTrade trade, Material material) {
-        Location src = new Location(world, trade.sourceX(), trade.sourceY(), trade.sourceZ());
-        // GH#36 (2026-08-28, третий раунд) — тот же допуск, что и у
-        // findContainerNear для назначения: у ручных лотов источник — тоже
-        // ручной клик по карте + ручной Y, подвержен той же погрешности.
-        // У авто-лотов координаты точные (из ShopChestItem), точное
-        // совпадение находится сразу, цикл поиска не выполняется.
+    /**
+     * Снимает с сундука-источника реальные стаки купленного варианта
+     * (материал + зачарования + цвет, как в лоте сайта) в количестве заказа.
+     * Не хватает (или сундука нет) — недостающее создаётся простыми стаками:
+     * деньги покупателя уже списаны, застрявший заказ хуже. Пишется в лог.
+     */
+    private List<ItemStack> withdrawFromSource(World world, FarLandsApiClient.PhantomTrade trade, Material material) {
+        return withdraw(plugin.getLogger(), new Location(world, trade.sourceX(), trade.sourceY(), trade.sourceZ()),
+                material, ShopListUpdater.variantSig(trade.enchantSlugs(), trade.colorHex()), trade.quantity(), trade.id());
+    }
+
+    /**
+     * Снимает с сундука у src реальные стаки купленного варианта (материал +
+     * зачарования + цвет, как в лоте сайта) в количестве заказа. Не хватает
+     * (или сундука нет) — недостающее создаётся простыми стаками: деньги
+     * покупателя уже списаны, застрявший заказ хуже. Пишется в лог.
+     */
+    static List<ItemStack> withdraw(java.util.logging.Logger log, Location src, Material material, String sig,
+                                    int quantity, String orderId) {
+        // GH#36 (третий раунд) — тот же допуск по координатам, что у назначения.
         Container container = findContainerNear(src, DEST_CONTAINER_SEARCH_RADIUS);
-        if (container == null) {
-            plugin.getLogger().warning("[PhantomDelivery] в точке источника заказа " + trade.id() + " нет сундука — товар материализован без списания.");
-            return;
-        }
+        int need = Math.max(1, quantity);
 
-        int need = clampToStack(trade.quantity(), material);
-        int have = 0;
-        for (ItemStack it : container.getInventory().getContents()) {
-            if (it != null && it.getType() == material) have += it.getAmount();
+        List<ItemStack> load = container == null ? new ArrayList<>()
+                : ShopListUpdater.takeVariant(container.getInventory(), material, sig, need, false);
+        int got = load.stream().mapToInt(ItemStack::getAmount).sum();
+        if (got < need) {
+            log.warning("[PhantomDelivery] заказ " + orderId + ": "
+                    + (container == null ? "в точке источника нет сундука" : "в сундуке-источнике не хватает товара")
+                    + " (" + got + "/" + need + " " + material + (sig.isEmpty() ? "" : " [" + sig + "]")
+                    + ") — недостающее создано без списания.");
+            for (int left = need - got; left > 0; ) {
+                int n = Math.min(left, material.getMaxStackSize());
+                load.add(new ItemStack(material, n));
+                left -= n;
+            }
         }
-        if (have < need) {
-            plugin.getLogger().warning("[PhantomDelivery] в сундуке-источнике заказа " + trade.id()
-                    + " не хватает товара (" + have + "/" + need + ") — списано сколько было, остальное материализовано.");
-        }
-
-        int toRemove = Math.min(need, have);
-        ItemStack template = new ItemStack(material, toRemove);
-        if (toRemove > 0) container.getInventory().removeItem(template);
+        return load;
     }
 
     // ===== события =====
@@ -661,6 +701,15 @@ public final class PhantomDeliveryController implements Listener {
         lastSeenLoc.remove(tradeId);
         lastSeenDistToDest.remove(tradeId);
         stuckTicks.remove(tradeId);
+
+        if (state(tradeId) != CargoState.CARRYING) return;
+        String buyer = event.getEntity().getPersistentDataContainer().get(keyBuyer, PersistentDataType.STRING);
+        for (Object o : cargo.getList(tradeId + ".items", List.of())) {
+            if (o instanceof ItemStack it) event.getDrops().add(tagged(it, tradeId, buyer));
+        }
+        cargo.set(tradeId + ".state", CargoState.DROPPED.name());
+        cargo.set(tradeId + ".items", null);
+        saveCargo();
     }
 
     // GH#36 п.5 — с гружёным торговцем нельзя торговать: открытие его
@@ -683,13 +732,21 @@ public final class PhantomDeliveryController implements Listener {
         if (tradeId == null) return;
 
         String buyer = meta.getPersistentDataContainer().get(keyBuyer, PersistentDataType.STRING);
-        if (buyer != null && buyer.equalsIgnoreCase(player.getName())) {
-            // Покупатель подобрал свой же груз — не ограбление, обычная
-            // досрочная доставка (см. дизайн-документ, раздел про сговор).
-            api.reportPhantomDelivered(tradeId);
-        } else {
-            api.reportPhantomRobbed(tradeId);
+        // Судьбу заказа решает первый подобранный стак (груз может быть из нескольких).
+        if (decided.add(tradeId)) {
+            if (buyer != null && buyer.equalsIgnoreCase(player.getName())) {
+                // Покупатель подобрал свой же груз — не ограбление, обычная
+                // досрочная доставка (см. дизайн-документ, раздел про сговор).
+                api.reportPhantomDelivered(tradeId, false);
+            } else {
+                api.reportPhantomRobbed(tradeId);
+            }
         }
+        // Теги больше не нужны — иначе предмет не складывается с обычными.
+        meta.getPersistentDataContainer().remove(keyTradeId);
+        meta.getPersistentDataContainer().remove(keyBuyer);
+        stack.setItemMeta(meta);
+        event.getItem().setItemStack(stack);
     }
 
     @EventHandler
@@ -701,6 +758,6 @@ public final class PhantomDeliveryController implements Listener {
         if (tradeId == null) return;
         // Никто не подобрал за всё время жизни дропа — товар физически
         // потерян, тот же исход, что и настоящее ограбление.
-        api.reportPhantomRobbed(tradeId);
+        if (decided.add(tradeId)) api.reportPhantomRobbed(tradeId);
     }
 }

@@ -808,6 +808,7 @@ public final class AutoDebitService {
         for (int i = 0; i < inv.getSize() && taken < amount; i++) {
             ItemStack it = inv.getItem(i);
             if (it == null || it.getType() != mat) continue;
+            if (com.frammy.unitylauncher.marketplace.PickupReservationController.isReserved(it)) continue; // бронь самовывоза
             int take = Math.min(it.getAmount(), amount - taken);
             int newAmt = it.getAmount() - take;
             inv.setItem(i, (newAmt <= 0) ? null : withAmount(it, newAmt));
@@ -841,7 +842,7 @@ public final class AutoDebitService {
         if (!(chestLoc.getBlock().getState() instanceof org.bukkit.block.Container c)) return 0;
         int total = 0;
         for (ItemStack it : c.getInventory().getContents()) {
-            if (it != null && it.getType() == material) total += it.getAmount();
+            if (it != null && it.getType() == material && !com.frammy.unitylauncher.marketplace.PickupReservationController.isReserved(it)) total += it.getAmount();
         }
         return total;
     }

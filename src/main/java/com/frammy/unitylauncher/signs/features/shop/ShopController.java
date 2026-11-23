@@ -921,7 +921,7 @@ public final class ShopController {
         final int qty = item.dealQuantity();
         final Location chestLoc = SignStore.keyLoc(item.chestLocation());
         // вариант лота (как в ShopListUpdater): выдаём только его, а не первый стак сундука
-        final String variantSig = item.enchantments() == null ? "" : String.join(",", item.enchantments());
+        final String variantSig = ShopListUpdater.variantSig(item.enchantments(), item.colorHex());
 
         final boolean payWithCash = isCashInHand(p);
         final String saleNote = shopSaleNote(loc, qty, mat, p.getName());
@@ -1187,6 +1187,7 @@ public final class ShopController {
         for (ItemStack it : c.getInventory().getContents()) {
             if (it == null) continue;
             if (it.getType().isAir()) continue;
+            if (com.frammy.unitylauncher.marketplace.PickupReservationController.isReserved(it)) continue;
             return it.getType();
         }
         return null;
@@ -1222,30 +1223,8 @@ public final class ShopController {
 
             Inventory inv = container.getInventory();
 
-            // сначала считаем, хватит ли; только потом меняем инвентарь
-            List<Integer> slots = new ArrayList<>();
-            int have = 0;
-            for (int i = 0; i < inv.getSize() && have < qty; i++) {
-                ItemStack it = inv.getItem(i);
-                if (it == null || it.getType() != mat) continue;
-                if (enchantSig != null && !enchantSig.equals(String.join(",", ShopListUpdater.enchantSlugsOf(it)))) continue;
-                slots.add(i);
-                have += it.getAmount();
-            }
-            if (have < qty) return false;
-
-            List<ItemStack> out = new ArrayList<>();
-            int left = qty;
-            for (int i : slots) {
-                ItemStack it = inv.getItem(i);
-                int take = Math.min(left, it.getAmount());
-                ItemStack part = it.clone();
-                part.setAmount(take);
-                out.add(part);
-                if (take == it.getAmount()) inv.setItem(i, null);
-                else { it.setAmount(it.getAmount() - take); inv.setItem(i, it); }
-                left -= take;
-            }
+            List<ItemStack> out = ShopListUpdater.takeVariant(inv, mat, enchantSig, qty, true);
+            if (out == null) return false;
             safeUpdate(container);
 
             Map<Integer, ItemStack> leftovers = buyer.getInventory().addItem(out.toArray(new ItemStack[0]));

@@ -571,7 +571,9 @@ public class FarLandsApiClient {
     // PhantomDeliveryController) — этот клиент только тянет список активных
     // заказов и шлёт два вебхука по факту смерти торговца/подбора груза.
     public record PhantomTrade(
-            String id, String itemMaterial, int quantity, String buyerUsername,
+            String id, String itemMaterial, String materialKey,
+            List<String> enchantSlugs, String colorHex,
+            int quantity, String buyerUsername,
             double sourceX, double sourceY, double sourceZ,
             double destX, double destY, double destZ,
             long startedAtMs, long etaAtMs
@@ -579,9 +581,10 @@ public class FarLandsApiClient {
 
     /** Blocking GET, тот же паттерн, что fetchActiveWars — вызывается из
      * собственного планировщика PhantomDeliveryController. */
+    /** null — запрос не удался (не путать с "активных заказов нет"). */
     public List<PhantomTrade> fetchPhantomActiveTrades() {
         List<PhantomTrade> out = new ArrayList<>();
-        if (!isEnabled()) return out;
+        if (!isEnabled()) return null;
 
         try {
             HttpRequest request = HttpRequest.newBuilder()
@@ -594,7 +597,7 @@ public class FarLandsApiClient {
             HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() >= 300) {
                 log.warning("[FarLandsApi] GET /plugin/marketplace/phantom-active -> HTTP " + response.statusCode());
-                return out;
+                return null;
             }
 
             JsonObject body = GSON.fromJson(response.body(), JsonObject.class);
@@ -607,9 +610,23 @@ public class FarLandsApiClient {
                 Long startedAtMs = o.get("startedAtMs").isJsonNull() ? null : o.get("startedAtMs").getAsLong();
                 Long etaAtMs = o.get("etaAtMs").isJsonNull() ? null : o.get("etaAtMs").getAsLong();
                 if (startedAtMs == null || etaAtMs == null) continue;
+                List<String> enchantSlugs = new ArrayList<>();
+                String colorHex = null;
+                JsonObject variant = o.has("variant") && o.get("variant").isJsonObject() ? o.getAsJsonObject("variant") : null;
+                if (variant != null) {
+                    if (variant.has("enchantSlugs") && variant.get("enchantSlugs").isJsonArray()) {
+                        for (JsonElement e : variant.getAsJsonArray("enchantSlugs")) enchantSlugs.add(e.getAsString());
+                    }
+                    if (variant.has("colorHex") && !variant.get("colorHex").isJsonNull()) {
+                        colorHex = variant.get("colorHex").getAsString().toUpperCase(java.util.Locale.ROOT);
+                    }
+                }
+                java.util.Collections.sort(enchantSlugs);
                 out.add(new PhantomTrade(
                         o.get("id").getAsString(),
                         o.get("itemMaterial").getAsString(),
+                        o.has("materialKey") && !o.get("materialKey").isJsonNull() ? o.get("materialKey").getAsString() : null,
+                        enchantSlugs, colorHex,
                         o.get("quantity").getAsInt(),
                         o.get("buyerUsername").getAsString(),
                         src.get("x").getAsDouble(), src.get("y").getAsDouble(), src.get("z").getAsDouble(),
@@ -619,18 +636,92 @@ public class FarLandsApiClient {
             }
         } catch (Exception e) {
             log.warning("[FarLandsApi] fetchPhantomActiveTrades failed: " + e);
+            return null;
         }
         return out;
     }
 
-    /** Покупатель сам подобрал груз своего же заказа — не ограбление, обычная досрочная доставка. */
-    public void reportPhantomDelivered(String tradeId) {
-        send("POST", "/plugin/marketplace/" + encode(tradeId) + "/phantom-delivered", new JsonObject());
+    /**
+     * Груз доставлен (или его подобрал сам покупатель). droppedNearby — груз
+     * лежит у точки назначения, а не в сундуке. С повторами: сайт отвечает 409
+     * на повтор, так что дубля не будет.
+     */
+    public void reportPhantomDelivered(String tradeId, boolean droppedNearby) {
+        JsonObject body = new JsonObject();
+        if (droppedNearby) body.addProperty("droppedNearby", true);
+        sendResult("/plugin/marketplace/" + encode(tradeId) + "/phantom-delivered", body);
     }
 
-    /** Груз подобрал кто-то другой (или деспавнился неподобранным) — настоящее ограбление. */
+    /**
+     * Груз подобрал кто-то другой (или деспавнился неподобранным) — настоящее
+     * ограбление, сайт возвращает покупателю стоимость товара. С повторами:
+     * сайт сначала закрывает строку, потом возвращает деньги, так что повтор
+     * получает 409, а не второй возврат (сайт PR fix/plugin-contract — без
+     * него повтор после таймаута мог вернуть деньги дважды).
+     */
     public void reportPhantomRobbed(String tradeId) {
-        send("POST", "/plugin/marketplace/" + encode(tradeId) + "/phantom-robbed", new JsonObject());
+        sendResult("/plugin/marketplace/" + encode(tradeId) + "/phantom-robbed", new JsonObject());
+    }
+
+    /** Курьер застрял: сайт сдвигает ETA по оставшейся прямой дистанции. */
+    public void reportPhantomDelay(String tradeId, double remainingBlocks) {
+        JsonObject body = new JsonObject();
+        body.addProperty("remainingBlocks", remainingBlocks);
+        send("POST", "/plugin/marketplace/" + encode(tradeId) + "/phantom-delay", body);
+    }
+
+    // infra/pickup-reservation-design.md — бронь купленного с самовывозом
+    // товара прямо в сундуке авто-лота (см. PickupReservationController).
+    // material — имя из каталога ("Blue_Wool"), materialKey — Bukkit-ключ,
+    // если сайт его прислал (null — нет).
+    public record PickupReservation(
+            String id, String buyerUsername,
+            int chestX, int chestY, int chestZ,
+            String material, String materialKey,
+            int quantity, long expiresAtMs
+    ) {}
+
+    /** null — запрос не удался (не путать с "броней нет": иначе метки снялись бы). */
+    public List<PickupReservation> fetchPendingPickupReservations() {
+        if (!isEnabled()) return null;
+        List<PickupReservation> out = new ArrayList<>();
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/plugin/marketplace/pickup-reservations/pending"))
+                    .timeout(Duration.ofSeconds(10))
+                    .header("Authorization", "Bearer " + token)
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 300) {
+                log.warning("[FarLandsApi] GET /plugin/marketplace/pickup-reservations/pending -> HTTP " + response.statusCode());
+                return null;
+            }
+
+            JsonObject body = GSON.fromJson(response.body(), JsonObject.class);
+            for (JsonElement el : body.getAsJsonArray("reservations")) {
+                JsonObject o = el.getAsJsonObject();
+                out.add(new PickupReservation(
+                        o.get("id").getAsString(),
+                        o.get("buyerUsername").getAsString(),
+                        o.get("chestX").getAsInt(), o.get("chestY").getAsInt(), o.get("chestZ").getAsInt(),
+                        o.get("material").getAsString(),
+                        o.has("materialKey") && !o.get("materialKey").isJsonNull() ? o.get("materialKey").getAsString() : null,
+                        o.get("quantity").getAsInt(),
+                        o.get("expiresAtMs").getAsLong()
+                ));
+            }
+        } catch (Exception e) {
+            log.warning("[FarLandsApi] fetchPendingPickupReservations failed: " + e);
+            return null;
+        }
+        return out;
+    }
+
+    /** Покупатель забрал бронь. С повторами: повтор получает 409 (финал). */
+    public void reportPickupCollected(String reservationId) {
+        sendResult("/plugin/marketplace/pickup-reservations/" + encode(reservationId) + "/collected", new JsonObject());
     }
 
     /**
@@ -671,7 +762,134 @@ public class FarLandsApiClient {
         } else {
             o.add("durabilityPct", com.google.gson.JsonNull.INSTANCE);
         }
+        if (it.colorHex() != null) o.addProperty("colorHex", it.colorHex());
         return o;
+    }
+
+    // ===== фантом-курьер v2 (infra/phantom-courier-design.md) =====
+
+    public record CourierLine(String tradeId, String itemMaterial, String materialKey,
+                              List<String> enchantSlugs, String colorHex, int quantity,
+                              double srcX, double srcY, double srcZ) {}
+    public record CourierJob(String id, String buyerUsername, double destX, double destY, double destZ,
+                             long createdAtMs, List<CourierLine> lines) {}
+    public record CourierSeller(String sellerUsername, int capacitySlots, int fleetSize, List<CourierJob> jobs) {}
+
+    /** Blocking GET. null — запрос не удался (не путать с пустой очередью). */
+    public List<CourierSeller> fetchCourierJobs() {
+        if (!isEnabled()) return null;
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/plugin/marketplace/phantom-courier/jobs"))
+                    .timeout(Duration.ofSeconds(10))
+                    .header("Authorization", "Bearer " + token)
+                    .GET()
+                    .build();
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 300) {
+                log.warning("[FarLandsApi] GET /plugin/marketplace/phantom-courier/jobs -> HTTP " + response.statusCode());
+                return null;
+            }
+            List<CourierSeller> out = new ArrayList<>();
+            JsonObject body = GSON.fromJson(response.body(), JsonObject.class);
+            for (JsonElement se : body.getAsJsonArray("sellers")) {
+                JsonObject so = se.getAsJsonObject();
+                List<CourierJob> jobs = new ArrayList<>();
+                for (JsonElement je : so.getAsJsonArray("jobs")) {
+                    JsonObject jo = je.getAsJsonObject();
+                    JsonObject dst = jo.has("destination") && jo.get("destination").isJsonObject() ? jo.getAsJsonObject("destination") : null;
+                    if (dst == null) continue;
+                    List<CourierLine> lines = new ArrayList<>();
+                    for (JsonElement le : jo.getAsJsonArray("lines")) {
+                        JsonObject lo = le.getAsJsonObject();
+                        JsonObject src = lo.has("source") && lo.get("source").isJsonObject() ? lo.getAsJsonObject("source") : null;
+                        if (src == null) continue;
+                        List<String> enchantSlugs = new ArrayList<>();
+                        String colorHex = null;
+                        JsonObject variant = lo.has("variant") && lo.get("variant").isJsonObject() ? lo.getAsJsonObject("variant") : null;
+                        if (variant != null) {
+                            if (variant.has("enchantSlugs") && variant.get("enchantSlugs").isJsonArray()) {
+                                for (JsonElement e : variant.getAsJsonArray("enchantSlugs")) enchantSlugs.add(e.getAsString());
+                            }
+                            if (variant.has("colorHex") && !variant.get("colorHex").isJsonNull()) {
+                                colorHex = variant.get("colorHex").getAsString().toUpperCase(java.util.Locale.ROOT);
+                            }
+                        }
+                        java.util.Collections.sort(enchantSlugs);
+                        lines.add(new CourierLine(
+                                lo.get("tradeId").getAsString(),
+                                lo.has("itemMaterial") && !lo.get("itemMaterial").isJsonNull() ? lo.get("itemMaterial").getAsString() : null,
+                                lo.has("materialKey") && !lo.get("materialKey").isJsonNull() ? lo.get("materialKey").getAsString() : null,
+                                enchantSlugs, colorHex, lo.get("quantity").getAsInt(),
+                                src.get("x").getAsDouble(), src.get("y").getAsDouble(), src.get("z").getAsDouble()));
+                    }
+                    jobs.add(new CourierJob(jo.get("id").getAsString(), jo.get("buyerUsername").getAsString(),
+                            dst.get("x").getAsDouble(), dst.get("y").getAsDouble(), dst.get("z").getAsDouble(),
+                            jo.get("createdAtMs").getAsLong(), lines));
+                }
+                out.add(new CourierSeller(so.get("sellerUsername").getAsString(),
+                        so.get("capacitySlots").getAsInt(), so.get("fleetSize").getAsInt(), jobs));
+            }
+            return out;
+        } catch (Exception e) {
+            log.warning("[FarLandsApi] fetchCourierJobs failed: " + e);
+            return null;
+        }
+    }
+
+    /** Информационный счётчик tripsDone. Не идемпотентно — одна попытка, 409 игнорируем. */
+    public void reportCourierTripCompleted(String jobId) {
+        send("POST", "/plugin/marketplace/phantom-courier/jobs/" + encode(jobId) + "/trip-completed", new JsonObject());
+    }
+
+    /** Курьер застрял в текущем заходе (флаг "задерживается" на сайте). Идемпотентно. */
+    public void reportCourierDelayed(String jobId) {
+        send("POST", "/plugin/marketplace/phantom-courier/jobs/" + encode(jobId) + "/delayed", new JsonObject());
+    }
+
+    // ===== чат на карте (routes/plugin/mapChat.ts) =====
+
+    public record MapChatMessage(String id, String authorName, String text) {}
+
+    /** Не идемпотентно (каждый вызов — новая строка), поэтому одна попытка. */
+    public void postMapChatMessage(String username, String text) {
+        JsonObject body = new JsonObject();
+        body.addProperty("username", username);
+        body.addProperty("text", text);
+        send("POST", "/plugin/map-chat/incoming", body);
+    }
+
+    /** Blocking GET; сайт переводит выданные сообщения в processing. */
+    public List<MapChatMessage> fetchPendingMapChat() {
+        List<MapChatMessage> out = new ArrayList<>();
+        if (!isEnabled()) return out;
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/plugin/map-chat/pending"))
+                    .timeout(Duration.ofSeconds(10))
+                    .header("Authorization", "Bearer " + token)
+                    .GET()
+                    .build();
+            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 300) {
+                log.warning("[FarLandsApi] GET /plugin/map-chat/pending -> HTTP " + response.statusCode());
+                return out;
+            }
+            JsonObject body = GSON.fromJson(response.body(), JsonObject.class);
+            for (JsonElement el : body.getAsJsonArray("messages")) {
+                JsonObject o = el.getAsJsonObject();
+                out.add(new MapChatMessage(o.get("id").getAsString(),
+                        o.get("authorName").getAsString(), o.get("text").getAsString()));
+            }
+        } catch (Exception e) {
+            log.warning("[FarLandsApi] fetchPendingMapChat failed: " + e);
+        }
+        return out;
+    }
+
+    /** processing -> delivered; повтор получает 404, так что повторы безопасны. */
+    public void reportMapChatDelivered(String id) {
+        sendResult("/plugin/map-chat/" + encode(id) + "/delivered", new JsonObject());
     }
 
     public record WarPair(String countryA, String countryB) {}
